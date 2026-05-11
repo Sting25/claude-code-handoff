@@ -1,0 +1,4 @@
+.claude/handoff_current.md
+.claude/handoff_backups/
+.claude/settings.local.json
+*.bak.*
