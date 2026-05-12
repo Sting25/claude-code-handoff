@@ -10,7 +10,7 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
-## [unreleased]
+## [0.2.0] — 2026-05-12
 
 ### Added
 - New `UserPromptSubmit` hook (`bin/handoff_ctx_check.sh`) that
