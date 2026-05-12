@@ -72,11 +72,11 @@ nothing gets lost across the restart boundary.
    handoff written to: <path the script printed>
    raw dump written to: <path of the raw-dump file>
 
-   action:  hit Ctrl+D to exit, then run `claude --continue` (resume
-            same project, same conversation context) or just `claude`
-            (fresh session). Either way the next session auto-loads
-            the handoff via the SessionStart hook in
-            ~/.claude/settings.json.
+   action:  hit Ctrl+D to exit, then run `claude` to start a fresh
+            session. The SessionStart hook in ~/.claude/settings.json
+            auto-loads the handoff. Do NOT use `claude --continue` —
+            that resumes this same saturated context, which defeats
+            the purpose of the handoff.
 
    -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-
    ```
