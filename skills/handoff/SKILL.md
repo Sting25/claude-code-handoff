@@ -154,9 +154,9 @@ also assumes this).
 
 ## When to invoke without being asked
 
-The assistant cannot self-measure context % (`/context` is a user-side
-slash command, read-only). So don't trigger on a fabricated percentage
-— trigger on signals you can actually observe.
+The assistant cannot self-measure context % from inside the
+conversation (`/context` is a user-side slash command, read-only).
+Don't fabricate a percentage. Three real triggers:
 
 ### Trigger 1: clean boundary after meaningful work
 
@@ -180,10 +180,31 @@ treat it as an explicit cue. Immediately offer:
 If they confirm, invoke this skill. Don't try to estimate the number
 yourself; the user has the meter, the user is the source of truth.
 
+### Trigger 3: transcript-size system-reminder
+
+The `handoff_ctx_check.sh` `UserPromptSubmit` hook measures the Claude
+Code transcript JSONL each turn and emits a `<system-reminder>` past a
+threshold (default 50% of a 200000-token window; both configurable).
+This is a **real measurement**, not a fabricated %, so it's a
+legitimate signal to act on.
+
+When the reminder lands, surface it to the user as a **passive
+mention** — not a choice, not a question. One line, no question mark,
+no "want me to?". Example:
+
+> Flagging: ~50% of context used — natural /handoff moment if you want
+> to lock in the prose while I'm still sharp.
+
+Then continue answering the user's actual prompt. The hook applies its
+own cooldown (won't re-fire for ~100KB of further transcript growth),
+so if a fresh reminder lands later, surface it again — don't ration
+yourself.
+
 ### What NOT to trigger on
 
 - A fabricated percentage. The assistant does not have access to the
-  number; do not pretend otherwise.
+  number directly; the only real numeric signal is the size from
+  Trigger 3.
 - Mid-task interruption. Always wait for a clean boundary, even if a
   user signal lands mid-track — finish the in-flight edit, then offer.
 - Repeated asks at every tiny boundary. One offer per substantive

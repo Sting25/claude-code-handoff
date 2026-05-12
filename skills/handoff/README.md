@@ -36,11 +36,12 @@ manual copy-paste, no kickoff prompt to remember.
 ~/.claude/
 ├── bin/
 │   ├── write_handoff.sh         # the snapshot script (no Claude required)
-│   └── handoff_turn_append.sh   # Stop-hook: appends each turn to the running raw-dump
+│   ├── handoff_turn_append.sh   # Stop hook: per-turn raw dump + records transcript size
+│   └── handoff_ctx_check.sh     # UserPromptSubmit hook: flags /handoff past threshold
 ├── skills/handoff/
 │   ├── SKILL.md                 # invoked by /handoff
 │   └── README.md                # this file
-├── settings.json                # SessionStart + SessionEnd + Stop hooks
+├── settings.json                # SessionStart + SessionEnd + Stop + UserPromptSubmit hooks
 └── RULES.md                     # self-policing rule (optional)
 ```
 
@@ -53,8 +54,9 @@ permissions. Edits in the repo flow live without re-installing.
 
 Manual install:
 
-1. Drop `bin/write_handoff.sh` and `bin/handoff_turn_append.sh` into
-   `~/.claude/bin/` and `chmod +x` them both.
+1. Drop `bin/write_handoff.sh`, `bin/handoff_turn_append.sh`, and
+   `bin/handoff_ctx_check.sh` into `~/.claude/bin/` and `chmod +x`
+   all three.
 2. Drop `skills/handoff/SKILL.md` into `~/.claude/skills/handoff/`.
 3. Add hooks to `~/.claude/settings.json`:
 
@@ -78,36 +80,52 @@ Manual install:
            "type": "command",
            "command": "bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true"
          }]
+       }],
+       "UserPromptSubmit": [{
+         "hooks": [{
+           "type": "command",
+           "command": "bash $HOME/.claude/bin/handoff_ctx_check.sh 2>/dev/null || true"
+         }]
        }]
      },
      "permissions": {
        "allow": [
          "Bash(bash /home/<you>/.claude/bin/write_handoff.sh)",
-         "Bash(bash /home/<you>/.claude/bin/handoff_turn_append.sh)"
+         "Bash(bash /home/<you>/.claude/bin/handoff_turn_append.sh)",
+         "Bash(bash /home/<you>/.claude/bin/handoff_ctx_check.sh)"
        ]
      }
    }
    ```
 
-   Adjust the permission paths for your username. The `Stop` hook is
-   what makes the raw-dump backup incremental — it fires after every
-   assistant turn and appends to
-   `.claude/handoff_backups/handoff_raw_<session_id>.md`, keeping only
-   the 3 newest such files. This avoids the "context too saturated to
-   write a big dump at the end" failure mode.
+   Adjust the permission paths for your username. Hook roles:
+   - **`Stop`** makes the raw-dump backup incremental — fires after
+     every assistant turn, appends to
+     `.claude/handoff_backups/handoff_raw_<session_id>.md`, prunes to
+     the 3 newest. Also records the byte size of Claude Code's
+     transcript JSONL into `.claude/handoff_backups/.ctx_<session_id>`.
+   - **`UserPromptSubmit`** reads that size file on the next prompt
+     and, past a configurable threshold (default ~50% of a 200k-token
+     window), injects a `<system-reminder>` telling the assistant to
+     flag a `/handoff` moment passively. That's the real measurement
+     — no more relying on heuristics.
 
 4. (Optional) Add the self-policing rule to `~/.claude/RULES.md` so
-   the assistant offers `/handoff` proactively. Note: Claude can't
-   self-measure context %, so the rule triggers on observable signals,
-   not fabricated numbers:
+   the assistant offers `/handoff` proactively. Three real triggers,
+   never a fabricated percentage:
 
-   > **Self-policed handoff: boundary + user-signal, never fabricate %.**
-   > Two triggers: (a) after a clean boundary (commit lands, track
-   > wraps, spec ships), ask "Good handoff moment — want me to run
-   > /handoff, or keep going?"; (b) any time the user mentions context,
-   > meter, percentage, or "getting long," immediately offer to run
-   > /handoff. The user's meter is the source of truth — never estimate
-   > the number yourself.
+   > **Self-policed handoff: boundary + user-signal + size-signal,
+   > never fabricate %.** Three triggers: (a) after a clean boundary
+   > (commit lands, track wraps, spec ships), ask "Good handoff
+   > moment — want me to run /handoff, or keep going?"; (b) any time
+   > the user mentions context, meter, percentage, or "getting long,"
+   > immediately offer to run /handoff; (c) when the
+   > `handoff_ctx_check.sh` UserPromptSubmit hook injects its
+   > `<system-reminder>` (real transcript-size measurement crossed
+   > the threshold), surface it as a one-line passive mention — no
+   > question mark, no "want me to?" — and continue with the user's
+   > prompt. The user's meter is still the source of truth for (a)
+   > and (b); the hook is the only legitimate numeric signal.
 
 5. First time you invoke `/handoff` in a project, the script
    self-bootstraps `.claude/handoff_current.md` into that project's
@@ -116,12 +134,26 @@ Manual install:
 
 ## Use
 
-- **Manual:** type `/handoff` whenever — when a track closes, when
-  your meter is getting tight, before stepping away for the day.
-- **Auto-write on session exit:** the `SessionEnd` hook fires the
-  script silently. Even unplanned exits leave a snapshot.
-- **Auto-load on session start:** the `SessionStart` hook reads the
-  handoff into context. Nothing for you to do.
+The two write paths capture different things:
+
+- **`/handoff` (manual, preferred):** writes the git snapshot AND
+  asks the assistant to append a "Notes from this session" prose
+  block — decisions, open questions, "next session should start with
+  X." This is the only path that captures intent. Practical rule of
+  thumb: invoke at 30-50% context remaining, not at 5% — quality
+  degrades well before the meter runs out, and you want the
+  reflection to happen while the model is still sharp.
+- **`SessionEnd` hook (automatic, safety net):** fires `write_handoff.sh`
+  silently on clean session exit (`/exit`, Ctrl-D, etc.). Captures
+  git state only — the "Notes from this session" block stays as a
+  placeholder because no model is in the loop. Doesn't fire on
+  SIGKILL or a closed terminal; the `Stop` hook's per-turn raw-dump
+  backup covers that case.
+
+The read path is the same for both:
+
+- **Auto-load on session start:** the `SessionStart` hook reads
+  `.claude/handoff_current.md` into context. Nothing for you to do.
 - **Self-policing:** with the optional rule installed, the assistant
   flags context-pressure and offers to run the skill.
 
@@ -151,6 +183,24 @@ export HANDOFF_SUBSTRATE_INFLIGHT_DIRS="rfcs proposals"
 # Skip the auto-add of .claude/handoff_current.md to project .gitignore
 # Default: unset (bootstrap runs once per project)
 export HANDOFF_NO_GITIGNORE_BOOTSTRAP=1
+
+# --- Transcript-size system-reminder hook (handoff_ctx_check.sh) ---
+
+# Total context budget the threshold is calculated against (tokens).
+# Default: 200000 — bump to 1000000 if you run Claude Code on the 1M
+# tier and want the reminder to scale with that window.
+export HANDOFF_CTX_WINDOW_TOKENS=200000
+
+# Percent of the window at which the reminder fires.
+# Default: 50 — fire at 50% used. Drop to 30 for a more conservative
+# nudge, raise to 70 if 50% feels too eager.
+export HANDOFF_CTX_THRESHOLD_PCT=50
+
+# Transcript growth (in KB) required between consecutive reminders.
+# Default: 100 — once the hook has flagged at e.g. 50%, it won't flag
+# again until the transcript has grown another 100KB. Prevents
+# nagging on every turn after the threshold trips.
+export HANDOFF_CTX_COOLDOWN_KB=100
 ```
 
 ### Substrate pattern
@@ -199,9 +249,17 @@ hook command in `settings.json` to drop the `echo` lines.
 
 - **Claude Code can't actually force session restart at a context
   threshold.** No hook event fires on context %, and Claude can't end
-  its own session. The skill + self-policing rule together is the
-  closest practical pattern; the human-in-the-loop step is "you start
-  the next session" (one keystroke).
+  its own session. The skill + self-policing rule + size-signal
+  reminder together is the closest practical pattern; the
+  human-in-the-loop step is "you start the next session" (one keystroke).
+- **The transcript-size signal is an estimate, not the true token
+  count.** The hook converts JSONL bytes to tokens at a fixed 4:1
+  ratio. Real ratio varies (tool-heavy sessions trend lower, plain
+  text trends higher) and the JSONL doesn't perfectly reflect what
+  gets re-fed into the model (compaction etc.). It's a good-enough
+  proxy for a flag, not a precision instrument. Tune
+  `HANDOFF_CTX_THRESHOLD_PCT` if it fires too eagerly or too late for
+  your typical workloads.
 - **`SessionEnd` hook fires on session exit, not on `/clear`.** If
   you `/clear` to recycle context within the same session, no handoff
   is written. Invoke `/handoff` manually before `/clear` if you need

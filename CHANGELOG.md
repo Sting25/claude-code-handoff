@@ -12,6 +12,31 @@ are appended).
 
 ## [unreleased]
 
+### Added
+- New `UserPromptSubmit` hook (`bin/handoff_ctx_check.sh`) that
+  measures the byte size of Claude Code's transcript JSONL and, past
+  a configurable threshold, injects a `<system-reminder>` instructing
+  the assistant to flag a `/handoff` moment passively. Replaces
+  vibes-based "you've been at it a while" heuristics with a real
+  measurement.
+- `bin/handoff_turn_append.sh` (the existing `Stop` hook) now also
+  records transcript byte size to `.claude/handoff_backups/.ctx_<id>`
+  each turn. That file is the input the new UserPromptSubmit hook
+  reads.
+- Three new env vars to tune the size signal:
+  `HANDOFF_CTX_WINDOW_TOKENS` (default 200000),
+  `HANDOFF_CTX_THRESHOLD_PCT` (default 50),
+  `HANDOFF_CTX_COOLDOWN_KB` (default 100).
+- New shipped hook command + permission for the
+  UserPromptSubmit hook. **Re-run `./install.sh` after `git pull`**
+  to patch them into `~/.claude/settings.json`.
+
+### Shipped hook commands (new)
+- `UserPromptSubmit` — `bash $HOME/.claude/bin/handoff_ctx_check.sh 2>/dev/null || true`
+
+### Shipped permissions (new)
+- `Bash(bash $HOME/.claude/bin/handoff_ctx_check.sh)`
+
 ## [0.1.0] — 2026-05-12
 
 First versioned release. Behavior matches the original out-of-tree

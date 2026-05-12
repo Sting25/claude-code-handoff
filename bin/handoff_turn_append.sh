@@ -165,7 +165,15 @@ tmp_cursor="$(mktemp "${cursor_file}.XXXXXX")"
 echo "$curr_count" > "$tmp_cursor"
 mv -f "$tmp_cursor" "$cursor_file"
 
-# --- Prune to 3 newest dump files (and their cursor files) ---
+# --- Record transcript byte size for the ctx-check UserPromptSubmit hook.
+#     Companion script handoff_ctx_check.sh reads this on the next prompt
+#     and decides whether to flag a /handoff moment to the model.
+ctx_file="$backup_dir/.ctx_${session_id}"
+tmp_ctx="$(mktemp "${ctx_file}.XXXXXX")"
+wc -c < "$transcript_path" | tr -d ' ' > "$tmp_ctx"
+mv -f "$tmp_ctx" "$ctx_file"
+
+# --- Prune to 3 newest dump files (plus their cursor / ctx / flag files) ---
 mapfile -t to_delete < <(
   ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | tail -n +4
 )
@@ -176,6 +184,8 @@ for old in "${to_delete[@]:-}"; do
   id="${base#handoff_raw_}"
   rm -f -- "$backup_dir/.handoff_raw_${id}.cursor"
   rm -f -- "$backup_dir/.handoff_raw_${id}.lock"
+  rm -f -- "$backup_dir/.ctx_${id}"
+  rm -f -- "$backup_dir/.ctx_flagged_${id}"
 done
 
 exit 0

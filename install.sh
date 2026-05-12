@@ -42,13 +42,16 @@ done
 ss_cmd='f="$CLAUDE_PROJECT_DIR/.claude/handoff_current.md"; if [ -f "$f" ]; then echo '"'"'## Auto-loaded handoff from previous session'"'"'; echo; cat "$f"; fi'
 se_cmd='bash $HOME/.claude/bin/write_handoff.sh >/dev/null 2>&1 || true'
 st_cmd='bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true'
+up_cmd='bash $HOME/.claude/bin/handoff_ctx_check.sh 2>/dev/null || true'
 perm_write="Bash(bash $HOME/.claude/bin/write_handoff.sh)"
 perm_stop="Bash(bash $HOME/.claude/bin/handoff_turn_append.sh)"
+perm_ctx="Bash(bash $HOME/.claude/bin/handoff_ctx_check.sh)"
 
 # Marker substrings used to detect prior installs (and to remove on uninstall).
 ss_marker="handoff_current.md"
 se_marker="write_handoff.sh"
 st_marker="handoff_turn_append.sh"
+up_marker="handoff_ctx_check.sh"
 
 # -------------------------------------------------------------------- symlinks
 
@@ -88,14 +91,18 @@ unlink_if_ours() {
 install_symlinks() {
   link "$repo_root/bin/write_handoff.sh"        "$claude_home/bin/write_handoff.sh"
   link "$repo_root/bin/handoff_turn_append.sh"  "$claude_home/bin/handoff_turn_append.sh"
+  link "$repo_root/bin/handoff_ctx_check.sh"    "$claude_home/bin/handoff_ctx_check.sh"
   link "$repo_root/skills/handoff/SKILL.md"     "$claude_home/skills/handoff/SKILL.md"
   link "$repo_root/skills/handoff/README.md"    "$claude_home/skills/handoff/README.md"
-  chmod +x "$repo_root/bin/write_handoff.sh" "$repo_root/bin/handoff_turn_append.sh"
+  chmod +x "$repo_root/bin/write_handoff.sh" \
+           "$repo_root/bin/handoff_turn_append.sh" \
+           "$repo_root/bin/handoff_ctx_check.sh"
 }
 
 uninstall_symlinks() {
   unlink_if_ours "$claude_home/bin/write_handoff.sh"        "$repo_root/bin/write_handoff.sh"
   unlink_if_ours "$claude_home/bin/handoff_turn_append.sh"  "$repo_root/bin/handoff_turn_append.sh"
+  unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"    "$repo_root/bin/handoff_ctx_check.sh"
   unlink_if_ours "$claude_home/skills/handoff/SKILL.md"     "$repo_root/skills/handoff/SKILL.md"
   unlink_if_ours "$claude_home/skills/handoff/README.md"    "$repo_root/skills/handoff/README.md"
 }
@@ -109,14 +116,16 @@ Paste this into $settings under "hooks" and "permissions":
 
 {
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "$ss_cmd" }] }],
-    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "$se_cmd" }] }],
-    "Stop":         [{ "hooks": [{ "type": "command", "command": "$st_cmd" }] }]
+    "SessionStart":      [{ "hooks": [{ "type": "command", "command": "$ss_cmd" }] }],
+    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "$se_cmd" }] }],
+    "Stop":              [{ "hooks": [{ "type": "command", "command": "$st_cmd" }] }],
+    "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "$up_cmd" }] }]
   },
   "permissions": {
     "allow": [
       "$perm_write",
-      "$perm_stop"
+      "$perm_stop",
+      "$perm_ctx"
     ]
   }
 }
@@ -199,11 +208,13 @@ patch_settings() {
   fi
   cp "$settings" "$settings.bak.$ts"
   echo "  backup  $settings -> $settings.bak.$ts"
-  maybe_install_hook SessionStart "$ss_marker" "$ss_cmd"
-  maybe_install_hook SessionEnd   "$se_marker" "$se_cmd"
-  maybe_install_hook Stop         "$st_marker" "$st_cmd"
+  maybe_install_hook SessionStart     "$ss_marker" "$ss_cmd"
+  maybe_install_hook SessionEnd       "$se_marker" "$se_cmd"
+  maybe_install_hook Stop             "$st_marker" "$st_cmd"
+  maybe_install_hook UserPromptSubmit "$up_marker" "$up_cmd"
   maybe_install_perm "$perm_write"
   maybe_install_perm "$perm_stop"
+  maybe_install_perm "$perm_ctx"
   # If no change vs backup, drop the redundant backup.
   if cmp -s "$settings" "$settings.bak.$ts"; then
     rm "$settings.bak.$ts"
@@ -219,9 +230,11 @@ unpatch_settings() {
     echo "  - $ss_marker"
     echo "  - $se_marker"
     echo "  - $st_marker"
+    echo "  - $up_marker"
     echo "and the permission entries:"
     echo "  - $perm_write"
     echo "  - $perm_stop"
+    echo "  - $perm_ctx"
     return
   fi
   if [[ ! -f "$settings" ]]; then
@@ -230,11 +243,13 @@ unpatch_settings() {
   fi
   cp "$settings" "$settings.bak.$ts"
   echo "  backup  $settings -> $settings.bak.$ts"
-  maybe_uninstall_hook SessionStart "$ss_marker"
-  maybe_uninstall_hook SessionEnd   "$se_marker"
-  maybe_uninstall_hook Stop         "$st_marker"
+  maybe_uninstall_hook SessionStart     "$ss_marker"
+  maybe_uninstall_hook SessionEnd       "$se_marker"
+  maybe_uninstall_hook Stop             "$st_marker"
+  maybe_uninstall_hook UserPromptSubmit "$up_marker"
   maybe_uninstall_perm "$perm_write"
   maybe_uninstall_perm "$perm_stop"
+  maybe_uninstall_perm "$perm_ctx"
   if cmp -s "$settings" "$settings.bak.$ts"; then
     rm "$settings.bak.$ts"
     echo "  ok      no settings.json changes (backup removed)"

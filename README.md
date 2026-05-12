@@ -5,17 +5,42 @@ session starts blind — you re-explain the project, the in-flight work,
 the decisions you made twenty minutes ago, all from memory. This skill
 makes the next session not blind.
 
-On session exit, a hook writes a snapshot of where you left off
-(`HEAD`, branch, recent commits, working tree, in-flight docs). On the
-next session start in the same repo, another hook loads that snapshot
-into context automatically. No `/compact` to remember, no kickoff
-prompt to write, no copy-paste.
+Two paths, doing different jobs:
 
-You can also invoke `/handoff` manually at any clean boundary — it
-writes the same snapshot, asks the assistant to append a "Notes from
-this session" block (decisions, open questions, "next session should
-start with X"), and prints a loud banner telling you to start a new
-session.
+- **`/handoff` (preferred, you invoke it):** writes the snapshot AND
+  asks the assistant to append a "Notes from this session" prose block
+  — decisions, open questions, "next session should start with X."
+  The prose is the part git can't see. Use this at clean boundaries
+  (commit lands, track wraps) or when your context meter is getting
+  tight. Rule of thumb: invoke at 30-50% remaining, not at 5% —
+  quality degrades well before the meter runs out, and you want the
+  reflection to happen while the model is still sharp.
+- **`SessionEnd` hook (automatic, safety net):** on clean session
+  exit, fires the same snapshot script — but no model is in the loop,
+  so the "Notes from this session" block stays empty. You get git
+  state (HEAD, branch, recent commits, working tree, in-flight docs)
+  and nothing else. It's there so an unplanned exit isn't a total
+  loss, not as a substitute for `/handoff`.
+
+Either way, the next session in the same repo auto-loads the snapshot
+via the `SessionStart` hook. No `/compact` to remember, no kickoff
+prompt to write, no copy-paste. The new session starts with a fresh
+context window — the loaded handoff itself consumes a few KB (more if
+the `Notes from this session` prose is long), which is negligible
+against a 200k or 1M window.
+
+A third hook (`Stop`) does two jobs each assistant turn:
+
+1. Appends the turn to a raw-dump backup under `.claude/handoff_backups/`
+   — the fallback for cases where the process is killed before
+   `SessionEnd` can fire (SIGKILL, terminal closed).
+2. Records the size of Claude Code's transcript JSONL into
+   `.claude/handoff_backups/.ctx_<session_id>`. A fourth hook
+   (`UserPromptSubmit`) reads that file on the next prompt and, if
+   transcript size has crossed ~50% of the configured context window,
+   injects a `<system-reminder>` telling the assistant to flag this
+   passively as a natural `/handoff` moment. That's how the assistant
+   knows to mention it without you having to glance at the meter.
 
 ## What the handoff actually looks like
 
@@ -90,8 +115,9 @@ cd ~/code/claude-code-handoff
 That:
 
 1. Symlinks the bin scripts and skill into `~/.claude/`.
-2. Patches `~/.claude/settings.json` to add three hooks
-   (`SessionStart`, `SessionEnd`, `Stop`) and two permission entries.
+2. Patches `~/.claude/settings.json` to add four hooks
+   (`SessionStart`, `SessionEnd`, `Stop`, `UserPromptSubmit`) and
+   three permission entries.
 
 Settings.json is backed up before any change and the patch is
 idempotent — existing hooks and permissions are detected by marker
@@ -130,7 +156,8 @@ settings.json (backup first). The repo itself is untouched.
 .
 ├── bin/
 │   ├── write_handoff.sh         # snapshot script (used by skill + SessionEnd hook)
-│   └── handoff_turn_append.sh   # Stop-hook: appends each turn to the raw-dump backup
+│   ├── handoff_turn_append.sh   # Stop hook: per-turn dump + records transcript size
+│   └── handoff_ctx_check.sh     # UserPromptSubmit hook: flags /handoff past threshold
 ├── skills/
 │   └── handoff/
 │       ├── SKILL.md             # /handoff slash command spec
