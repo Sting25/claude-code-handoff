@@ -46,9 +46,10 @@ manual copy-paste, no kickoff prompt to remember.
 
 ## Install
 
-Easiest: clone the [handoff repo](https://github.com/Sting25/handoff)
+Easiest: clone the [claude-code-handoff repo](https://github.com/Sting25/claude-code-handoff)
 and run `./install.sh` — it symlinks all the files into `~/.claude/`
-so edits in the repo flow live without re-installing.
+and patches `~/.claude/settings.json` to add the three hooks plus two
+permissions. Edits in the repo flow live without re-installing.
 
 Manual install:
 
