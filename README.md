@@ -42,6 +42,21 @@ A third hook (`Stop`) does two jobs each assistant turn:
    passively as a natural `/handoff` moment. That's how the assistant
    knows to mention it without you having to glance at the meter.
 
+### Retained history
+
+`write_handoff.sh` rotates the previous `handoff_current.md` into
+`<repo>/.claude/handoff_history/` before each new write and keeps the
+last 5 (override via `HANDOFF_HISTORY_KEEP`). Two things use it:
+
+- The `SessionStart` hook auto-includes the most recent history entry
+  if the current handoff was an auto-write (no curated Notes from
+  `/handoff`). Otherwise it just notes that history exists.
+- `/handoff-more` is a slash command for the assistant: when invoked
+  in a fresh session, it reads the retained snapshots into context.
+  Use it when the current handoff is thin, when the user references
+  work from a session further back, or just to give a sibling
+  re-entering the repo deeper continuity than yesterday alone.
+
 ## What the handoff actually looks like
 
 After `/handoff` (or any session exit) you get
@@ -114,10 +129,10 @@ cd ~/code/claude-code-handoff
 
 That:
 
-1. Symlinks the bin scripts and skill into `~/.claude/`.
+1. Symlinks the bin scripts and skills into `~/.claude/`.
 2. Patches `~/.claude/settings.json` to add four hooks
    (`SessionStart`, `SessionEnd`, `Stop`, `UserPromptSubmit`) and
-   three permission entries.
+   four permission entries.
 
 Settings.json is backed up before any change and the patch is
 idempotent — existing hooks and permissions are detected by marker
@@ -155,17 +170,20 @@ settings.json (backup first). The repo itself is untouched.
 ```
 .
 ├── bin/
-│   ├── write_handoff.sh         # snapshot script (used by skill + SessionEnd hook)
-│   ├── handoff_turn_append.sh   # Stop hook: per-turn dump + records transcript size
-│   └── handoff_ctx_check.sh     # UserPromptSubmit hook: flags /handoff past threshold
+│   ├── write_handoff.sh           # snapshot script (used by skill + SessionEnd hook); also rotates history
+│   ├── handoff_session_start.sh   # SessionStart hook: cats current + previous-as-fallback + history pointer
+│   ├── handoff_turn_append.sh     # Stop hook: per-turn dump + records transcript size
+│   └── handoff_ctx_check.sh       # UserPromptSubmit hook: flags /handoff past threshold
 ├── skills/
-│   └── handoff/
-│       ├── SKILL.md             # /handoff slash command spec
-│       └── README.md            # full docs: env vars, customization, limitations
-├── install.sh                   # symlink + settings.json patcher
+│   ├── handoff/
+│   │   ├── SKILL.md               # /handoff slash command spec
+│   │   └── README.md              # full docs: env vars, customization, limitations
+│   └── handoff-more/
+│       └── SKILL.md               # /handoff-more slash command: load older handoffs into context
+├── install.sh                     # symlink + settings.json patcher
 ├── CHANGELOG.md
-├── LICENSE                      # MIT
-└── README.md                    # this file
+├── LICENSE                        # MIT
+└── README.md                      # this file
 ```
 
 For the skill spec, env vars (substrate pattern, in-flight directories,

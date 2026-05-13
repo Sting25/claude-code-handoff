@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # write_handoff.sh — snapshot the current repo's session state into a handoff doc
-# Writes <repo>/.claude/handoff_current.md (overwritten each call)
+# Writes <repo>/.claude/handoff_current.md (overwriting in place, with the
+# previous one rotated to .claude/handoff_history/handoff_<ts>.md first;
+# last HANDOFF_HISTORY_KEEP retained — default 5, override via env).
 # Prints the absolute path of the written handoff to stdout.
 #
 # Triggers: /handoff skill, SessionEnd hook, or manual invocation.
@@ -17,8 +19,12 @@ set -euo pipefail
 #   (e.g. a shared decisions / configs repo). Default: empty (skip substrate).
 # HANDOFF_SUBSTRATE_INFLIGHT_DIRS — space-separated subdirs in the substrate
 #   to scan. Default: empty. Only used if HANDOFF_SUBSTRATE_NAME is set.
+# HANDOFF_HISTORY_KEEP — number of older handoffs to retain under
+#   .claude/handoff_history/ (rotated in before each new write). Default: 5.
+#   Set to 0 to disable retention entirely.
 # HANDOFF_NO_GITIGNORE_BOOTSTRAP — set to 1 to skip the auto-add of
-#   .claude/handoff_current.md into the project .gitignore.
+#   .claude/handoff_current.md and .claude/handoff_history/ into the project
+#   .gitignore.
 #
 # Example for someone with a `_shared/` sibling that holds RFCs + ASKs:
 #   export HANDOFF_INFLIGHT_DIRS="docs design"
@@ -27,6 +33,7 @@ set -euo pipefail
 INFLIGHT_DIRS="${HANDOFF_INFLIGHT_DIRS:-docs}"
 SUBSTRATE_NAME="${HANDOFF_SUBSTRATE_NAME:-}"
 SUBSTRATE_INFLIGHT_DIRS="${HANDOFF_SUBSTRATE_INFLIGHT_DIRS:-}"
+HISTORY_KEEP="${HANDOFF_HISTORY_KEEP:-5}"
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$repo_root" ]]; then
@@ -38,21 +45,61 @@ repo_name="$(basename "$repo_root")"
 handoff_dir="$repo_root/.claude"
 handoff_path="$handoff_dir/handoff_current.md"
 handoff_relpath=".claude/handoff_current.md"
+history_dir="$handoff_dir/handoff_history"
+history_relpath=".claude/handoff_history/"
 mkdir -p "$handoff_dir"
 
-# Self-bootstrap: ensure the handoff is git-ignored so it doesn't pollute
-# `git status` as a regenerated artifact. Skip if HANDOFF_NO_GITIGNORE_BOOTSTRAP=1.
-if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]]; then
-  if ! git -C "$repo_root" check-ignore -q "$handoff_relpath" 2>/dev/null; then
-    gi="$repo_root/.gitignore"
-    # Append a trailing newline first if the file lacks one, to keep formatting clean.
-    if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
-      printf '\n' >> "$gi"
-    fi
-    echo "$handoff_relpath" >> "$gi"
-    echo "write_handoff.sh: added '$handoff_relpath' to $gi (set HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 to skip)" >&2
+# Self-bootstrap: ensure the handoff artifacts are git-ignored so they don't
+# pollute `git status`. Skip if HANDOFF_NO_GITIGNORE_BOOTSTRAP=1.
+bootstrap_gitignore() {
+  local entry="$1"
+  if git -C "$repo_root" check-ignore -q "$entry" 2>/dev/null; then
+    return
   fi
+  local gi="$repo_root/.gitignore"
+  if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
+    printf '\n' >> "$gi"
+  fi
+  echo "$entry" >> "$gi"
+  echo "write_handoff.sh: added '$entry' to $gi (set HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 to skip)" >&2
+}
+if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]]; then
+  bootstrap_gitignore "$handoff_relpath"
+  bootstrap_gitignore "$history_relpath"
 fi
+
+# Rotate the existing handoff (if any) into handoff_history/ before we
+# overwrite it. The rotated file's name reflects its original generation
+# time (file mtime), not the rotation time, so the history reads as a
+# chronological log of session endings. Then prune to HISTORY_KEEP newest.
+rotate_existing_handoff() {
+  [[ -f "$handoff_path" ]] || return 0
+  [[ "$HISTORY_KEEP" -gt 0 ]] || return 0
+  mkdir -p "$history_dir"
+  local ts archived
+  ts="$(date -u -r "$handoff_path" +'%Y-%m-%d_%H%M%S' 2>/dev/null || date -u +'%Y-%m-%d_%H%M%S')"
+  archived="$history_dir/handoff_${ts}.md"
+  # If a file with the same timestamp already exists, append a counter
+  # so we don't clobber. Only happens if two rotations land in the same
+  # second, which is rare but possible.
+  if [[ -e "$archived" ]]; then
+    local n=2
+    while [[ -e "${archived%.md}_${n}.md" ]]; do n=$((n+1)); done
+    archived="${archived%.md}_${n}.md"
+  fi
+  mv "$handoff_path" "$archived"
+}
+prune_history() {
+  [[ -d "$history_dir" ]] || return 0
+  # List newest-first by filename (timestamps are sortable), skip the
+  # first HISTORY_KEEP, delete the rest.
+  ls -1 "$history_dir"/handoff_*.md 2>/dev/null \
+    | sort -r \
+    | tail -n +$((HISTORY_KEEP + 1)) \
+    | xargs -r rm -f
+}
+rotate_existing_handoff
+prune_history
 
 # Optional substrate detection — sibling repo at $HANDOFF_SUBSTRATE_NAME
 substrate_root=""
@@ -108,13 +155,14 @@ list_inflight_md() {
   printf '# %s — session handoff (auto-generated)\n\n' "$repo_name"
   printf '**Generated:** %s\n\n' "$ts_utc"
 
-  cat <<'EOF'
-Auto-written by `~/.claude/bin/write_handoff.sh` (called from the
-`/handoff` skill + the `SessionEnd` hook in `~/.claude/settings.json`).
-Auto-loaded into the next session by the `SessionStart` hook in the
-same settings file. Always lives at `<repo>/.claude/handoff_current.md`;
-overwritten on every handoff. Older snapshots are not retained — use
-git history of this file for archaeology.
+  cat <<EOF
+Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
+\`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).
+Auto-loaded into the next session by the \`SessionStart\` hook in the
+same settings file. Always lives at \`<repo>/.claude/handoff_current.md\`;
+the previous handoff is rotated to \`.claude/handoff_history/\` before
+overwrite (last $HISTORY_KEEP retained; override via \`HANDOFF_HISTORY_KEEP\`).
+Run \`/handoff-more\` in a fresh session to pull older handoffs into context.
 
 EOF
 

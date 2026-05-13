@@ -39,16 +39,22 @@ done
 
 # Canonical hook commands and permissions. Edit these together with
 # CHANGELOG.md if you ever change the snippet shape.
-ss_cmd='f="$CLAUDE_PROJECT_DIR/.claude/handoff_current.md"; if [ -f "$f" ]; then echo '"'"'## Auto-loaded handoff from previous session'"'"'; echo; cat "$f"; fi'
+ss_cmd='bash $HOME/.claude/bin/handoff_session_start.sh 2>/dev/null || true'
 se_cmd='bash $HOME/.claude/bin/write_handoff.sh >/dev/null 2>&1 || true'
 st_cmd='bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true'
 up_cmd='bash $HOME/.claude/bin/handoff_ctx_check.sh 2>/dev/null || true'
 perm_write="Bash(bash $HOME/.claude/bin/write_handoff.sh)"
 perm_stop="Bash(bash $HOME/.claude/bin/handoff_turn_append.sh)"
 perm_ctx="Bash(bash $HOME/.claude/bin/handoff_ctx_check.sh)"
+perm_ss="Bash(bash $HOME/.claude/bin/handoff_session_start.sh)"
 
 # Marker substrings used to detect prior installs (and to remove on uninstall).
-ss_marker="handoff_current.md"
+ss_marker="handoff_session_start.sh"
+# Legacy marker — pre-0.3.0 SessionStart was an inline bash one-liner that
+# cat'd handoff_current.md directly. We detect it (substring unique to the
+# inline form, not present in the new script-call form) and migrate it out
+# on re-install so users don't end up with both hooks firing.
+ss_legacy_marker='if [ -f "$f" ]; then echo'
 se_marker="write_handoff.sh"
 st_marker="handoff_turn_append.sh"
 up_marker="handoff_ctx_check.sh"
@@ -89,22 +95,27 @@ unlink_if_ours() {
 }
 
 install_symlinks() {
-  link "$repo_root/bin/write_handoff.sh"        "$claude_home/bin/write_handoff.sh"
-  link "$repo_root/bin/handoff_turn_append.sh"  "$claude_home/bin/handoff_turn_append.sh"
-  link "$repo_root/bin/handoff_ctx_check.sh"    "$claude_home/bin/handoff_ctx_check.sh"
-  link "$repo_root/skills/handoff/SKILL.md"     "$claude_home/skills/handoff/SKILL.md"
-  link "$repo_root/skills/handoff/README.md"    "$claude_home/skills/handoff/README.md"
+  link "$repo_root/bin/write_handoff.sh"          "$claude_home/bin/write_handoff.sh"
+  link "$repo_root/bin/handoff_turn_append.sh"    "$claude_home/bin/handoff_turn_append.sh"
+  link "$repo_root/bin/handoff_ctx_check.sh"      "$claude_home/bin/handoff_ctx_check.sh"
+  link "$repo_root/bin/handoff_session_start.sh"  "$claude_home/bin/handoff_session_start.sh"
+  link "$repo_root/skills/handoff/SKILL.md"       "$claude_home/skills/handoff/SKILL.md"
+  link "$repo_root/skills/handoff/README.md"      "$claude_home/skills/handoff/README.md"
+  link "$repo_root/skills/handoff-more/SKILL.md"  "$claude_home/skills/handoff-more/SKILL.md"
   chmod +x "$repo_root/bin/write_handoff.sh" \
            "$repo_root/bin/handoff_turn_append.sh" \
-           "$repo_root/bin/handoff_ctx_check.sh"
+           "$repo_root/bin/handoff_ctx_check.sh" \
+           "$repo_root/bin/handoff_session_start.sh"
 }
 
 uninstall_symlinks() {
-  unlink_if_ours "$claude_home/bin/write_handoff.sh"        "$repo_root/bin/write_handoff.sh"
-  unlink_if_ours "$claude_home/bin/handoff_turn_append.sh"  "$repo_root/bin/handoff_turn_append.sh"
-  unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"    "$repo_root/bin/handoff_ctx_check.sh"
-  unlink_if_ours "$claude_home/skills/handoff/SKILL.md"     "$repo_root/skills/handoff/SKILL.md"
-  unlink_if_ours "$claude_home/skills/handoff/README.md"    "$repo_root/skills/handoff/README.md"
+  unlink_if_ours "$claude_home/bin/write_handoff.sh"          "$repo_root/bin/write_handoff.sh"
+  unlink_if_ours "$claude_home/bin/handoff_turn_append.sh"    "$repo_root/bin/handoff_turn_append.sh"
+  unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"      "$repo_root/bin/handoff_ctx_check.sh"
+  unlink_if_ours "$claude_home/bin/handoff_session_start.sh"  "$repo_root/bin/handoff_session_start.sh"
+  unlink_if_ours "$claude_home/skills/handoff/SKILL.md"       "$repo_root/skills/handoff/SKILL.md"
+  unlink_if_ours "$claude_home/skills/handoff/README.md"      "$repo_root/skills/handoff/README.md"
+  unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"  "$repo_root/skills/handoff-more/SKILL.md"
 }
 
 # ------------------------------------------------------------------ settings.json
@@ -125,7 +136,8 @@ Paste this into $settings under "hooks" and "permissions":
     "allow": [
       "$perm_write",
       "$perm_stop",
-      "$perm_ctx"
+      "$perm_ctx",
+      "$perm_ss"
     ]
   }
 }
@@ -195,6 +207,28 @@ maybe_uninstall_perm() {
   echo "  remove  permission: $perm"
 }
 
+# Migration: pre-0.3.0 SessionStart was an inline bash one-liner that
+# cat'd handoff_current.md directly. We detect that legacy form (by a
+# substring unique to the inline command, not present in the new
+# script-call form) and remove it so re-install replaces — not duplicates —
+# the hook.
+migrate_legacy_ss_hook() {
+  local marker="$ss_legacy_marker"
+  if ! jq -e --arg m "$marker" \
+         '(.hooks.SessionStart // []) | any(.. | .command? // "" | contains($m))' \
+         "$settings" >/dev/null 2>&1; then
+    return
+  fi
+  jq --arg m "$marker" '
+    .hooks.SessionStart |= (map(select(
+      (.hooks // []) | all((.command // "") | contains($m) | not)
+    )))
+    | if (.hooks.SessionStart | length) == 0 then del(.hooks.SessionStart) else . end
+  ' "$settings" > "$settings.tmp"
+  mv "$settings.tmp" "$settings"
+  echo "  migrate legacy SessionStart inline command removed (pre-0.3.0)"
+}
+
 patch_settings() {
   if ! command -v jq >/dev/null 2>&1; then
     echo
@@ -208,6 +242,7 @@ patch_settings() {
   fi
   cp "$settings" "$settings.bak.$ts"
   echo "  backup  $settings -> $settings.bak.$ts"
+  migrate_legacy_ss_hook
   maybe_install_hook SessionStart     "$ss_marker" "$ss_cmd"
   maybe_install_hook SessionEnd       "$se_marker" "$se_cmd"
   maybe_install_hook Stop             "$st_marker" "$st_cmd"
@@ -215,6 +250,7 @@ patch_settings() {
   maybe_install_perm "$perm_write"
   maybe_install_perm "$perm_stop"
   maybe_install_perm "$perm_ctx"
+  maybe_install_perm "$perm_ss"
   # If no change vs backup, drop the redundant backup.
   if cmp -s "$settings" "$settings.bak.$ts"; then
     rm "$settings.bak.$ts"
@@ -244,12 +280,14 @@ unpatch_settings() {
   cp "$settings" "$settings.bak.$ts"
   echo "  backup  $settings -> $settings.bak.$ts"
   maybe_uninstall_hook SessionStart     "$ss_marker"
+  maybe_uninstall_hook SessionStart     "$ss_legacy_marker"
   maybe_uninstall_hook SessionEnd       "$se_marker"
   maybe_uninstall_hook Stop             "$st_marker"
   maybe_uninstall_hook UserPromptSubmit "$up_marker"
   maybe_uninstall_perm "$perm_write"
   maybe_uninstall_perm "$perm_stop"
   maybe_uninstall_perm "$perm_ctx"
+  maybe_uninstall_perm "$perm_ss"
   if cmp -s "$settings" "$settings.bak.$ts"; then
     rm "$settings.bak.$ts"
     echo "  ok      no settings.json changes (backup removed)"

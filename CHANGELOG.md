@@ -10,6 +10,50 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.3.0] — 2026-05-13
+
+### Added
+- `write_handoff.sh` now rotates the previous `handoff_current.md`
+  into `<repo>/.claude/handoff_history/handoff_<YYYY-MM-DD_HHMMSS>.md`
+  before each new write, and prunes the directory to the
+  `HANDOFF_HISTORY_KEEP` newest (default 5, env var override). The
+  archived filename reflects the original generation time (file
+  mtime), so the history reads as a chronological log of session
+  endings. Set `HANDOFF_HISTORY_KEEP=0` to disable retention.
+- New `bin/handoff_session_start.sh` script for the `SessionStart`
+  hook. Cats `handoff_current.md` as before, plus two extras:
+  (a) if the current handoff has the unedited placeholder Notes
+  block (auto-write, no `/handoff` was run), it also cats the most
+  recent file from `handoff_history/` so the new session inherits
+  curated prose from one session further back; (b) prints a one-line
+  pointer to `handoff_history/` when entries exist, so the assistant
+  knows it can run `/handoff-more` to pull more. Suppress (a) via
+  `HANDOFF_SS_DISABLE_FALLBACK=1`.
+- New `/handoff-more` skill (`skills/handoff-more/SKILL.md`). When
+  invoked in a fresh session, reads the retained snapshots from
+  `.claude/handoff_history/` into context. Use when the current
+  handoff is thin, when the user references work from a session
+  further back, or to give a dormant sibling re-entering the repo
+  deeper continuity than yesterday alone.
+- `.claude/handoff_history/` is added to the project `.gitignore` by
+  the existing self-bootstrap step on first write.
+
+### Changed
+- `SessionStart` hook command moved from an inline bash one-liner to
+  `bash $HOME/.claude/bin/handoff_session_start.sh`. The installer
+  detects the legacy inline form on re-install and migrates it out
+  before installing the new one — no manual edit needed; just
+  re-run `./install.sh` after `git pull`.
+
+### Shipped hook commands (new / changed)
+- `SessionStart` (CHANGED) — `bash $HOME/.claude/bin/handoff_session_start.sh 2>/dev/null || true`
+
+### Shipped permissions (new)
+- `Bash(bash $HOME/.claude/bin/handoff_session_start.sh)`
+
+**Re-run `./install.sh` after `git pull`** to migrate the legacy
+SessionStart hook and add the new permission.
+
 ## [0.2.0] — 2026-05-12
 
 ### Added

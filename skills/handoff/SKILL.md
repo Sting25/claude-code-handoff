@@ -19,6 +19,12 @@ nothing gets lost across the restart boundary.
    - In-flight (untracked or modified) `.md` docs under the configured
      directories (default: `docs/`; configurable via `HANDOFF_INFLIGHT_DIRS`)
    - The "verify state matches reality" command block
+   - Before overwriting `handoff_current.md`, the script rotates the
+     previous one into `.claude/handoff_history/` and prunes to the
+     last `HANDOFF_HISTORY_KEEP` (default 5). The next session's
+     SessionStart hook auto-includes the most recent history entry
+     if the current handoff has no curated Notes; `/handoff-more` lets
+     a future session pull more of the history into context on demand.
 2. **Append session-specific intent** — the script's snapshot is git-state-only; the conversation knows things git doesn't (decisions made, in-flight ASKs, open questions, "next session should start with X" notes). Append those under the `## Notes from this session` section using Edit.
 3. **Confirm the raw-dump backup exists** — the `Stop` hook (`handoff_turn_append.sh`) has been appending turn-by-turn to `.claude/handoff_backups/handoff_raw_<session_id>.md` throughout the session, so by the time `/handoff` runs the backup is already there. Verify it: `ls -la .claude/handoff_backups/`. If the file is missing (hook not installed, or session started before the hook landed), fall back to writing a one-shot dump per the "Raw dump fallback" section below. The hook prunes to 3 newest automatically — you do not need to.
 4. **Print a loud, unmissable banner** — the ASK must be impossible to miss (the user specifically asked for this; do not soften).

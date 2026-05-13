@@ -35,14 +35,18 @@ manual copy-paste, no kickoff prompt to remember.
 ```
 ~/.claude/
 ├── bin/
-│   ├── write_handoff.sh         # the snapshot script (no Claude required)
-│   ├── handoff_turn_append.sh   # Stop hook: per-turn raw dump + records transcript size
-│   └── handoff_ctx_check.sh     # UserPromptSubmit hook: flags /handoff past threshold
-├── skills/handoff/
-│   ├── SKILL.md                 # invoked by /handoff
-│   └── README.md                # this file
-├── settings.json                # SessionStart + SessionEnd + Stop + UserPromptSubmit hooks
-└── RULES.md                     # self-policing rule (optional)
+│   ├── write_handoff.sh           # the snapshot script (no Claude required); rotates history
+│   ├── handoff_session_start.sh   # SessionStart hook body: cats current handoff + history-pointer
+│   ├── handoff_turn_append.sh     # Stop hook: per-turn raw dump + records transcript size
+│   └── handoff_ctx_check.sh       # UserPromptSubmit hook: flags /handoff past threshold
+├── skills/
+│   ├── handoff/
+│   │   ├── SKILL.md               # invoked by /handoff
+│   │   └── README.md              # this file
+│   └── handoff-more/
+│       └── SKILL.md               # /handoff-more: load older handoffs from history/ into context
+├── settings.json                  # SessionStart + SessionEnd + Stop + UserPromptSubmit hooks
+└── RULES.md                       # self-policing rule (optional)
 ```
 
 ## Install
@@ -66,7 +70,7 @@ Manual install:
        "SessionStart": [{
          "hooks": [{
            "type": "command",
-           "command": "f=\"$CLAUDE_PROJECT_DIR/.claude/handoff_current.md\"; if [ -f \"$f\" ]; then echo '## Auto-loaded handoff from previous session'; echo; cat \"$f\"; fi"
+           "command": "bash $HOME/.claude/bin/handoff_session_start.sh 2>/dev/null || true"
          }]
        }],
        "SessionEnd": [{
@@ -92,13 +96,20 @@ Manual install:
        "allow": [
          "Bash(bash /home/<you>/.claude/bin/write_handoff.sh)",
          "Bash(bash /home/<you>/.claude/bin/handoff_turn_append.sh)",
-         "Bash(bash /home/<you>/.claude/bin/handoff_ctx_check.sh)"
+         "Bash(bash /home/<you>/.claude/bin/handoff_ctx_check.sh)",
+         "Bash(bash /home/<you>/.claude/bin/handoff_session_start.sh)"
        ]
      }
    }
    ```
 
    Adjust the permission paths for your username. Hook roles:
+   - **`SessionStart`** runs `handoff_session_start.sh`, which cats
+     `.claude/handoff_current.md` and — if it has the unedited Notes
+     placeholder (auto-write, no /handoff was run) — also cats the
+     most-recent file from `.claude/handoff_history/` so the new
+     session has curated prose from the session before that. Adds a
+     one-line pointer to the history dir when entries exist.
    - **`Stop`** makes the raw-dump backup incremental — fires after
      every assistant turn, appends to
      `.claude/handoff_backups/handoff_raw_<session_id>.md`, prunes to
@@ -180,9 +191,24 @@ export HANDOFF_SUBSTRATE_NAME="_shared"
 # Default: empty
 export HANDOFF_SUBSTRATE_INFLIGHT_DIRS="rfcs proposals"
 
-# Skip the auto-add of .claude/handoff_current.md to project .gitignore
+# Skip the auto-add of .claude/handoff_current.md and
+# .claude/handoff_history/ to project .gitignore.
 # Default: unset (bootstrap runs once per project)
 export HANDOFF_NO_GITIGNORE_BOOTSTRAP=1
+
+# Number of older handoffs to retain in .claude/handoff_history/.
+# Each /handoff or SessionEnd auto-write rotates the previous
+# handoff_current.md into the history dir, then prunes to the newest N.
+# Default: 5. Set to 0 to disable retention (overwrite-in-place like
+# pre-0.3.0). Each handoff is a few KB, so raising this further is
+# cheap if you want a sibling re-entering the repo weeks later to be
+# able to read back deeper than the last few sessions.
+export HANDOFF_HISTORY_KEEP=5
+
+# Disable the SessionStart auto-include of the most-recent history
+# entry when handoff_current.md has placeholder-only Notes.
+# Default: unset (fallback enabled).
+export HANDOFF_SS_DISABLE_FALLBACK=1
 
 # --- Transcript-size system-reminder hook (handoff_ctx_check.sh) ---
 
