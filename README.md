@@ -5,16 +5,23 @@ session starts blind — you re-explain the project, the in-flight work,
 the decisions you made twenty minutes ago, all from memory. This skill
 makes the next session not blind.
 
-Two paths, doing different jobs:
+Three paths, doing different jobs:
 
-- **`/handoff` (preferred, you invoke it):** writes the snapshot AND
-  asks the assistant to append a "Notes from this session" prose block
-  — decisions, open questions, "next session should start with X."
-  The prose is the part git can't see. Use this at clean boundaries
-  (commit lands, track wraps) or when your context meter is getting
-  tight. Rule of thumb: invoke at 30-50% remaining, not at 5% —
-  quality degrades well before the meter runs out, and you want the
-  reflection to happen while the model is still sharp.
+- **`/handoff` (preferred, you invoke it at session end):** writes
+  the snapshot AND asks the assistant to append a "Notes from this
+  session" prose block — decisions, open questions, "next session
+  should start with X." The prose is the part git can't see. Use
+  this at clean boundaries (commit lands, track wraps) or when your
+  context meter is getting tight. Rule of thumb: invoke at 30-50%
+  remaining, not at 5% — quality degrades well before the meter runs
+  out, and you want the reflection to happen while the model is
+  still sharp.
+- **`/handoff-more` (you invoke it in a fresh session):** pulls
+  *older* handoffs into the new session's context, beyond the single
+  most-recent one that auto-loads. Use it when the loaded handoff is
+  thin, when you reference work from a session further back than
+  yesterday, or to give a sibling re-entering the repo continuity
+  deeper than the last session alone.
 - **`SessionEnd` hook (automatic, safety net):** on clean session
   exit, fires the same snapshot script — but no model is in the loop,
   so the "Notes from this session" block stays empty. You get git
@@ -22,12 +29,12 @@ Two paths, doing different jobs:
   and nothing else. It's there so an unplanned exit isn't a total
   loss, not as a substitute for `/handoff`.
 
-Either way, the next session in the same repo auto-loads the snapshot
-via the `SessionStart` hook. No `/compact` to remember, no kickoff
-prompt to write, no copy-paste. The new session starts with a fresh
-context window — the loaded handoff itself consumes a few KB (more if
-the `Notes from this session` prose is long), which is negligible
-against a 200k or 1M window.
+The next session in the same repo auto-loads the latest snapshot via
+the `SessionStart` hook. No `/compact` to remember, no kickoff prompt
+to write, no copy-paste. The new session starts with a fresh context
+window — the loaded handoff itself consumes a few KB (more if the
+`Notes from this session` prose is long), which is negligible against
+a 200k or 1M window.
 
 A third hook (`Stop`) does two jobs each assistant turn:
 
@@ -42,20 +49,39 @@ A third hook (`Stop`) does two jobs each assistant turn:
    passively as a natural `/handoff` moment. That's how the assistant
    knows to mention it without you having to glance at the meter.
 
-### Retained history
+### Where the handoff files live
 
-`write_handoff.sh` rotates the previous `handoff_current.md` into
-`<repo>/.claude/handoff_history/` before each new write and keeps the
-last 5 (override via `HANDOFF_HISTORY_KEEP`). Two things use it:
+Only the latest snapshot is named `handoff_current.md`. Each new
+write rotates the previous one into `<repo>/.claude/handoff_history/`,
+filename stamped with the snapshot's own timestamp. The last 5 are
+kept (override via `HANDOFF_HISTORY_KEEP=N`, or `0` to disable
+retention); older entries are pruned. So the on-disk layout looks
+like:
+
+```
+<repo>/.claude/
+├── handoff_current.md                       # the latest snapshot (always)
+└── handoff_history/                         # rotated older snapshots
+    ├── handoff_2026-05-13_174853.md         # yesterday's
+    ├── handoff_2026-05-12_194751.md         # two sessions ago
+    ├── handoff_2026-05-11_103022.md
+    ├── handoff_2026-05-10_215800.md
+    └── handoff_2026-05-09_142105.md
+```
+
+Two consumers read this directory:
 
 - The `SessionStart` hook auto-includes the most recent history entry
-  if the current handoff was an auto-write (no curated Notes from
-  `/handoff`). Otherwise it just notes that history exists.
-- `/handoff-more` is a slash command for the assistant: when invoked
-  in a fresh session, it reads the retained snapshots into context.
-  Use it when the current handoff is thin, when the user references
-  work from a session further back, or just to give a sibling
-  re-entering the repo deeper continuity than yesterday alone.
+  *if* `handoff_current.md` was an auto-write (no curated Notes from
+  `/handoff`) — so an unplanned exit doesn't strand the next session
+  with only mechanical git state. When current already has curated
+  Notes, the hook just notes that history exists.
+- `/handoff-more` reads up to N retained snapshots into context on
+  demand, so the assistant can see further back than just yesterday.
+
+The retention dir is bootstrapped into the repo's `.gitignore` on
+first write — handoffs are intentionally per-developer, not
+checked-in artifacts.
 
 ## What the handoff actually looks like
 
