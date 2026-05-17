@@ -41,13 +41,17 @@ A third hook (`Stop`) does two jobs each assistant turn:
 1. Appends the turn to a raw-dump backup under `.claude/handoff_backups/`
    — the fallback for cases where the process is killed before
    `SessionEnd` can fire (SIGKILL, terminal closed).
-2. Records the size of Claude Code's transcript JSONL into
-   `.claude/handoff_backups/.ctx_<session_id>`. A fourth hook
-   (`UserPromptSubmit`) reads that file on the next prompt and, if
-   transcript size has crossed ~50% of the configured context window,
-   injects a `<system-reminder>` telling the assistant to flag this
-   passively as a natural `/handoff` moment. That's how the assistant
-   knows to mention it without you having to glance at the meter.
+2. Records context measurements into `.claude/handoff_backups/`: the
+   real token count from the latest assistant turn's `usage` (same
+   number `/context` shows) into `.ctx_tokens_<session_id>`, and the
+   transcript JSONL byte size into `.ctx_<session_id>` as a fallback.
+   A fourth hook (`UserPromptSubmit`) reads those on the next prompt
+   and, if usage has crossed ~50% of the configured context window
+   (auto-detected as 1,000,000 tokens if `~/.claude.json` shows a
+   `[1m]` model active for this project, else 200,000), injects a
+   `<system-reminder>` telling the assistant to flag this passively as
+   a natural `/handoff` moment. That's how the assistant knows to
+   mention it without you having to glance at the meter.
 
 ### Where the handoff files live
 

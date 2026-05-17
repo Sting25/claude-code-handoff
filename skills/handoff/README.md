@@ -113,13 +113,18 @@ Manual install:
    - **`Stop`** makes the raw-dump backup incremental — fires after
      every assistant turn, appends to
      `.claude/handoff_backups/handoff_raw_<session_id>.md`, prunes to
-     the 3 newest. Also records the byte size of Claude Code's
-     transcript JSONL into `.claude/handoff_backups/.ctx_<session_id>`.
-   - **`UserPromptSubmit`** reads that size file on the next prompt
-     and, past a configurable threshold (default ~50% of a 200k-token
-     window), injects a `<system-reminder>` telling the assistant to
-     flag a `/handoff` moment passively. That's the real measurement
-     — no more relying on heuristics.
+     the 3 newest. Also records two context-usage measurements: the
+     real token count from the latest assistant turn's `usage` block
+     into `.ctx_tokens_<session_id>` (sum of input + cache_read +
+     cache_creation, same number `/context` reports), and the
+     transcript JSONL byte size into `.ctx_<session_id>` as a fallback.
+   - **`UserPromptSubmit`** reads those files on the next prompt and,
+     past a configurable threshold (default 50% of the context
+     window — auto-detected as 1M tokens if `~/.claude.json` shows a
+     `[1m]` model active for this project, else 200k), injects a
+     `<system-reminder>` telling the assistant to flag a `/handoff`
+     moment passively. The signal is the actual token count, not an
+     estimate — same precision as `/context`.
 
 4. (Optional) Add the self-policing rule to `~/.claude/RULES.md` so
    the assistant offers `/handoff` proactively. Three real triggers,
@@ -210,11 +215,14 @@ export HANDOFF_HISTORY_KEEP=5
 # Default: unset (fallback enabled).
 export HANDOFF_SS_DISABLE_FALLBACK=1
 
-# --- Transcript-size system-reminder hook (handoff_ctx_check.sh) ---
+# --- Context-usage system-reminder hook (handoff_ctx_check.sh) ---
 
 # Total context budget the threshold is calculated against (tokens).
-# Default: 200000 — bump to 1000000 if you run Claude Code on the 1M
-# tier and want the reminder to scale with that window.
+# Default: auto-detected from ~/.claude.json — if this project's
+# lastModelUsage records a model with a `[1m]` suffix, defaults to
+# 1000000; otherwise 200000. Set explicitly to override the auto-
+# detection (e.g. to force 1M even before the project has been used
+# with a [1m] model, or to force 200k while testing on a 1M tier).
 export HANDOFF_CTX_WINDOW_TOKENS=200000
 
 # Percent of the window at which the reminder fires.
@@ -223,9 +231,10 @@ export HANDOFF_CTX_WINDOW_TOKENS=200000
 export HANDOFF_CTX_THRESHOLD_PCT=50
 
 # Transcript growth (in KB) required between consecutive reminders.
-# Default: 100 — once the hook has flagged at e.g. 50%, it won't flag
-# again until the transcript has grown another 100KB. Prevents
-# nagging on every turn after the threshold trips.
+# Default: 100 — once the hook has flagged, it won't flag again until
+# the transcript JSONL has grown another 100KB. Prevents nagging on
+# every turn after the threshold trips. Only applies to re-flags;
+# the first crossing always fires.
 export HANDOFF_CTX_COOLDOWN_KB=100
 ```
 
@@ -278,14 +287,15 @@ hook command in `settings.json` to drop the `echo` lines.
   its own session. The skill + self-policing rule + size-signal
   reminder together is the closest practical pattern; the
   human-in-the-loop step is "you start the next session" (one keystroke).
-- **The transcript-size signal is an estimate, not the true token
-  count.** The hook converts JSONL bytes to tokens at a fixed 4:1
-  ratio. Real ratio varies (tool-heavy sessions trend lower, plain
-  text trends higher) and the JSONL doesn't perfectly reflect what
-  gets re-fed into the model (compaction etc.). It's a good-enough
-  proxy for a flag, not a precision instrument. Tune
-  `HANDOFF_CTX_THRESHOLD_PCT` if it fires too eagerly or too late for
-  your typical workloads.
+- **Context-usage signal is the real token count, not an estimate.**
+  Since 0.4.0, the hook reads `usage.input_tokens +
+  cache_read_input_tokens + cache_creation_input_tokens` from the
+  latest assistant turn — same number Claude Code's `/context`
+  shows. The byte-size estimate is kept only as a fallback for the
+  first prompt of a fresh session before any Stop hook has fired,
+  or for older installs that haven't pulled the updated turn-append
+  script. Tune `HANDOFF_CTX_THRESHOLD_PCT` if 50% fires too eagerly
+  or too late for your workloads.
 - **`SessionEnd` hook fires on session exit, not on `/clear`.** If
   you `/clear` to recycle context within the same session, no handoff
   is written. Invoke `/handoff` manually before `/clear` if you need

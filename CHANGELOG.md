@@ -10,6 +10,41 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.4.0] — 2026-05-17
+
+### Changed
+- `handoff_ctx_check.sh` now uses the **real** token count from the
+  latest assistant turn's `usage` block (input + cache_read +
+  cache_creation) instead of a 4-bytes-per-token estimate against
+  the transcript JSONL. With heavy prompt caching the byte estimate
+  understates real context use by a wide margin — most visibly on
+  the 1M tier, where the threshold could fail to fire even at
+  genuinely-saturated context. Token count is the same number
+  Claude Code's `/context` reports.
+- `handoff_turn_append.sh` writes the per-turn token sum to a new
+  sibling file `.claude/handoff_backups/.ctx_tokens_<session_id>`.
+  The byte-size file `.ctx_<session_id>` is still written as a
+  fallback signal (used when the tokens file isn't yet populated —
+  first prompt of a fresh session, or an older install).
+- `handoff_ctx_check.sh` auto-detects the context window from
+  `~/.claude.json`. If this project's `lastModelUsage` records any
+  model with a `[1m]` suffix, the default window becomes
+  `1000000` tokens; otherwise `200000`. Setting
+  `HANDOFF_CTX_WINDOW_TOKENS` explicitly still overrides.
+- Emitted `<system-reminder>` reads
+  `"Context at ~N tokens (~P% of a W-token window)"` — the legacy
+  `"Transcript at NKB"` wording is gone since bytes are no longer
+  the primary signal.
+- Cooldown gate (`HANDOFF_CTX_COOLDOWN_KB`) now only applies to
+  re-flags. The first time a session crosses the threshold the
+  reminder always fires, regardless of transcript byte size.
+  Previously a token-heavy / byte-light session could be gated on
+  the byte minimum even on its first crossing.
+
+### Notes
+- No hook command or permission changes — re-installing is **not**
+  required. `git pull` is sufficient to pick up the new behavior.
+
 ## [0.3.0] — 2026-05-13
 
 ### Added
