@@ -165,13 +165,34 @@ tmp_cursor="$(mktemp "${cursor_file}.XXXXXX")"
 echo "$curr_count" > "$tmp_cursor"
 mv -f "$tmp_cursor" "$cursor_file"
 
-# --- Record transcript byte size for the ctx-check UserPromptSubmit hook.
-#     Companion script handoff_ctx_check.sh reads this on the next prompt
+# --- Record context measurements for the ctx-check UserPromptSubmit hook.
+#     Companion script handoff_ctx_check.sh reads these on the next prompt
 #     and decides whether to flag a /handoff moment to the model.
+#
+#     Byte size is the legacy/fallback signal. Token count (sum of input +
+#     cache_read + cache_creation from the latest assistant turn's usage)
+#     is the real measurement Claude Code's /context uses, and is far more
+#     accurate than the 4-bytes-per-token estimate.
 ctx_file="$backup_dir/.ctx_${session_id}"
 tmp_ctx="$(mktemp "${ctx_file}.XXXXXX")"
 wc -c < "$transcript_path" | tr -d ' ' > "$tmp_ctx"
 mv -f "$tmp_ctx" "$ctx_file"
+
+last_tokens="$(
+  tac "$transcript_path" 2>/dev/null \
+    | grep -m1 '"type":"assistant"' \
+    | jq -r '
+        (.message.usage.input_tokens // 0) +
+        (.message.usage.cache_read_input_tokens // 0) +
+        (.message.usage.cache_creation_input_tokens // 0)
+      ' 2>/dev/null || true
+)"
+if [[ "$last_tokens" =~ ^[0-9]+$ ]] && (( last_tokens > 0 )); then
+  tokens_file="$backup_dir/.ctx_tokens_${session_id}"
+  tmp_tokens="$(mktemp "${tokens_file}.XXXXXX")"
+  echo "$last_tokens" > "$tmp_tokens"
+  mv -f "$tmp_tokens" "$tokens_file"
+fi
 
 # --- Prune to 3 newest dump files (plus their cursor / ctx / flag files) ---
 mapfile -t to_delete < <(
@@ -185,6 +206,7 @@ for old in "${to_delete[@]:-}"; do
   rm -f -- "$backup_dir/.handoff_raw_${id}.cursor"
   rm -f -- "$backup_dir/.handoff_raw_${id}.lock"
   rm -f -- "$backup_dir/.ctx_${id}"
+  rm -f -- "$backup_dir/.ctx_tokens_${id}"
   rm -f -- "$backup_dir/.ctx_flagged_${id}"
 done
 
