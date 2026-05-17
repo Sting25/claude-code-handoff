@@ -2,3 +2,4 @@
 .claude/handoff_backups/
 .claude/settings.local.json
 *.bak.*
+.claude/handoff_history/
