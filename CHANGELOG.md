@@ -10,6 +10,33 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.4.1] — 2026-05-19
+
+### Fixed
+- `SessionEnd` hook no longer clobbers a curated `/handoff` write. The
+  shipped hook command now passes `--if-stale-by 300` to
+  `write_handoff.sh`, which exits early (no rotation, no write) if
+  `handoff_current.md` was modified within the last 300 seconds. Before
+  this, invoking `/handoff` and then exiting the session within a few
+  seconds — the natural flow — meant the safety-net write fired
+  immediately afterward, rotated the curated content into
+  `handoff_history/`, and wrote a fresh mechanical snapshot as the new
+  `handoff_current.md`. The next session would auto-load the
+  mechanical one and miss the curated prose.
+
+### Changed
+- New shipped `SessionEnd` hook command:
+  `bash $HOME/.claude/bin/write_handoff.sh --if-stale-by 300 >/dev/null 2>&1 || true`
+- `install.sh` includes `migrate_legacy_se_hook`: on re-install, it
+  detects the pre-0.4.1 SessionEnd command (`write_handoff.sh` present,
+  `--if-stale-by` absent) and removes it so the new command can be
+  installed without duplication.
+
+### Migration
+- After `git pull`, run `./install.sh` again. The migration replaces
+  the old SessionEnd hook with the new one. Existing settings.json is
+  backed up to `settings.json.bak.<timestamp>` first.
+
 ## [0.4.0] — 2026-05-17
 
 ### Changed

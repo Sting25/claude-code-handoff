@@ -8,8 +8,37 @@
 # Triggers: /handoff skill, SessionEnd hook, or manual invocation.
 # Auto-loaded by the next session via the SessionStart hook in
 # ~/.claude/settings.json.
+#
+# Flags:
+#   --if-stale-by SECONDS  Skip (no rotation, no write) if handoff_current.md
+#                          already exists and was modified within SECONDS.
+#                          The SessionEnd hook passes this so that a curated
+#                          /handoff write isn't clobbered by the safety-net
+#                          run that fires moments later.
 
 set -euo pipefail
+
+IF_STALE_BY=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --if-stale-by)
+      IF_STALE_BY="${2:-}"
+      shift 2
+      ;;
+    --if-stale-by=*)
+      IF_STALE_BY="${1#*=}"
+      shift
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ -n "$IF_STALE_BY" ]] && ! [[ "$IF_STALE_BY" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --if-stale-by expects a non-negative integer (got: $IF_STALE_BY)" >&2
+  exit 2
+fi
 
 # ----- Config (override via env in your shell rc) -----
 #
@@ -48,6 +77,19 @@ handoff_relpath=".claude/handoff_current.md"
 history_dir="$handoff_dir/handoff_history"
 history_relpath=".claude/handoff_history/"
 mkdir -p "$handoff_dir"
+
+# --if-stale-by guard: when a curated /handoff write happened moments ago
+# and the SessionEnd safety-net then fires, this preserves the curated
+# content instead of clobbering it with a mechanical snapshot.
+if [[ -n "$IF_STALE_BY" ]] && [[ -f "$handoff_path" ]]; then
+  now_s="$(date +%s)"
+  file_s="$(date -r "$handoff_path" +%s 2>/dev/null || echo 0)"
+  age_s=$(( now_s - file_s ))
+  if (( age_s < IF_STALE_BY )); then
+    echo "$handoff_path"
+    exit 0
+  fi
+fi
 
 # Self-bootstrap: ensure the handoff artifacts are git-ignored so they don't
 # pollute `git status`. Skip if HANDOFF_NO_GITIGNORE_BOOTSTRAP=1.

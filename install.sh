@@ -40,7 +40,7 @@ done
 # Canonical hook commands and permissions. Edit these together with
 # CHANGELOG.md if you ever change the snippet shape.
 ss_cmd='bash $HOME/.claude/bin/handoff_session_start.sh 2>/dev/null || true'
-se_cmd='bash $HOME/.claude/bin/write_handoff.sh >/dev/null 2>&1 || true'
+se_cmd='bash $HOME/.claude/bin/write_handoff.sh --if-stale-by 300 >/dev/null 2>&1 || true'
 st_cmd='bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true'
 up_cmd='bash $HOME/.claude/bin/handoff_ctx_check.sh 2>/dev/null || true'
 perm_write="Bash(bash $HOME/.claude/bin/write_handoff.sh)"
@@ -229,6 +229,29 @@ migrate_legacy_ss_hook() {
   echo "  migrate legacy SessionStart inline command removed (pre-0.3.0)"
 }
 
+# Pre-0.4.1 the SessionEnd hook called write_handoff.sh without the
+# --if-stale-by guard, which meant a curated /handoff write seconds before
+# session end would be clobbered by the safety-net write. Detect that form
+# (write_handoff.sh present, --if-stale-by absent) and remove it so the
+# subsequent maybe_install_hook adds the guarded command.
+migrate_legacy_se_hook() {
+  if ! jq -e \
+         '(.hooks.SessionEnd // []) | any(.. | .command? // "" |
+            (contains("write_handoff.sh") and (contains("--if-stale-by") | not)))' \
+         "$settings" >/dev/null 2>&1; then
+    return
+  fi
+  jq '
+    .hooks.SessionEnd |= (map(select(
+      (.hooks // []) | all(((.command // "") |
+        (contains("write_handoff.sh") and (contains("--if-stale-by") | not))) | not)
+    )))
+    | if (.hooks.SessionEnd | length) == 0 then del(.hooks.SessionEnd) else . end
+  ' "$settings" > "$settings.tmp"
+  mv "$settings.tmp" "$settings"
+  echo "  migrate legacy SessionEnd command without --if-stale-by removed (pre-0.4.1)"
+}
+
 patch_settings() {
   if ! command -v jq >/dev/null 2>&1; then
     echo
@@ -243,6 +266,7 @@ patch_settings() {
   cp "$settings" "$settings.bak.$ts"
   echo "  backup  $settings -> $settings.bak.$ts"
   migrate_legacy_ss_hook
+  migrate_legacy_se_hook
   maybe_install_hook SessionStart     "$ss_marker" "$ss_cmd"
   maybe_install_hook SessionEnd       "$se_marker" "$se_cmd"
   maybe_install_hook Stop             "$st_marker" "$st_cmd"
