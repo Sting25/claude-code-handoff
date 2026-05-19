@@ -10,6 +10,25 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.4.2] — 2026-05-19
+
+### Fixed
+- `handoff_ctx_check.sh` 1M-tier auto-detection now degrades gracefully
+  when the current project has no recorded `lastModelUsage`. Previously
+  a fresh project entry — typically created by a directory rename or by
+  opening a new repo for the first time — would default to a 200k
+  window even for a clearly-1M user, causing the threshold check to
+  fire at the wrong percentage. New detection order: (1) this project's
+  `lastModelUsage` has `[1m]` → 1M; (2) this project's
+  `lastModelUsage` exists but no `[1m]` → 200k (explicit non-1m signal
+  respected); (3) this project's `lastModelUsage` is missing/empty →
+  check globally across all projects in `~/.claude.json`; if any have
+  `[1m]`, treat the user as a 1M user → 1M, else 200k.
+
+### Migration
+- No action required. The change is local-only — `git pull` (no
+  re-install needed since the script is symlinked from `~/.claude/bin/`).
+
 ## [0.4.1] — 2026-05-19
 
 ### Fixed

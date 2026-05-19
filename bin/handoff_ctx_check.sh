@@ -58,15 +58,34 @@ current_bytes="$(cat "$size_file" 2>/dev/null || echo 0)"
 #     Claude Code stamps the active model (e.g. "claude-opus-4-7[1m]") into
 #     .projects[<cwd>].lastModelUsage; presence of the [1m] suffix is our
 #     1M-context signal.
+#
+#     Detection order:
+#       1. This project's lastModelUsage has any [1m] entry → 1M
+#       2. This project's lastModelUsage exists but no [1m]  → 200k
+#          (explicit signal that this project does NOT use 1M)
+#       3. This project's lastModelUsage missing/empty       → check globally:
+#          if ANY project has [1m] usage, treat the user as a 1M user → 1M;
+#          else → 200k. Handles renames (cwd changed, no usage yet) and
+#          fresh projects where the user is a 1M user but hasn't typed
+#          here yet.
 window_tokens="${HANDOFF_CTX_WINDOW_TOKENS:-}"
 if [[ -z "$window_tokens" ]]; then
   window_tokens=200000
   if [[ -f "$HOME/.claude.json" ]]; then
+    # Step 1: per-project has [1m].
     if jq -e --arg cwd "$repo_root" '
           (.projects[$cwd].lastModelUsage // {})
           | keys
           | map(select(test("\\[1m\\]")))
           | length > 0
+        ' "$HOME/.claude.json" >/dev/null 2>&1; then
+      window_tokens=1000000
+    # Step 2/3: per-project missing or empty → fall back to global.
+    #          (jq returns true when lastModelUsage is null OR keys array is empty.)
+    elif jq -e --arg cwd "$repo_root" '
+          ((.projects[$cwd].lastModelUsage // {}) | keys | length) == 0
+          and
+          ([.projects[]?.lastModelUsage // {} | keys[]] | map(select(test("\\[1m\\]"))) | length > 0)
         ' "$HOME/.claude.json" >/dev/null 2>&1; then
       window_tokens=1000000
     fi
