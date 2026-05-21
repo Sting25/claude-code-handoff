@@ -10,6 +10,63 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.5.0] — 2026-05-21
+
+### Added
+- `HANDOFF_CTX_REMINDER_MODE` env var on `handoff_ctx_check.sh`.
+  Default `suggest` preserves the original passive-mention reminder
+  text (the assistant flags a /handoff moment to the user, who
+  decides). Opt-in `act` switches the reminder to model-directed
+  text — the assistant wraps up the current logical step and
+  invokes /handoff itself without asking. Intended for projects
+  where the assistant should autonomously refresh its context.
+- `--if-curated` flag on `write_handoff.sh`. SessionEnd safety-net
+  now detects whether the existing `handoff_current.md` has been
+  curated by content (sentinel comment presence) rather than by
+  mtime, so post-/handoff work in the same session no longer causes
+  a false skip.
+- `<!-- HANDOFF_PLACEHOLDER: ... -->` sentinel embedded in the
+  auto-generated placeholder block. The /handoff skill now replaces
+  the entire placeholder block (sentinel included) when adding
+  curated Notes; removal of the sentinel is what tells the
+  SessionEnd guard there's curated content to preserve.
+
+### Changed
+- `/handoff` skill (`skills/handoff/SKILL.md`) now instructs the
+  assistant to **replace** the placeholder block when adding Notes,
+  not append below it. Leaving the placeholder in place even with
+  Notes added below would leave the sentinel intact, and SessionEnd
+  could later overwrite the curated content.
+- `install.sh` `se_cmd` switched from `--if-stale-by 300` to
+  `--if-curated`. The legacy `migrate_legacy_se_hook` now detects
+  any pre-0.5.0 form (write_handoff.sh present but `--if-curated`
+  absent) and removes it so the current command installs cleanly.
+  Covers both pre-0.4.1 (no guard) and 0.4.1-0.4.2 (`--if-stale-by`)
+  callers in a single pass.
+
+### Deprecated
+- `--if-stale-by SECONDS` on `write_handoff.sh` — still accepted
+  and behaves as `--if-curated` (the numeric argument is ignored),
+  with a stderr deprecation warning. Will be removed in v0.6.0.
+
+### Migration
+- Re-run `./install.sh` after `git pull` to update
+  `~/.claude/settings.json` from `--if-stale-by 300` to
+  `--if-curated`. The migration block in `install.sh` handles this
+  idempotently — no manual editing required.
+- Opt-in to autonomous-act mode by adding to a project's
+  `.claude/settings.json`:
+  ```json
+  "env": {
+    "HANDOFF_CTX_REMINDER_MODE": "act",
+    "HANDOFF_CTX_THRESHOLD_PCT": "30"
+  }
+  ```
+  Lowering the threshold to ~30 pairs naturally with `act` mode —
+  the model needs runway to find a clean boundary before context
+  quality degrades. Projects without this env block keep the
+  original passive-mention behavior at the 50% threshold.
+
 ## [0.4.2] — 2026-05-19
 
 ### Fixed

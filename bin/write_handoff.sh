@@ -10,23 +10,41 @@
 # ~/.claude/settings.json.
 #
 # Flags:
-#   --if-stale-by SECONDS  Skip (no rotation, no write) if handoff_current.md
-#                          already exists and was modified within SECONDS.
-#                          The SessionEnd hook passes this so that a curated
-#                          /handoff write isn't clobbered by the safety-net
-#                          run that fires moments later.
+#   --if-curated           Skip (no rotation, no write) if handoff_current.md
+#                          already contains curated Notes content (i.e. the
+#                          /handoff skill ran and replaced the placeholder
+#                          block). The SessionEnd hook passes this so the
+#                          safety-net write only fires when there's no real
+#                          curated content to preserve. Detection is by the
+#                          presence/absence of the HANDOFF_PLACEHOLDER
+#                          sentinel; an unedited handoff carries the
+#                          sentinel, a curated one does not.
+#   --if-stale-by SECONDS  DEPRECATED (since v0.5.0). The numeric argument
+#                          is ignored; this is now treated as an alias for
+#                          --if-curated. Will be removed in v0.6.0.
 
 set -euo pipefail
 
-IF_STALE_BY=""
+IF_CURATED=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --if-curated)
+      IF_CURATED=1
+      shift
+      ;;
     --if-stale-by)
-      IF_STALE_BY="${2:-}"
-      shift 2
+      echo "write_handoff.sh: --if-stale-by is deprecated since v0.5.0; behaving as --if-curated. Update your settings.json to use --if-curated; --if-stale-by will be removed in v0.6.0." >&2
+      IF_CURATED=1
+      # Tolerate (and ignore) the now-meaningless numeric arg if present.
+      if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+        shift 2
+      else
+        shift
+      fi
       ;;
     --if-stale-by=*)
-      IF_STALE_BY="${1#*=}"
+      echo "write_handoff.sh: --if-stale-by is deprecated since v0.5.0; behaving as --if-curated. Update your settings.json to use --if-curated; --if-stale-by will be removed in v0.6.0." >&2
+      IF_CURATED=1
       shift
       ;;
     *)
@@ -35,10 +53,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-if [[ -n "$IF_STALE_BY" ]] && ! [[ "$IF_STALE_BY" =~ ^[0-9]+$ ]]; then
-  echo "ERROR: --if-stale-by expects a non-negative integer (got: $IF_STALE_BY)" >&2
-  exit 2
-fi
+
+# Sentinel embedded in the auto-generated placeholder block; presence means
+# the placeholder is still in place, absence means the /handoff skill (or a
+# human editor) has replaced the placeholder with curated Notes.
+HANDOFF_PLACEHOLDER_SENTINEL="<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->"
 
 # ----- Config (override via env in your shell rc) -----
 #
@@ -78,14 +97,16 @@ history_dir="$handoff_dir/handoff_history"
 history_relpath=".claude/handoff_history/"
 mkdir -p "$handoff_dir"
 
-# --if-stale-by guard: when a curated /handoff write happened moments ago
-# and the SessionEnd safety-net then fires, this preserves the curated
-# content instead of clobbering it with a mechanical snapshot.
-if [[ -n "$IF_STALE_BY" ]] && [[ -f "$handoff_path" ]]; then
-  now_s="$(date +%s)"
-  file_s="$(date -r "$handoff_path" +%s 2>/dev/null || echo 0)"
-  age_s=$(( now_s - file_s ))
-  if (( age_s < IF_STALE_BY )); then
+# --if-curated guard: when the SessionEnd safety-net fires after a curated
+# /handoff write, we want to preserve the curated content rather than
+# clobber it with a mechanical snapshot. The check is by content (sentinel
+# presence) rather than by mtime, so post-/handoff work in the same
+# session doesn't trigger a false skip: any session that didn't replace
+# the placeholder is still considered "no curated content to preserve."
+if (( IF_CURATED )) && [[ -f "$handoff_path" ]]; then
+  if ! grep -qF "$HANDOFF_PLACEHOLDER_SENTINEL" "$handoff_path"; then
+    # Sentinel is gone → /handoff (or a human) replaced the placeholder
+    # with curated Notes. Preserve it.
     echo "$handoff_path"
     exit 0
   fi
@@ -262,10 +283,14 @@ EOF
   echo '---'
   echo
   printf '## Notes from this session\n\n'
-  printf '_The /handoff skill should append decisions, in-flight tracks, open\n'
-  printf 'questions, and "next session should start with X" notes here. The\n'
-  printf 'auto-snapshot above captures git state; the prose below captures\n'
-  printf 'intent that only the conversation knows._\n'
+  printf '%s\n' "$HANDOFF_PLACEHOLDER_SENTINEL"
+  printf '\n'
+  printf '_The /handoff skill should replace this entire block (sentinel\n'
+  printf 'comment included) with curated decisions, in-flight tracks, open\n'
+  printf 'questions, and "next session should start with X" notes. The auto-\n'
+  printf 'snapshot above captures git state; the prose below captures intent\n'
+  printf 'that only the conversation knows. The sentinel above is how the\n'
+  printf 'SessionEnd safety-net detects whether curation has happened._\n'
 } > "$handoff_path"
 
 echo "$handoff_path"

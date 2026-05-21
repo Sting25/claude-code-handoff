@@ -40,7 +40,7 @@ done
 # Canonical hook commands and permissions. Edit these together with
 # CHANGELOG.md if you ever change the snippet shape.
 ss_cmd='bash $HOME/.claude/bin/handoff_session_start.sh 2>/dev/null || true'
-se_cmd='bash $HOME/.claude/bin/write_handoff.sh --if-stale-by 300 >/dev/null 2>&1 || true'
+se_cmd='bash $HOME/.claude/bin/write_handoff.sh --if-curated >/dev/null 2>&1 || true'
 st_cmd='bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true'
 up_cmd='bash $HOME/.claude/bin/handoff_ctx_check.sh 2>/dev/null || true'
 perm_write="Bash(bash $HOME/.claude/bin/write_handoff.sh)"
@@ -229,27 +229,28 @@ migrate_legacy_ss_hook() {
   echo "  migrate legacy SessionStart inline command removed (pre-0.3.0)"
 }
 
-# Pre-0.4.1 the SessionEnd hook called write_handoff.sh without the
-# --if-stale-by guard, which meant a curated /handoff write seconds before
-# session end would be clobbered by the safety-net write. Detect that form
-# (write_handoff.sh present, --if-stale-by absent) and remove it so the
-# subsequent maybe_install_hook adds the guarded command.
+# Pre-0.5.0 the SessionEnd hook called write_handoff.sh with either no
+# guard (pre-0.4.1) or with --if-stale-by N (0.4.1 through 0.4.2). Both
+# forms are legacy: the new content-check guard is --if-curated. Detect
+# any write_handoff.sh hook missing --if-curated and remove it so the
+# subsequent maybe_install_hook adds the current command. This single
+# detector covers both pre-0.4.1 and pre-0.5.0 forms.
 migrate_legacy_se_hook() {
   if ! jq -e \
          '(.hooks.SessionEnd // []) | any(.. | .command? // "" |
-            (contains("write_handoff.sh") and (contains("--if-stale-by") | not)))' \
+            (contains("write_handoff.sh") and (contains("--if-curated") | not)))' \
          "$settings" >/dev/null 2>&1; then
     return
   fi
   jq '
     .hooks.SessionEnd |= (map(select(
       (.hooks // []) | all(((.command // "") |
-        (contains("write_handoff.sh") and (contains("--if-stale-by") | not))) | not)
+        (contains("write_handoff.sh") and (contains("--if-curated") | not))) | not)
     )))
     | if (.hooks.SessionEnd | length) == 0 then del(.hooks.SessionEnd) else . end
   ' "$settings" > "$settings.tmp"
   mv "$settings.tmp" "$settings"
-  echo "  migrate legacy SessionEnd command without --if-stale-by removed (pre-0.4.1)"
+  echo "  migrate legacy SessionEnd command without --if-curated removed (pre-0.5.0)"
 }
 
 patch_settings() {

@@ -25,7 +25,7 @@ nothing gets lost across the restart boundary.
      SessionStart hook auto-includes the most recent history entry
      if the current handoff has no curated Notes; `/handoff-more` lets
      a future session pull more of the history into context on demand.
-2. **Append session-specific intent** — the script's snapshot is git-state-only; the conversation knows things git doesn't (decisions made, in-flight ASKs, open questions, "next session should start with X" notes). Append those under the `## Notes from this session` section using Edit.
+2. **Replace the placeholder block with session-specific intent** — the script's snapshot is git-state-only; the conversation knows things git doesn't (decisions made, in-flight ASKs, open questions, "next session should start with X" notes). The auto-generated file contains a `## Notes from this session` section with a placeholder block bracketed by a `<!-- HANDOFF_PLACEHOLDER: ... -->` sentinel comment. **Replace the entire placeholder block (sentinel + italic prose) with curated Notes using Edit** — do not just append below the placeholder, because the SessionEnd safety-net detects "no curation happened" by the presence of that sentinel. Removing the sentinel is what tells the SessionEnd hook to stand down and preserve your work.
 3. **Confirm the raw-dump backup exists** — the `Stop` hook (`handoff_turn_append.sh`) has been appending turn-by-turn to `.claude/handoff_backups/handoff_raw_<session_id>.md` throughout the session, so by the time `/handoff` runs the backup is already there. Verify it: `ls -la .claude/handoff_backups/`. If the file is missing (hook not installed, or session started before the hook landed), fall back to writing a one-shot dump per the "Raw dump fallback" section below. The hook prunes to 3 newest automatically — you do not need to.
 4. **Print a loud, unmissable banner** — the ASK must be impossible to miss (the user specifically asked for this; do not soften).
 5. **Stop**. Do not start new work after the banner. The session is over.
@@ -39,8 +39,15 @@ nothing gets lost across the restart boundary.
    The script outputs the absolute path of the written handoff
    (`<repo-root>/.claude/handoff_current.md`).
 
-2. Read the file you just wrote. Then Edit it to add a `## Notes from
-   this session` body under the placeholder. Capture, in order of
+2. Read the file you just wrote. Then Edit it to **replace the
+   placeholder block** under `## Notes from this session` with curated
+   prose. The placeholder block is the sentinel comment
+   (`<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->`)
+   plus the italic instructions immediately below it; both must be
+   removed and replaced with your Notes content. The SessionEnd safety-
+   net stands down only when that sentinel is gone, so leaving it in
+   place (even with Notes added below) means the safety-net write
+   could later clobber your work. Capture in your Notes, in order of
    importance:
    - **Work product produced this session.** If a plan was approved,
      a spec was drafted, a design was decided, or any artifact beyond

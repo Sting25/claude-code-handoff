@@ -16,7 +16,23 @@
 #                               project's lastModelUsage records a model
 #                               with a `[1m]` suffix, defaults to 1000000;
 #                               otherwise 200000.
-#   HANDOFF_CTX_THRESHOLD_PCT   percent of window that triggers (default: 50)
+#   HANDOFF_CTX_THRESHOLD_PCT   percent of window that triggers (default: 50).
+#                               Lower (e.g. 30) is recommended for projects
+#                               that opt into REMINDER_MODE=act below — the
+#                               model needs runway to find a clean boundary
+#                               before context quality degrades.
+#   HANDOFF_CTX_REMINDER_MODE   "suggest" (default) emits a reminder that
+#                               instructs the assistant to surface a passive
+#                               mention to the user, who decides whether to
+#                               /handoff. "act" emits a reminder that
+#                               instructs the assistant to wrap up the
+#                               current logical step and invoke /handoff
+#                               itself, without asking. Set "act" only on
+#                               projects where the assistant should
+#                               autonomously refresh its context (e.g. the
+#                               forge orchestration family). Default stays
+#                               "suggest" so non-opted-in projects keep the
+#                               gentler behavior.
 #   HANDOFF_CTX_COOLDOWN_KB     transcript growth required between re-flags
 #                               (default: 100, i.e. wait ~100KB before
 #                               flagging again so we don't nag every turn)
@@ -31,6 +47,7 @@ set -euo pipefail
 
 THRESHOLD_PCT="${HANDOFF_CTX_THRESHOLD_PCT:-50}"
 COOLDOWN_KB="${HANDOFF_CTX_COOLDOWN_KB:-100}"
+REMINDER_MODE="${HANDOFF_CTX_REMINDER_MODE:-suggest}"
 
 # --- Read hook payload ---
 payload="$(cat 2>/dev/null || true)"
@@ -126,11 +143,22 @@ fi
 # --- Compose and emit the system-reminder ---
 pct=$((est_tokens * 100 / WINDOW_TOKENS))
 
-cat <<EOF
+case "$REMINDER_MODE" in
+  act)
+    cat <<EOF
+<system-reminder>
+Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window). This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself — do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. Cooldown: this reminder will not re-fire for ~${COOLDOWN_KB}KB of further transcript growth.
+</system-reminder>
+EOF
+    ;;
+  *)
+    cat <<EOF
 <system-reminder>
 Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window). This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than at 5%. Flag to the user as a passive mention — no question mark, no "want me to?". One line, e.g. "Flagging: ~${pct}% of context used — natural /handoff moment if you want to lock in the prose while I'm still sharp." Don't repeat for at least another ${COOLDOWN_KB}KB of growth.
 </system-reminder>
 EOF
+    ;;
+esac
 
 # --- Record this flag so the cooldown is honored on the next prompt ---
 tmp_flag="$(mktemp "${flag_file}.XXXXXX")"
