@@ -22,6 +22,17 @@ Three paths, doing different jobs:
   thin, when you reference work from a session further back than
   yesterday, or to give a sibling re-entering the repo continuity
   deeper than the last session alone.
+- **`/handoff-recover` (auto-triggered by the SessionStart hook):**
+  composes a retroactive curated handoff when the previous session
+  ended without `/handoff` — crashed, killed, or just never
+  invoked. The SessionStart hook detects the placeholder Notes
+  block and prints an `ACTION: RUN /handoff-recover` banner; the
+  skill reads the previous session's raw per-turn dump under
+  `.claude/handoff_backups/`, the prior curated handoff under
+  `.claude/handoff_history/`, and (if present) the host-wide
+  session registry, then reconstructs what the lost session would
+  have written and persists it back into `handoff_current.md` so
+  the recovery survives into future history.
 - **`SessionEnd` hook (automatic, safety net):** on clean session
   exit, fires the same snapshot script — but no model is in the loop,
   so the "Notes from this session" block stays empty. You get git
@@ -211,8 +222,10 @@ settings.json (backup first). The repo itself is untouched.
 │   ├── handoff/
 │   │   ├── SKILL.md               # /handoff slash command spec
 │   │   └── README.md              # full docs: env vars, customization, limitations
-│   └── handoff-more/
-│       └── SKILL.md               # /handoff-more slash command: load older handoffs into context
+│   ├── handoff-more/
+│   │   └── SKILL.md               # /handoff-more slash command: load older handoffs into context
+│   └── handoff-recover/
+│       └── SKILL.md               # /handoff-recover slash command: retroactively compose Notes when the previous session crashed
 ├── install.sh                     # symlink + settings.json patcher
 ├── CHANGELOG.md
 ├── LICENSE                        # MIT

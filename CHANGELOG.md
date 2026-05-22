@@ -10,6 +10,42 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.6.0] — 2026-05-22
+
+### Added
+- `skills/handoff-recover/SKILL.md` — new `/handoff-recover` slash
+  command. Composes a retroactive curated Notes block when the
+  previous session ended without `/handoff` (crashed, killed,
+  never invoked). Reads the previous session's raw per-turn dump
+  under `.claude/handoff_backups/`, the most recent curated
+  handoff under `.claude/handoff_history/`, and (if present) the
+  host-wide session registry; writes the recovered Notes back
+  into `handoff_current.md` so the recovery persists into future
+  handoff history.
+- `bin/handoff_session_start.sh` now emits a loud
+  `ACTION: RUN /handoff-recover` sentinel block whenever the
+  placeholder Notes block is detected. Replaces the previous
+  silent-fallback behavior — the model is now explicitly told to
+  reconstruct rather than just see the fallback and proceed.
+  Opt out via `HANDOFF_SS_DISABLE_RECOVER=1`.
+- `bin/handoff_session_start.sh` placeholder detection also
+  recognizes the `<!-- HANDOFF_PLACEHOLDER: ... -->` sentinel
+  introduced in 0.5.0 (the prior detection was string-matching
+  the pre-0.5.0 instruction line only; placeholder writes from
+  0.5.0+ would have slipped through silently).
+
+### Changed
+- `install.sh` links the new skill into `~/.claude/skills/handoff-recover/`.
+  Re-run `./install.sh` after `git pull` to pick it up (existing
+  hooks and permissions are detected and skipped — only the new
+  symlink is added).
+
+### Deprecation status
+- `--if-stale-by SECONDS` removal target shifted from v0.6.0 to
+  v0.7.0. This release is feature-additive only; the deprecated
+  flag still accepts its numeric argument and behaves as
+  `--if-curated` with a stderr warning.
+
 ## [0.5.0] — 2026-05-21
 
 ### Added
