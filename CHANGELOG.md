@@ -10,6 +10,31 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.7.0] — 2026-05-25
+
+No settings.json / hook-command changes — a `git pull` is enough; no
+need to re-run `./install.sh`. Two additions to `bin/write_handoff.sh`,
+both feature-gated and INERT unless the relevant file exists, so repos
+that don't opt in are entirely unaffected.
+
+### Added
+- **Pinned section.** If `<repo>/.claude/handoff_pinned.md` exists, its
+  contents are injected verbatim into every handoff (first, before the
+  git snapshot). The script only *reads* the file — it is never rotated
+  or regenerated, so it survives across sessions until you edit it. This
+  is the durable-but-temporary layer between permanent rules (`AGENTS.md`)
+  and this-session intent (the Notes block): carry-forward context +
+  guardrails that outlive a session but expire when the underlying state
+  resolves. Path overridable via `HANDOFF_PINNED_FILE`; auto-added to
+  `.gitignore` (same per-developer, not-checked-in posture as the handoff).
+- **System-log nudge.** If `<repo>/SYSTEM_LOG.md` exists, the handoff
+  flags (a `⚠️` section) when this session's commits look *system-level*
+  (path or subject heuristic) but none touched the log — a reminder to
+  record shape-changing work. Handoff-time only; fires on the
+  previous-handoff→HEAD range, so it's silent on routine sessions (the
+  anti-alert-fatigue guard). Path overridable via `HANDOFF_SYSTEMLOG_FILE`;
+  tune the heuristics inline if it over-fires for your repo.
+
 ## [0.6.0] — 2026-05-22
 
 ### Added

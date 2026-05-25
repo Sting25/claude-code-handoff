@@ -79,6 +79,7 @@ like:
 ```
 <repo>/.claude/
 ├── handoff_current.md                       # the latest snapshot (always)
+├── handoff_pinned.md                        # optional: carried forward verbatim (see below)
 └── handoff_history/                         # rotated older snapshots
     ├── handoff_2026-05-13_174853.md         # yesterday's
     ├── handoff_2026-05-12_194751.md         # two sessions ago
@@ -100,6 +101,39 @@ Two consumers read this directory:
 The retention dir is bootstrapped into the repo's `.gitignore` on
 first write — handoffs are intentionally per-developer, not
 checked-in artifacts.
+
+### Pinned context (carried forward every handoff)
+
+Some context outlives a single session but isn't a permanent rule —
+load-bearing facts the next session needs, and guardrails ("don't drop
+X", "Y connects via Z, not a password"). Re-typing those into the Notes
+block every session is lossy. Drop them in `<repo>/.claude/handoff_pinned.md`
+and they're injected verbatim at the top of *every* handoff. The script
+only reads that file — never rotates or regenerates it — so it persists
+untouched until you edit it. Three layers, by lifetime:
+
+- **`AGENTS.md`** — permanent governance rules.
+- **`handoff_pinned.md`** — durable-but-temporary context + guardrails
+  that expire when the underlying state resolves (a migration finishes,
+  an incident closes). The pin is where you record those.
+- **Notes block** — this-session intent only.
+
+The pin is gitignored on first write (same per-developer posture as the
+handoff). Override its path with `HANDOFF_PINNED_FILE`. Absent file →
+no pinned section; repos that don't use it are unaffected.
+
+### System-log nudge
+
+If your repo keeps a `SYSTEM_LOG.md` (an append-only record of
+shape-changing work — security posture, scaffold/topology, migrations),
+the handoff flags a `⚠️` section when this session's commits *look*
+system-level (by changed-path or commit-subject heuristic) but none of
+them touched the log. It's a reminder to record the work before context
+is lost, not a gate. It fires only at handoff time over the
+previous-handoff→HEAD commit range, so routine sessions stay silent.
+Override the watched file with `HANDOFF_SYSTEMLOG_FILE`; tune the
+heuristics inline in `write_handoff.sh` if they over-fire for your repo.
+Absent file → no nudge.
 
 ## What the handoff actually looks like
 
