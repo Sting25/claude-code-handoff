@@ -73,6 +73,12 @@ HANDOFF_PLACEHOLDER_SENTINEL="<!-- HANDOFF_PLACEHOLDER: keep until /handoff repl
 # HANDOFF_NO_GITIGNORE_BOOTSTRAP — set to 1 to skip the auto-add of
 #   .claude/handoff_current.md and .claude/handoff_history/ into the project
 #   .gitignore.
+# HANDOFF_PINNED_FILE — path to a pinned-context file injected verbatim into
+#   every handoff (read-only; survives rotation). Default:
+#   .claude/handoff_pinned.md. Inert when the file is absent.
+# HANDOFF_SYSTEMLOG_FILE — path to a system log the handoff-time nudge
+#   watches; flags system-level sessions that didn't touch it. Default:
+#   SYSTEM_LOG.md at repo root. Inert when the file is absent.
 #
 # Example for someone with a `_shared/` sibling that holds RFCs + ASKs:
 #   export HANDOFF_INFLIGHT_DIRS="docs design"
@@ -95,6 +101,18 @@ handoff_path="$handoff_dir/handoff_current.md"
 handoff_relpath=".claude/handoff_current.md"
 history_dir="$handoff_dir/handoff_history"
 history_relpath=".claude/handoff_history/"
+
+# Pinned-context file: read verbatim into every handoff and never written
+# by this script, so it survives rotation untouched (edit it to change what
+# carries forward). System-log file: watched by the handoff-time nudge.
+# Both default to per-repo paths and are INERT when the file is absent —
+# repos without them are entirely unaffected. Override via
+# HANDOFF_PINNED_FILE / HANDOFF_SYSTEMLOG_FILE.
+pinned_file="${HANDOFF_PINNED_FILE:-$handoff_dir/handoff_pinned.md}"
+pinned_relpath="${pinned_file#"$repo_root"/}"
+systemlog_file="${HANDOFF_SYSTEMLOG_FILE:-$repo_root/SYSTEM_LOG.md}"
+systemlog_relpath="${systemlog_file#"$repo_root"/}"
+
 mkdir -p "$handoff_dir"
 
 # --if-curated guard: when the SessionEnd safety-net fires after a curated
@@ -129,6 +147,12 @@ bootstrap_gitignore() {
 if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]]; then
   bootstrap_gitignore "$handoff_relpath"
   bootstrap_gitignore "$history_relpath"
+  # The pin is local operational state, same class as the handoff itself.
+  # Only auto-ignore when it sits inside the repo (the default and the
+  # common override); an out-of-tree override is the user's to manage.
+  if [[ "$pinned_relpath" != /* && "$pinned_relpath" != "$pinned_file" ]]; then
+    bootstrap_gitignore "$pinned_relpath"
+  fi
 fi
 
 # Rotate the existing handoff (if any) into handoff_history/ before we
@@ -161,6 +185,16 @@ prune_history() {
     | tail -n +$((HISTORY_KEEP + 1)) \
     | xargs -r rm -f
 }
+# Capture the HEAD recorded in the previous handoff BEFORE rotation moves
+# it away. The rotation boundary is a usable proxy for "since last session,"
+# letting the system-log nudge diff this session's commits. Empty (→ nudge
+# skipped) on first run or if the prior handoff had no parseable HEAD.
+prev_head=""
+if [[ -f "$handoff_path" ]]; then
+  prev_head="$(grep -m1 '^\*\*HEAD:\*\*' "$handoff_path" 2>/dev/null \
+    | sed -E 's/.*`([0-9a-fA-F]+)`.*/\1/' | grep -Ei '^[0-9a-f]+$' || true)"
+fi
+
 rotate_existing_handoff
 prune_history
 
@@ -232,6 +266,23 @@ EOF
   echo '---'
   echo
 
+  # Pinned context — read verbatim from $pinned_file if present. Never
+  # regenerated; edit that file to change what carries forward. Placed
+  # first so durable context + guardrails are the first thing the next
+  # session reads, before the git snapshot.
+  if [[ -s "$pinned_file" ]]; then
+    printf '## 📌 Pinned — carried forward every handoff\n\n'
+    printf '_Source: `%s` — edit that file to change this; `write_handoff.sh`\n' "$pinned_relpath"
+    printf 'only reads it, so it survives rotation. This is the durable-but-\n'
+    printf 'temporary layer: context + guardrails that outlive a session but\n'
+    printf 'expire when the underlying state resolves. Permanent rules go in\n'
+    printf 'AGENTS.md; this-session intent goes in Notes below._\n\n'
+    cat "$pinned_file"
+    printf '\n\n'
+    echo '---'
+    echo
+  fi
+
   snapshot_repo "$repo_root" "Repo: $repo_name"
 
   if [[ -n "$substrate_root" ]]; then
@@ -279,6 +330,30 @@ EOF
     printf 'git -C %s log --oneline -5\n' "$substrate_root"
   fi
   printf '```\n\n'
+
+  # System-log nudge (handoff-time only). Fires only when this session's
+  # commits look system-level (changed shape) AND none of them touched the
+  # system log. A nudge, not a gate — false positives just prompt a second
+  # look. Inert when the log file is absent or there's no prior HEAD.
+  # Tune the path / subject heuristics below per project if it over-fires.
+  if [[ -f "$systemlog_file" && -n "$prev_head" ]]; then
+    range_commits="$(git -C "$repo_root" log --oneline "${prev_head}..HEAD" 2>/dev/null || true)"
+    if [[ -n "$range_commits" ]]; then
+      changed_files="$(git -C "$repo_root" log --name-only --pretty=format: "${prev_head}..HEAD" 2>/dev/null || true)"
+      subjects="$(git -C "$repo_root" log --pretty=%s "${prev_head}..HEAD" 2>/dev/null || true)"
+      touched_log="$(printf '%s\n' "$changed_files" | grep -Fx "$systemlog_relpath" || true)"
+      sys_paths="$(printf '%s\n' "$changed_files" | grep -E '(^|/)(AGENTS\.md|.*-rules\.md|db-bootstrap\.sh|install\.sh)$|^\.github/workflows/' || true)"
+      sys_subj="$(printf '%s\n' "$subjects" | grep -iE 'secur|migrat|scaffold|topolog|isolat|\brole\b|\bauth\b|\bdb\b' || true)"
+      if [[ -z "$touched_log" && ( -n "$sys_paths" || -n "$sys_subj" ) ]]; then
+        printf '## ⚠️ System-log nudge\n\n'
+        printf 'This session has commits that look **system-level** (security, '
+        printf 'scaffold, topology, migration, roles) but `%s` was **not touched**.\n' "$systemlog_relpath"
+        printf 'If any of these changed the system'\''s shape, add a What/Why/Fix/Where '
+        printf 'entry before handing off:\n\n'
+        printf '```\n%s\n```\n\n' "$range_commits"
+      fi
+    fi
+  fi
 
   echo '---'
   echo
