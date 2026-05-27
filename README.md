@@ -39,8 +39,9 @@ Three paths, doing different jobs:
   state (HEAD, branch, recent commits, working tree, in-flight docs)
   and nothing else. It's there so an unplanned exit isn't a total
   loss, not as a substitute for `/handoff`. The hook passes
-  `--if-stale-by 300`, so if you ran `/handoff` within the last five
-  minutes the safety-net write is a no-op — your curated content
+  `--if-curated`, so if you already ran `/handoff` this session (it
+  replaced the placeholder block with curated Notes), the safety-net
+  write is a no-op — your curated content
   stays put rather than being rotated into history.
 
 The next session in the same repo auto-loads the latest snapshot via

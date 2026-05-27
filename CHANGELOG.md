@@ -10,11 +10,18 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
-## [Unreleased]
+## [0.7.1] — 2026-05-27
 
-No hook-command or permission changes — documentation/release hygiene only.
+No hook-command or permission changes — a `git pull` is enough; no need to
+re-run `./install.sh`. Documentation / release-hygiene only.
 
 ### Fixed
+- **README described the deprecated flag as current.** The `SessionEnd`
+  hook section claimed the hook passes `--if-stale-by 300` with a
+  "last five minutes" mtime rule. Since v0.5.0 it actually passes
+  `--if-curated` (a content check — the placeholder sentinel — not a time
+  window). Reworded so the README documents the shipped behavior instead
+  of steering users toward the deprecated flag.
 - Corrected the `--if-stale-by` deprecation note. It promised removal in
   v0.6.0, but the alias shipped through v0.6.0 and v0.7.0 unchanged. The
   note now reads "a future release" (in `write_handoff.sh` and this file)
@@ -123,7 +130,7 @@ that don't opt in are entirely unaffected.
 - `--if-stale-by SECONDS` on `write_handoff.sh` — still accepted
   and behaves as `--if-curated` (the numeric argument is ignored),
   with a stderr deprecation warning. Slated for removal in a future
-  release (the original v0.6.0 target slipped — see Unreleased).
+  release (the original v0.6.0 target slipped — see 0.7.1).
 
 ### Migration
 - Re-run `./install.sh` after `git pull` to update
