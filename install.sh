@@ -2,9 +2,11 @@
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # What it does:
-#   1. Symlinks bin/ scripts + skills/handoff/* into ~/.claude/.
-#   2. Patches ~/.claude/settings.json to add three hooks
-#      (SessionStart / SessionEnd / Stop) and two permission entries.
+#   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
+#      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
+#   2. Patches ~/.claude/settings.json to add four hooks
+#      (SessionStart / SessionEnd / Stop / UserPromptSubmit) and four
+#      permission entries.
 #      Requires jq; falls back to printing the snippet if jq is missing.
 #
 # Idempotent. Existing files at symlink targets are backed up to
@@ -61,6 +63,10 @@ up_marker="handoff_ctx_check.sh"
 
 # -------------------------------------------------------------------- symlinks
 
+# Set when symlinks aren't available and we fall back to copying, so the
+# installer can remind the user that copies don't auto-update on git pull.
+COPIED_ANY=0
+
 link() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
@@ -74,12 +80,27 @@ link() {
     echo "  relink  $dst (was -> $current)"
     rm "$dst"
   elif [[ -e "$dst" ]]; then
+    # A regular file identical to src is our own copy-mode install from a
+    # prior run — treat as up to date rather than backing it up each time.
+    if [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+      echo "  ok      $dst (copy)"
+      return
+    fi
     echo "  backup  $dst -> $dst.bak.$ts"
     mv "$dst" "$dst.bak.$ts"
   else
     echo "  new     $dst"
   fi
-  ln -s "$src" "$dst"
+  # Prefer a real symlink; fall back to copying when the platform can't make
+  # one. Git Bash on Windows without Developer Mode either errors on ln -s or
+  # silently copies — the -L check catches the silent-copy case too.
+  if ln -s "$src" "$dst" 2>/dev/null && [[ -L "$dst" ]]; then
+    return
+  fi
+  rm -f "$dst"
+  cp "$src" "$dst"
+  COPIED_ANY=1
+  echo "  copy    $dst (symlinks unavailable — re-run install.sh after updates)"
 }
 
 unlink_if_ours() {
@@ -87,8 +108,12 @@ unlink_if_ours() {
   if [[ -L "$dst" ]] && [[ "$(readlink "$dst")" == "$src" ]]; then
     rm "$dst"
     echo "  remove  $dst"
+  elif [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+    # Copy-mode install (identical content) — ours to remove.
+    rm "$dst"
+    echo "  remove  $dst (copy)"
   elif [[ -e "$dst" ]]; then
-    echo "  skip    $dst (not our symlink; leaving alone)"
+    echo "  skip    $dst (not ours; leaving alone)"
   else
     echo "  ok      $dst (already absent)"
   fi
@@ -333,6 +358,13 @@ if [[ "$mode" == install ]]; then
   patch_settings
   echo
   echo "done. start a new Claude Code session — /handoff is available now."
+  if [[ "$COPIED_ANY" == "1" ]]; then
+    echo
+    echo "note: real symlinks weren't available, so files were COPIED into"
+    echo "      $claude_home. After a future 'git pull' in this repo, re-run"
+    echo "      ./install.sh to refresh the copies — symlinked installs update"
+    echo "      automatically, copies do not."
+  fi
 else
   echo "uninstalling handoff skill from $claude_home"
   echo
