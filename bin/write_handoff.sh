@@ -148,6 +148,10 @@ bootstrap_gitignore() {
 if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]]; then
   bootstrap_gitignore "$handoff_relpath"
   bootstrap_gitignore "$history_relpath"
+  # Raw per-turn transcript dumps (written by the Stop hook) contain
+  # verbatim session content — including anything sensitive surfaced in
+  # tool output — so they must never be committable.
+  bootstrap_gitignore ".claude/handoff_backups/"
   # The pin is local operational state, same class as the handoff itself.
   # Only auto-ignore when it sits inside the repo (the default and the
   # common override); an out-of-tree override is the user's to manage.

@@ -10,6 +10,42 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.7.2] — 2026-05-27
+
+Reliability, privacy, docs, and Windows (Git Bash) support. No hook-command
+or permission changes; the `.gitignore` bootstrap gains one entry, picked up
+automatically on the next handoff — no re-install needed for existing repos
+(Windows copy-mode installs being the exception; see Added).
+
+### Fixed
+- **Raw transcript dumps are now gitignored.** `write_handoff.sh` adds
+  `.claude/handoff_backups/` to the project `.gitignore` on bootstrap. The
+  Stop hook writes verbatim transcript content there (which can include
+  secrets surfaced in tool output); previously only the handoff and history
+  paths were ignored, so a `git add -A` could commit the dumps.
+- **Manual-install docs shipped the pre-0.5.0 SessionEnd command.**
+  `skills/handoff/README.md` now uses `write_handoff.sh --if-curated`;
+  without it the SessionEnd safety-net can clobber a curated `/handoff`
+  (the bug v0.4.1/v0.5.0 fixed). The manual steps also now include
+  `handoff_session_start.sh` and the `handoff-more`/`handoff-recover` skills
+  (previously omitted — following them left a broken SessionStart hook), and
+  the components diagram lists `handoff-recover`.
+- **Hook/permission counts corrected** from "three hooks / two permissions"
+  to **four / four** in `install.sh --help` and `skills/handoff/README.md`.
+- **Documented four env vars** the code reads but the skill README omitted:
+  `HANDOFF_PINNED_FILE`, `HANDOFF_SYSTEMLOG_FILE`, `HANDOFF_SS_DISABLE_RECOVER`,
+  `HANDOFF_CTX_REMINDER_MODE`.
+
+### Added
+- **Windows (Git Bash / WSL) support.**
+  - `.gitattributes` forces `LF` on `*.sh` so a CRLF checkout doesn't break
+    the bash shebang.
+  - `install.sh` falls back to **copying** scripts into `~/.claude` when real
+    symlinks aren't available (Git Bash without Developer Mode), prints a
+    reminder to re-run `./install.sh` after a `git pull` (copies, unlike
+    symlinks, don't auto-update), and `--uninstall` removes copies too.
+  - Under WSL everything already worked; this makes plain Git Bash work too.
+
 ## [0.7.1] — 2026-05-27
 
 No hook-command or permission changes — a `git pull` is enough; no need to

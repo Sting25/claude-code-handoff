@@ -43,8 +43,10 @@ manual copy-paste, no kickoff prompt to remember.
 │   ├── handoff/
 │   │   ├── SKILL.md               # invoked by /handoff
 │   │   └── README.md              # this file
-│   └── handoff-more/
-│       └── SKILL.md               # /handoff-more: load older handoffs from history/ into context
+│   ├── handoff-more/
+│   │   └── SKILL.md               # /handoff-more: load older handoffs from history/ into context
+│   └── handoff-recover/
+│       └── SKILL.md               # /handoff-recover: reconstruct a handoff when the prior session didn't run one
 ├── settings.json                  # SessionStart + SessionEnd + Stop + UserPromptSubmit hooks
 └── RULES.md                       # self-policing rule (optional)
 ```
@@ -53,15 +55,17 @@ manual copy-paste, no kickoff prompt to remember.
 
 Easiest: clone the [claude-code-handoff repo](https://github.com/Sting25/claude-code-handoff)
 and run `./install.sh` — it symlinks all the files into `~/.claude/`
-and patches `~/.claude/settings.json` to add the three hooks plus two
+and patches `~/.claude/settings.json` to add the four hooks plus four
 permissions. Edits in the repo flow live without re-installing.
 
 Manual install:
 
-1. Drop `bin/write_handoff.sh`, `bin/handoff_turn_append.sh`, and
-   `bin/handoff_ctx_check.sh` into `~/.claude/bin/` and `chmod +x`
-   all three.
-2. Drop `skills/handoff/SKILL.md` into `~/.claude/skills/handoff/`.
+1. Drop `bin/write_handoff.sh`, `bin/handoff_turn_append.sh`,
+   `bin/handoff_ctx_check.sh`, and `bin/handoff_session_start.sh` into
+   `~/.claude/bin/` and `chmod +x` all four.
+2. Drop `skills/handoff/SKILL.md`, `skills/handoff-more/SKILL.md`, and
+   `skills/handoff-recover/SKILL.md` into the matching
+   `~/.claude/skills/<name>/` directories.
 3. Add hooks to `~/.claude/settings.json`:
 
    ```json
@@ -76,7 +80,7 @@ Manual install:
        "SessionEnd": [{
          "hooks": [{
            "type": "command",
-           "command": "bash $HOME/.claude/bin/write_handoff.sh >/dev/null 2>&1 || true"
+           "command": "bash $HOME/.claude/bin/write_handoff.sh --if-curated >/dev/null 2>&1 || true"
          }]
        }],
        "Stop": [{
@@ -210,10 +214,28 @@ export HANDOFF_NO_GITIGNORE_BOOTSTRAP=1
 # able to read back deeper than the last few sessions.
 export HANDOFF_HISTORY_KEEP=5
 
+# Path to a pinned-context file injected verbatim at the top of every
+# handoff (read-only — the script never rotates or regenerates it, so it
+# survives across sessions until you edit it). Default:
+# .claude/handoff_pinned.md (auto-gitignored on first write when inside
+# the repo). Inert when the file is absent.
+export HANDOFF_PINNED_FILE=.claude/handoff_pinned.md
+
+# Path to a system log the handoff-time nudge watches. When this session's
+# commits look system-level (path/subject heuristic) but none touched this
+# file, the handoff adds a ⚠️ nudge. Default: SYSTEM_LOG.md at repo root.
+# Inert when the file is absent.
+export HANDOFF_SYSTEMLOG_FILE=SYSTEM_LOG.md
+
 # Disable the SessionStart auto-include of the most-recent history
 # entry when handoff_current.md has placeholder-only Notes.
 # Default: unset (fallback enabled).
 export HANDOFF_SS_DISABLE_FALLBACK=1
+
+# Disable the SessionStart "ACTION: RUN /handoff-recover" banner that
+# fires when handoff_current.md has placeholder-only Notes (previous
+# session ended without /handoff). Default: unset (banner enabled).
+export HANDOFF_SS_DISABLE_RECOVER=1
 
 # --- Context-usage system-reminder hook (handoff_ctx_check.sh) ---
 
@@ -236,6 +258,13 @@ export HANDOFF_CTX_THRESHOLD_PCT=50
 # every turn after the threshold trips. Only applies to re-flags;
 # the first crossing always fires.
 export HANDOFF_CTX_COOLDOWN_KB=100
+
+# Reminder behavior when the threshold trips. "suggest" (default) emits a
+# passive system-reminder for the assistant to flag a /handoff moment to
+# you. "act" switches to model-directed text — the assistant wraps up the
+# current step and invokes /handoff itself without asking. Pairs well with
+# a lower HANDOFF_CTX_THRESHOLD_PCT (~30) so it has runway.
+export HANDOFF_CTX_REMINDER_MODE=suggest
 ```
 
 ### Substrate pattern
