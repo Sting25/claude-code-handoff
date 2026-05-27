@@ -10,6 +10,20 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [Unreleased]
+
+No hook-command or permission changes — documentation/release hygiene only.
+
+### Fixed
+- Corrected the `--if-stale-by` deprecation note. It promised removal in
+  v0.6.0, but the alias shipped through v0.6.0 and v0.7.0 unchanged. The
+  note now reads "a future release" (in `write_handoff.sh` and this file)
+  so the docs match reality. The alias still works as an `--if-curated`
+  synonym; nothing functional changed.
+- Release tags `v0.5.0`, `v0.6.0`, and `v0.7.0` were created and pushed
+  retroactively — the CHANGELOG and `vX.Y.Z:` release commits existed but
+  the annotated tags had been missed, leaving tags stuck at v0.4.2.
+
 ## [0.7.0] — 2026-05-25
 
 No settings.json / hook-command changes — a `git pull` is enough; no
@@ -108,7 +122,8 @@ that don't opt in are entirely unaffected.
 ### Deprecated
 - `--if-stale-by SECONDS` on `write_handoff.sh` — still accepted
   and behaves as `--if-curated` (the numeric argument is ignored),
-  with a stderr deprecation warning. Will be removed in v0.6.0.
+  with a stderr deprecation warning. Slated for removal in a future
+  release (the original v0.6.0 target slipped — see Unreleased).
 
 ### Migration
 - Re-run `./install.sh` after `git pull` to update

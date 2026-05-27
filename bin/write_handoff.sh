@@ -21,7 +21,8 @@
 #                          sentinel, a curated one does not.
 #   --if-stale-by SECONDS  DEPRECATED (since v0.5.0). The numeric argument
 #                          is ignored; this is now treated as an alias for
-#                          --if-curated. Will be removed in v0.6.0.
+#                          --if-curated. Slated for removal in a future
+#                          release (the original v0.6.0 target slipped).
 
 set -euo pipefail
 
@@ -33,7 +34,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --if-stale-by)
-      echo "write_handoff.sh: --if-stale-by is deprecated since v0.5.0; behaving as --if-curated. Update your settings.json to use --if-curated; --if-stale-by will be removed in v0.6.0." >&2
+      echo "write_handoff.sh: --if-stale-by is deprecated since v0.5.0; behaving as --if-curated. Update your settings.json to use --if-curated; --if-stale-by will be removed in a future release." >&2
       IF_CURATED=1
       # Tolerate (and ignore) the now-meaningless numeric arg if present.
       if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
@@ -43,7 +44,7 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --if-stale-by=*)
-      echo "write_handoff.sh: --if-stale-by is deprecated since v0.5.0; behaving as --if-curated. Update your settings.json to use --if-curated; --if-stale-by will be removed in v0.6.0." >&2
+      echo "write_handoff.sh: --if-stale-by is deprecated since v0.5.0; behaving as --if-curated. Update your settings.json to use --if-curated; --if-stale-by will be removed in a future release." >&2
       IF_CURATED=1
       shift
       ;;
