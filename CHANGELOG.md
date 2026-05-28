@@ -36,6 +36,13 @@ installs (the fix only affects fresh/repeat runs of `install.sh`).
   scripts are committed mode 0755 so a normal checkout is already executable,
   and the `chmod` only rescues filesystems that don't preserve the exec bit.
 
+### Added
+- **Test suite** under `tests/` (`./tests/run.sh`) — dependency-free bash +
+  git (jq-using tests self-skip without it). Covers the two fixes above:
+  `--if-curated` preserve-vs-overwrite across placeholder / curated / embedded-
+  sentinel / quoted-sentinel / malformed fixtures, and install.sh surviving a
+  failing `chmod`. New changes ship with a test going forward.
+
 ## [0.7.2] — 2026-05-27
 
 Reliability, privacy, docs, and Windows (Git Bash) support. No hook-command
