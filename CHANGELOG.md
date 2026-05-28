@@ -10,6 +10,21 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [Unreleased] — 0.8.0
+
+No hook-command or permission changes; no re-install needed for existing
+installs (the fix only affects fresh/repeat runs of `install.sh`).
+
+### Fixed
+- **`install.sh` no longer aborts when a non-owner runs it.** The post-link
+  `chmod +x` targeted the repo's source scripts; under `set -euo pipefail`,
+  a user who doesn't own those files (e.g. a forge user installing from
+  chris-owned files) hit `chmod: Operation not permitted` and the script
+  aborted **before `patch_settings`**, leaving a half-install with the hooks
+  unwired. The `chmod` is now best-effort (`2>/dev/null || true`) — the
+  scripts are committed mode 0755 so a normal checkout is already executable,
+  and the `chmod` only rescues filesystems that don't preserve the exec bit.
+
 ## [0.7.2] — 2026-05-27
 
 Reliability, privacy, docs, and Windows (Git Bash) support. No hook-command

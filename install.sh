@@ -128,10 +128,15 @@ install_symlinks() {
   link "$repo_root/skills/handoff/README.md"         "$claude_home/skills/handoff/README.md"
   link "$repo_root/skills/handoff-more/SKILL.md"     "$claude_home/skills/handoff-more/SKILL.md"
   link "$repo_root/skills/handoff-recover/SKILL.md"  "$claude_home/skills/handoff-recover/SKILL.md"
+  # Best-effort: the scripts are committed mode 0755, so a normal checkout is
+  # already executable. This rescues filesystems that don't preserve the exec
+  # bit (e.g. NTFS). It must never abort the install — under set -e a chmod on
+  # source files the running user doesn't own (e.g. a forge user installing
+  # from chris-owned files) would otherwise fail and skip patch_settings.
   chmod +x "$repo_root/bin/write_handoff.sh" \
            "$repo_root/bin/handoff_turn_append.sh" \
            "$repo_root/bin/handoff_ctx_check.sh" \
-           "$repo_root/bin/handoff_session_start.sh"
+           "$repo_root/bin/handoff_session_start.sh" 2>/dev/null || true
 }
 
 uninstall_symlinks() {
