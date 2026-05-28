@@ -16,6 +16,17 @@ No hook-command or permission changes; no re-install needed for existing
 installs (the fix only affects fresh/repeat runs of `install.sh`).
 
 ### Fixed
+- **`--if-curated` no longer clobbers curated notes when the sentinel string
+  appears elsewhere in the file (data loss).** The SessionEnd safety-net
+  decided "this is an unedited placeholder, safe to overwrite" by grepping the
+  *whole* `handoff_current.md` for the placeholder sentinel. But the snapshot
+  embeds verbatim commit subjects, and curated Notes can legitimately quote the
+  sentinel — either match made the safety-net overwrite real, curated notes.
+  Detection is now scoped: the file counts as an unedited placeholder only when
+  the sentinel is the **first non-blank line under the `## Notes from this
+  session` header** (where the placeholder builder writes it). The sentinel
+  string itself is unchanged, so placeholders written by older versions are
+  still recognized. `bin/write_handoff.sh`.
 - **`install.sh` no longer aborts when a non-owner runs it.** The post-link
   `chmod +x` targeted the repo's source scripts; under `set -euo pipefail`,
   a user who doesn't own those files (e.g. a forge user installing from
@@ -24,6 +35,13 @@ installs (the fix only affects fresh/repeat runs of `install.sh`).
   unwired. The `chmod` is now best-effort (`2>/dev/null || true`) — the
   scripts are committed mode 0755 so a normal checkout is already executable,
   and the `chmod` only rescues filesystems that don't preserve the exec bit.
+
+### Added
+- **Test suite** under `tests/` (`./tests/run.sh`) — dependency-free bash +
+  git (jq-using tests self-skip without it). Covers the two fixes above:
+  `--if-curated` preserve-vs-overwrite across placeholder / curated / embedded-
+  sentinel / quoted-sentinel / malformed fixtures, and install.sh surviving a
+  failing `chmod`. New changes ship with a test going forward.
 
 ## [0.7.2] — 2026-05-27
 

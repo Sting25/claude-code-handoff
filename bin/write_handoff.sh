@@ -60,6 +60,35 @@ done
 # human editor) has replaced the placeholder with curated Notes.
 HANDOFF_PLACEHOLDER_SENTINEL="<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->"
 
+# Is handoff_current.md still the *unedited* placeholder?
+#
+# The placeholder builder (see the end of this file) writes the sentinel as the
+# first non-blank line of the "## Notes from this session" section. We scope the
+# check to exactly that position rather than grepping the whole file, because the
+# sentinel string can legitimately appear ELSEWHERE in a curated file:
+#   - the snapshot embeds verbatim commit subjects (a commit whose subject
+#     contains the sentinel would match a whole-file grep), and
+#   - curated Notes may quote the sentinel in prose (as this very change does).
+# A whole-file match would let the SessionEnd safety-net mistake a curated file
+# for a placeholder and clobber it — silent loss of the session's notes.
+#
+# Returns 0 (true) only when the first non-blank line under the Notes header is
+# exactly the sentinel. Anything else — curated content, a malformed/headerless
+# file, or a missing file — returns non-zero, i.e. "preserve, don't clobber."
+handoff_is_unedited_placeholder() {
+  local path="$1"
+  [[ -f "$path" ]] || return 1
+  awk -v sentinel="$HANDOFF_PLACEHOLDER_SENTINEL" '
+    # Skip everything until the Notes header (the snapshot lives above it).
+    !seen { if ($0 == "## Notes from this session") seen = 1; next }
+    /^[[:space:]]*$/ { next }                     # skip blank lines after header
+    { result = ($0 == sentinel) ? 0 : 1; found = 1; exit }  # first content line decides
+    # exit jumps here; END owns the final status so the rule-level exit code
+    # is not clobbered. No content line (header-only or no header) => not placeholder.
+    END { exit found ? result : 1 }
+  ' "$path"
+}
+
 # ----- Config (override via env in your shell rc) -----
 #
 # HANDOFF_INFLIGHT_DIRS — space-separated subdirs to scan for untracked /
@@ -118,14 +147,14 @@ mkdir -p "$handoff_dir"
 
 # --if-curated guard: when the SessionEnd safety-net fires after a curated
 # /handoff write, we want to preserve the curated content rather than
-# clobber it with a mechanical snapshot. The check is by content (sentinel
+# clobber it with a mechanical snapshot. The check is by content (placeholder
 # presence) rather than by mtime, so post-/handoff work in the same
 # session doesn't trigger a false skip: any session that didn't replace
 # the placeholder is still considered "no curated content to preserve."
 if (( IF_CURATED )) && [[ -f "$handoff_path" ]]; then
-  if ! grep -qF "$HANDOFF_PLACEHOLDER_SENTINEL" "$handoff_path"; then
-    # Sentinel is gone → /handoff (or a human) replaced the placeholder
-    # with curated Notes. Preserve it.
+  if ! handoff_is_unedited_placeholder "$handoff_path"; then
+    # The placeholder is gone → /handoff (or a human) replaced it with curated
+    # Notes (or the file is otherwise non-placeholder). Preserve it.
     echo "$handoff_path"
     exit 0
   fi
