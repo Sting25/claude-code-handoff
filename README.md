@@ -297,6 +297,8 @@ settings.json (backup first). The repo itself is untouched.
 │   │   └── SKILL.md               # /handoff-more slash command: load older handoffs into context
 │   └── handoff-recover/
 │       └── SKILL.md               # /handoff-recover slash command: retroactively compose Notes when the previous session crashed
+├── docs/
+│   └── handoff-pattern.md         # design philosophy: the WRITE/READ discipline behind the tool
 ├── tests/                         # dependency-free bash test suite (./tests/run.sh)
 ├── install.sh                     # symlink + settings.json patcher
 ├── CHANGELOG.md
@@ -309,6 +311,11 @@ gitignore bootstrap), and the limitations worth knowing about —
 notably that Claude Code can't actually force a session restart at a
 context threshold, so the human keystroke is still required — see
 [`skills/handoff/README.md`](skills/handoff/README.md).
+
+For the design philosophy behind the pattern — why state lives on the
+filesystem and the handoff carries only what it can't, and the WRITE/READ
+discipline that keeps it small — see
+[`docs/handoff-pattern.md`](docs/handoff-pattern.md).
 
 ## Develop
 

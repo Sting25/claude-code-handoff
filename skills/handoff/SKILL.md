@@ -67,6 +67,33 @@ nothing gets lost across the restart boundary.
    Skip items that are already in the auto-snapshot (HEAD, dirty files,
    commit list — those live above the `Notes` section).
 
+   **Garbage-collect what you inherited.** Before writing, look at the
+   cautions and lessons the handoff you *started* this session with
+   carried forward (the auto-loaded `handoff_current.md`). Don't copy
+   them forward by reflex — decide each one's fate:
+   - **Settled** — now fixed in code, or written into a spec / `AGENTS.md`
+     / memory / the system log → move it to that permanent home and
+     **drop it from the Notes.** A gotcha that's been codified has
+     graduated; it no longer belongs in the handoff.
+   - **Still live** — could still cause a wrong move next session →
+     carry it forward.
+   - **Stale** — no longer applies → drop it.
+
+   The handoff is a working set, not an archive: it should **trend
+   smaller** as lessons graduate into permanent homes, not grow every
+   session. If you carried everything forward and dropped nothing, say
+   so and why — silent monotonic growth is the signal the loop has
+   stopped maintaining itself.
+
+   **Write state claims as checks, not verdicts.** When a Note asserts
+   something the next session will rely on ("the migration is done", "X
+   is wired up"), phrase it as the check that *proves* it, not the
+   conclusion — e.g. "migration done iff `SELECT schema_version` reads 7
+   and `./smoke.sh` exits 0", not "migration done". The next session
+   re-derives the claim instead of trusting stale prose. Anything git
+   already proves (HEAD, branch, pushed commits) lives in the snapshot
+   above — don't restate it as a verdict here.
+
 3. **Verify the raw dump.** The `Stop` hook has been appending to
    `<repo-root>/.claude/handoff_backups/handoff_raw_<session_id>.md`
    throughout the session. Run `ls -la <repo-root>/.claude/handoff_backups/`
