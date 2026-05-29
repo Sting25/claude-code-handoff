@@ -91,4 +91,37 @@ check "missing transcript -> exit 0"     0  "$rc"
 check "missing transcript -> no dump"    no "$([[ -f "$bd/handoff_raw_MISS.md" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- session_id validation: malformed IDs are rejected, never path-injected --
+# session_id is interpolated into dump/cursor/lock/ctx file paths, so a value
+# with a newline, slash, or ".." must be refused before any file is touched.
+# run_turn uses printf "%s" so these reach the hook verbatim.
+
+# Newline-injection: the realistic vector is VALID JSON whose session_id value
+# carries an escaped \n that jq decodes into a real newline. Single-quoted here,
+# so run_turn's printf emits a literal backslash-n into the JSON; jq turns it
+# into a newline-bearing value our regex guard must reject. Exit clean, no file.
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; tx="$repo/tx.jsonl"
+printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
+run_turn "$repo" 'EVIL\nINJECT' "$tx"; rc=$?
+check "newline session_id -> exit 0"     0  "$rc"
+check "newline session_id -> no dumps"   0  "$(ls "$bd"/handoff_raw_*.md 2>/dev/null | wc -l | tr -d ' ')"
+rm -rf "$repo"
+
+# Path-traversal: a slash / ".." must not write outside the backup dir.
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; tx="$repo/tx.jsonl"
+printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
+run_turn "$repo" "../../escape" "$tx"; rc=$?
+check "traversal session_id -> exit 0"   0  "$rc"
+check "traversal session_id -> no escape" no "$([[ -e "$repo/escape.md" || -e "$repo/.claude/escape.md" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# Positive control: a real UUID-style id (hex + dashes) still produces a dump.
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; tx="$repo/tx.jsonl"
+sid="0a1b2c3d-4e5f-6789-abcd-ef0123456789"
+printf '{"type":"user","message":{"content":"valid uuid turn"}}\n' > "$tx"
+run_turn "$repo" "$sid" "$tx"; rc=$?
+check "uuid session_id -> exit 0"        0  "$rc"
+check "uuid session_id -> dump created"  yes "$([[ -f "$bd/handoff_raw_${sid}.md" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
 finish
