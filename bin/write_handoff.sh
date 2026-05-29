@@ -118,6 +118,15 @@ INFLIGHT_DIRS="${HANDOFF_INFLIGHT_DIRS:-docs}"
 SUBSTRATE_NAME="${HANDOFF_SUBSTRATE_NAME:-}"
 SUBSTRATE_INFLIGHT_DIRS="${HANDOFF_SUBSTRATE_INFLIGHT_DIRS:-}"
 HISTORY_KEEP="${HANDOFF_HISTORY_KEEP:-5}"
+# Guard against a negative or non-numeric value. The rotation guard skips on
+# KEEP<=0, but prune_history would still run `tail -n +$((KEEP+1))`: with KEEP=-1
+# that is `tail -n +0`, which on GNU means "from the start" — i.e. it lists and
+# deletes EVERY history file (silent data loss), and on BSD it errors. Anything
+# that isn't a non-negative integer falls back to the default 5.
+if ! [[ "$HISTORY_KEEP" =~ ^[0-9]+$ ]]; then
+  echo "write_handoff.sh: HANDOFF_HISTORY_KEEP='$HISTORY_KEEP' is not a non-negative integer; using default 5." >&2
+  HISTORY_KEEP=5
+fi
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$repo_root" ]]; then

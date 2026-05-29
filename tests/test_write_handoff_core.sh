@@ -87,6 +87,25 @@ check "rotated current survives (newest)"    yes "$([[ -f "$hist/handoff_2020-06
 check "oldest history pruned"                no  "$([[ -f "$hist/handoff_2020-01-01_000000.md" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- Invalid HANDOFF_HISTORY_KEEP falls back to 5 (no history wipe) ----------
+# Regression: KEEP=-1 made prune run `tail -n +0`, which on GNU deletes EVERY
+# history file (silent data loss). A negative/garbage value must clamp to the
+# default 5 and preserve existing history, not erase it.
+for bad in -1 abc; do
+  repo="$(mk_repo_gitignored)"
+  hist="$repo/.claude/handoff_history"; mkdir -p "$hist"
+  echo cur > "$repo/.claude/handoff_current.md"
+  for ts in 2020-01-01_000000 2020-01-02_000000 2020-01-03_000000; do
+    echo old > "$hist/handoff_$ts.md"
+  done
+  err="$( cd "$repo" && HANDOFF_HISTORY_KEEP="$bad" bash "$WH" 2>&1 >/dev/null )"; rc=$?
+  kept="$(ls -1 "$hist"/handoff_*.md 2>/dev/null | wc -l | tr -d ' ')"
+  check "KEEP=$bad -> exit 0"               0   "$rc"
+  check "KEEP=$bad -> warns + clamps"       yes "$(has "$err" "not a non-negative integer")"
+  check "KEEP=$bad -> history NOT wiped"    yes "$([[ "$kept" -ge 3 ]] && echo yes || echo no)"
+  rm -rf "$repo"
+done
+
 # --- HANDOFF_HISTORY_KEEP=0 disables rotation/retention ---------------------
 repo="$(mk_repo_gitignored)"
 mkdir -p "$repo/.claude"
