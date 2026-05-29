@@ -10,6 +10,60 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.8.2] — 2026-05-29
+
+Audit remainder (issue #16: MEDIUM/LOW/INFO findings after v0.8.1) plus a
+Forge parity bug (issue #21). No hook-command or permission changes — a
+`git pull` re-points the symlinked scripts; no re-install needed. The one
+exception is installs made from a **volatile checkout** (a `/tmp` worktree,
+git-archive extract, CI scratch dir): those symlinks dangle once the source
+is cleaned up. v0.8.2 now copies instead of symlinks in that case — re-run
+`./install.sh` from a persistent clone (or with `--copy`) to repair a prior
+dangling install, and `./install.sh --doctor` to check.
+
+### Added
+- **`./install.sh --doctor`** — verifies every installed `~/.claude/bin/*.sh`
+  hook resolves to a real file; exits non-zero listing any dangling/missing
+  ones. (#21)
+- **`./install.sh --copy` / `--link`** — force copy vs. symlink install mode;
+  `HANDOFF_FORCE_SYMLINK=1` overrides the volatile-source auto-copy. (#21)
+- **SessionStart sibling self-check** — `handoff_session_start.sh` warns
+  (visibly, in SessionStart output) if any of its sibling hook links dangle;
+  silent when healthy. Second layer of defense for the silent-no-op mode. (#21)
+
+### Fixed
+- **Installing from a volatile source no longer dangles silently.** install.sh
+  detects a `repo_root` under `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, or an
+  mktemp-style `tmp.XXXX` component and switches to copy mode (which survives
+  the source's cleanup) with a clear warning. A persistent clone still
+  symlinks. (#21)
+- **`handoff_turn_append.sh` validates `session_id`** before interpolating it
+  into dump/cursor/lock/ctx paths — rejects anything outside `[A-Za-z0-9_-]`,
+  closing a newline/slash/`..` path-construction vector. (#16, MEDIUM)
+- **mkdir-lock fallback now reclaims a stale `.lock.d`.** On platforms without
+  `flock` (macOS/BSD), a lock left by a hard-killed holder froze per-session
+  appends forever; age-based detection (`HANDOFF_LOCK_STALE_SECS`, default 60s)
+  reclaims and retries once. (#16, MEDIUM)
+- **`HANDOFF_CTX_WINDOW_TOKENS` div-by-zero.** A non-positive-integer override
+  (0/negative/garbage) divided by zero and killed the hook under `set -e`; such
+  values now fall through to auto-detection. (#16, LOW)
+- **`handoff_session_start.sh` upgraded to `set -euo pipefail`**, with the
+  history-pointer `ls | wc -l` pipeline hardened so an empty history dir can't
+  abort the hook before the current handoff is emitted. (#16, LOW)
+- **Owner-only permissions (`umask 077`).** settings.json (can hold env tokens),
+  its backups, copy-mode installs, and the handoff doc (verbatim session prose)
+  are now created 0600/0700. (#16, LOW)
+- **`$claude_home` validation** — install.sh refuses a root or relative path and
+  warns when it's outside `$HOME`, before touching anything under it. (#16, INFO)
+- **Configured-but-missing substrate is surfaced on stderr** instead of silently
+  skipped, so `HANDOFF_SUBSTRATE_NAME` typos are visible. (#16, INFO)
+
+### Tests
+- New negative-controlled coverage for all of the above, plus three previously
+  untested paths from the #16 audit: the System-log handoff nudge, install.sh's
+  legacy hook-migration, and the symlink→copy fallback. Suite remains
+  dependency-free; `./tests/run.sh` green.
+
 ## [0.8.1] — 2026-05-29
 
 Security hardening from a full code + security audit (30 confirmed findings

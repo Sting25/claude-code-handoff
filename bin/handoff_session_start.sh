@@ -28,6 +28,30 @@ repo="${CLAUDE_PROJECT_DIR:-$PWD}"
 current="$repo/.claude/handoff_current.md"
 history_dir="$repo/.claude/handoff_history"
 
+# Self-check: if our sibling hook scripts are dangling symlinks — e.g. the whole
+# install was symlinked from a temp checkout that later got cleaned up — every
+# handoff hook silently no-ops (handoffs never get written, with zero signal).
+# SessionStart output is the one place the user reliably sees, so surface it
+# here. Cheap (three path tests), and silent unless something is actually
+# broken. Runs before the no-handoff exit below so a fresh repo still warns.
+# (issue #21)
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || self_dir=""
+if [ -n "$self_dir" ]; then
+  broken=""
+  for sib in write_handoff.sh handoff_turn_append.sh handoff_ctx_check.sh; do
+    if [ -L "$self_dir/$sib" ] && [ ! -e "$self_dir/$sib" ]; then
+      broken="$broken $sib"
+    fi
+  done
+  if [ -n "$broken" ]; then
+    echo "⚠️  handoff: dangling hook link(s):$broken"
+    echo "    Those hooks are silently disabled (handoffs may not be written)."
+    echo "    Re-run install.sh from your persistent clone, or diagnose with:"
+    echo "    bash <clone>/install.sh --doctor"
+    echo
+  fi
+fi
+
 [ -f "$current" ] || exit 0
 
 echo "## Auto-loaded handoff from previous session"
