@@ -221,6 +221,31 @@ settings.json (other hooks, theme, etc.) are left untouched.
 Requires `jq` for the settings.json patch. If you don't have it, the
 installer prints the JSON snippet for you to paste manually.
 
+### Install modes: symlink vs. copy
+
+By default the bin scripts are **symlinked**, so a `git pull` in the
+clone is live in the next session with no re-install. But if you install
+from a **volatile checkout** — a `/tmp` worktree, a `git archive`
+extract, a CI scratch dir — those symlinks dangle the moment the source
+is cleaned up, and the hooks then silently no-op. So when the installer
+detects a volatile `repo_root` (under `/tmp`, `/var/tmp`, `/dev/shm`,
+`$TMPDIR`, or an mktemp-style `tmp.XXXX` path) it switches to **copy
+mode** automatically and says so. A normal persistent clone always
+symlinks.
+
+```bash
+./install.sh --copy      # force copy mode (snapshot; survives source deletion)
+./install.sh --link      # force symlinks even from a volatile path
+./install.sh --doctor     # report any dangling/missing installed hooks (exit ≠0 if broken)
+```
+
+`HANDOFF_FORCE_SYMLINK=1` is the env-var escape hatch for the volatile
+auto-copy. If a previous install left dangling links (e.g. you installed
+from `/tmp`), re-run `./install.sh` from a persistent clone — or
+`--copy` — to repair it; `--doctor` tells you whether you need to. As a
+second line of defense, every SessionStart self-checks its own hook
+links and prints a visible warning if any dangle.
+
 ### Compatibility
 
 Runs on Linux, macOS, and Windows (Git Bash / WSL). Needs `bash`, `git`,
@@ -242,6 +267,9 @@ Code session. The exception is if a future release changes the hook
 command string or adds a new hook — that's called out in
 [`CHANGELOG.md`](CHANGELOG.md), and re-running `./install.sh` after
 `git pull` re-patches your settings.json.
+
+Run `./install.sh --doctor` anytime to confirm every installed hook
+still resolves (handy after moving or re-cloning the repo).
 
 ## Uninstall
 
