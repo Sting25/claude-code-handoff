@@ -21,11 +21,36 @@
 
 set -euo pipefail
 
+# Everything this installer creates under $claude_home — settings.json and its
+# backups, the bin/skills copies (copy-mode installs), and the dirs themselves —
+# is per-user state that can carry secrets (settings.json may hold env tokens).
+# umask 077 makes all of it owner-only at creation; symlink *targets* are
+# unaffected, and hooks run via `bash <path>` so the copies need no exec bit.
+umask 077
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
 ts="$(date +%Y%m%d_%H%M%S)"
 mode=install
+
+# Validate $claude_home before creating or patching anything under it: an empty,
+# root, or relative value would scatter symlinks and a patched settings.json
+# into unintended places. Require an absolute path other than '/'. A path
+# outside $HOME is permitted (the test suite and some shared setups point it at
+# a temp dir) but warned about, since it's unusual and easy to mistype.
+case "$claude_home" in
+  "" | "/")
+    echo "ERROR: CLAUDE_HOME='$claude_home' is empty or root — refusing to operate there." >&2
+    exit 2 ;;
+  /*) : ;;
+  *)
+    echo "ERROR: CLAUDE_HOME='$claude_home' is not an absolute path — refusing." >&2
+    exit 2 ;;
+esac
+if [[ -n "${HOME:-}" && "$claude_home" != "$HOME" && "$claude_home" != "$HOME"/* ]]; then
+  echo "warning: CLAUDE_HOME='$claude_home' is outside \$HOME ($HOME); proceeding." >&2
+fi
 
 # Recovery state for the settings.json patch/unpatch sequence. The edits are a
 # series of separate jq writes; if the script aborts (set -e) partway through,
