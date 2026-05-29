@@ -26,6 +26,15 @@
 
 set -euo pipefail
 
+# The handoff document and its rotated history capture verbatim session prose,
+# which can include anything sensitive surfaced during the session — so every
+# file this script writes under .claude/ should be owner-only. umask 077 makes
+# the handoff doc, history snapshots, and history dir 0600/0700 at creation
+# time (matching the Stop hook's handling of the raw dumps). The defensive
+# chmod after the final write also tightens a doc left readable by a pre-0.8.2
+# version on upgrade.
+umask 077
+
 IF_CURATED=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -264,6 +273,11 @@ if [[ -n "$SUBSTRATE_NAME" ]]; then
   candidate="$(cd "$repo_root/.." && pwd)/$SUBSTRATE_NAME"
   if [[ -d "$candidate/.git" ]]; then
     substrate_root="$candidate"
+  else
+    # Configured but not found / not a git repo. Silently skipping hid typos in
+    # HANDOFF_SUBSTRATE_NAME and renamed/missing siblings; surface it so the
+    # user knows the substrate snapshot was intentionally omitted, not lost.
+    echo "write_handoff.sh: substrate '$SUBSTRATE_NAME' not found as a git repo at '$candidate'; skipping substrate snapshot." >&2
   fi
 fi
 
@@ -445,5 +459,9 @@ EOF
   printf 'that only the conversation knows. The sentinel above is how the\n'
   printf 'SessionEnd safety-net detects whether curation has happened._\n'
 } > "$handoff_path"
+
+# Tighten even a doc created by a pre-0.8.2 version (umask only governs files
+# created during *this* run); the prose may include secrets.
+chmod 600 "$handoff_path" 2>/dev/null || true
 
 echo "$handoff_path"
