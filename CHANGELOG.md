@@ -16,6 +16,13 @@ No hook-command or permission changes; no re-install needed for existing
 installs (the fix only affects fresh/repeat runs of `install.sh`).
 
 ### Fixed
+- **In-flight `.md` files with spaces in their names are no longer dropped from
+  the handoff.** `list_inflight_md` parsed `git status --porcelain` with
+  `awk '{print $2}'`, which truncates at the first space — and plain porcelain
+  also C-quotes spaced paths — so a file like `docs/my notes.md` failed the
+  `.md` filter and silently vanished from the "In-flight" section. Now uses
+  `git status --porcelain -z` (NUL-terminated, verbatim paths) parsed in bash.
+  `bin/write_handoff.sh`.
 - **`install.sh` is robust to empty / malformed `settings.json`, and uninstall
   no longer deletes a user's co-located hook.** Three related issues, all in the
   settings.json patching:
@@ -74,10 +81,10 @@ installs (the fix only affects fresh/repeat runs of `install.sh`).
   sentinel / quoted-sentinel / malformed fixtures; install.sh surviving a
   failing `chmod`; and settings.json robustness (empty / malformed / absent /
   valid+idempotent inputs, and command-level uninstall preserving co-located
-  user hooks); and macOS/BSD portability (flock-absent mkdir-lock fallback,
-  tac→grep|tail token extraction, mapfile→while prune, and the stat+date mtime
-  stamp under simulated-BSD tool shims). New changes ship with a test going
-  forward.
+  user hooks); in-flight `.md` listing of spaced filenames; and macOS/BSD
+  portability (flock-absent mkdir-lock fallback, tac→grep|tail token
+  extraction, mapfile→while prune, and the stat+date mtime stamp under
+  simulated-BSD tool shims). New changes ship with a test going forward.
 
 ## [0.7.2] — 2026-05-27
 
