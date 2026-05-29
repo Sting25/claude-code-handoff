@@ -10,6 +10,43 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.8.1] — 2026-05-29
+
+Security hardening from a full code + security audit (30 confirmed findings
+after adversarial verification; these are the HIGH-severity ones). No hook-
+command or permission changes — a `git pull` re-points the symlinked scripts;
+no re-install needed. Re-running `./install.sh` is harmless, and existing dump
+files are tightened to 0600 on the next session automatically.
+
+### Fixed (security)
+- **Raw transcript dumps are now created owner-only (0600), and git-ignored
+  before the first write.** The Stop hook's per-turn dumps contain verbatim
+  session content — including anything sensitive surfaced in tool output — but
+  were written with plain `>` redirection (0664, world/group-readable), and the
+  `.gitignore` entry for `.claude/handoff_backups/` was only added at SessionEnd
+  by `write_handoff.sh` — after the Stop hook had already written dumps on the
+  first prompt, leaving a window where `git add` could stage secrets. Now
+  `handoff_turn_append.sh` runs `umask 077` (dir 0700, dump 0600), defensively
+  `chmod 600`s the dump (tightening files left 0664 by older versions), and
+  bootstraps the `.gitignore` entry itself before the first dump write.
+- **`install.sh` restores `settings.json` on a mid-patch failure.** The patch
+  is a series of separate `jq` writes after a backup; if one failed mid-sequence
+  the file was left half-patched with no restore. The `EXIT` trap now rolls
+  `settings.json` back to the pre-patch backup on any abnormal exit during the
+  patch/unpatch sequence (backup retained for inspection).
+- **`install.sh` uninstall matches the full installed path, not the bare
+  filename.** Hook markers were bare filenames matched with `jq contains()`, so
+  a user's own hook merely mentioning a script name (e.g. a wrapper
+  `my_handoff_turn_append.sh`) could be removed on uninstall. Markers are now
+  the full `$HOME/.claude/bin/<script>` command path — more specific and
+  backward-compatible. `bin/` is unchanged; this is `install.sh` only.
+- **`HANDOFF_HISTORY_KEEP` is validated against negative / non-numeric values.**
+  The rotation guard skipped on `KEEP<=0`, but pruning still ran
+  `tail -n +$((KEEP+1))`; with `KEEP=-1` that is `tail -n +0`, which on GNU
+  means "from the start" — so prune silently **deleted every handoff_history
+  file**. Any value that isn't a non-negative integer now warns and falls back
+  to the default 5. `bin/write_handoff.sh`.
+
 ## [0.8.0] — 2026-05-29
 
 Robustness, portability, and test coverage: macOS/BSD support for the hook
