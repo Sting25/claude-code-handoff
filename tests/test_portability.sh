@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Portability guards for the macOS/BSD fixes:
+#   - handoff_turn_append.sh: flock -> mkdir-lock fallback; tac -> grep|tail;
+#     mapfile -> while-read over a process substitution.
+#   - write_handoff.sh: date -u -r FILE -> portable stat+date mtime stamp.
+# Behaviour is exercised on this (GNU) host for no-regression, plus the BSD
+# branches are forced via tool shims / a flock-less PATH.
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+TA="$REPO_ROOT/bin/handoff_turn_append.sh"
+WH="$REPO_ROOT/bin/write_handoff.sh"
+command -v jq   >/dev/null 2>&1 || { echo "install.sh"; skip "jq missing";   finish; exit; }
+command -v perl >/dev/null 2>&1 || { skip "perl missing — Stop hook needs it"; finish; exit; }
+
+# A PATH that mirrors the real one but omits a single tool (to force a fallback).
+path_without() {
+  local drop="$1" shim d f b
+  shim="$(mktemp -d)"
+  for d in ${PATH//:/ }; do
+    [[ -d "$d" ]] || continue
+    for f in "$d"/*; do
+      b="$(basename "$f")"
+      [[ "$b" == "$drop" ]] && continue
+      [[ -e "$shim/$b" ]] || ln -s "$f" "$shim/$b" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$shim"
+}
+
+run_turn() {  # <repo> <session_id> <transcript> [PATH override]
+  local repo="$1" sid="$2" tx="$3" pathov="${4:-$PATH}"
+  ( cd "$repo" && PATH="$pathov" printf '{"session_id":"%s","transcript_path":"%s"}' "$sid" "$tx" \
+      | PATH="$pathov" bash "$TA" >/dev/null 2>&1 )
+}
+
+# ---------------------------------------------------------------------------
+echo "handoff_turn_append.sh — token extraction + append (grep|tail)"
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"
+tx="$repo/tx.jsonl"
+cat > "$tx" <<'JSONL'
+{"type":"user","message":{"content":"hello there"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"first reply"}],"usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"second reply"}],"usage":{"input_tokens":200,"cache_read_input_tokens":50,"cache_creation_input_tokens":25}}}
+JSONL
+run_turn "$repo" S1 "$tx"
+dump="$bd/handoff_raw_S1.md"
+check "turn block appended"            yes "$([[ -f "$dump" ]] && grep -q 'first reply' "$dump" && echo yes || echo no)"
+check "last-assistant tokens (275)"    275 "$(cat "$bd/.ctx_tokens_S1" 2>/dev/null)"
+rm -rf "$repo"
+
+# ---------------------------------------------------------------------------
+echo "handoff_turn_append.sh — prune keeps 3 newest (mapfile -> while)"
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; mkdir -p "$bd"
+for i in 1 2 3 4 5; do
+  echo x > "$bd/handoff_raw_OLD$i.md"
+  echo 1 > "$bd/.handoff_raw_OLD$i.cursor"; echo 1 > "$bd/.ctx_OLD$i"
+  touch -d "2026-01-0$i 00:00" "$bd/handoff_raw_OLD$i.md"
+done
+tx="$repo/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
+run_turn "$repo" NEW "$tx"   # creates handoff_raw_NEW.md (newest) then prunes
+present() { [[ -e "$bd/$1" ]] && echo yes || echo no; }
+check "newest kept: NEW"      yes "$(present handoff_raw_NEW.md)"
+check "kept: OLD5"            yes "$(present handoff_raw_OLD5.md)"
+check "kept: OLD4"            yes "$(present handoff_raw_OLD4.md)"
+check "pruned: OLD3"          no  "$(present handoff_raw_OLD3.md)"
+check "pruned: OLD1"          no  "$(present handoff_raw_OLD1.md)"
+check "pruned sidecar .ctx_OLD1" no "$(present .ctx_OLD1)"
+rm -rf "$repo"
+
+# ---------------------------------------------------------------------------
+echo "handoff_turn_append.sh — flock-absent mkdir-lock fallback"
+noflock="$(path_without flock)"
+check "flock really absent on shim PATH" absent "$(PATH="$noflock" command -v flock >/dev/null 2>&1 && echo present || echo absent)"
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"
+tx="$repo/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
+run_turn "$repo" LK "$tx" "$noflock"
+check "appends without flock"  yes "$([[ -f "$bd/handoff_raw_LK.md" ]] && echo yes || echo no)"
+check "lock dir released"      no  "$([[ -d "$bd/.handoff_raw_LK.lock.d" ]] && echo yes || echo no)"
+# Held lock blocks a fresh session (no append).
+repo2="$(mk_repo)"; bd2="$repo2/.claude/handoff_backups"; mkdir -p "$bd2"
+mkdir "$bd2/.handoff_raw_HELD.lock.d"
+tx2="$repo2/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx2"
+run_turn "$repo2" HELD "$tx2" "$noflock"
+check "held lock blocks append" no "$([[ -f "$bd2/handoff_raw_HELD.md" ]] && echo yes || echo no)"
+rm -rf "$repo" "$repo2" "$noflock"
+
+# ---------------------------------------------------------------------------
+echo "write_handoff.sh — rotation timestamp from file mtime (GNU + BSD)"
+rotate_stamp() {  # <PATH override> -> echoes the rotated history filename
+  local pathov="$1" repo
+  repo="$(mk_repo)"; mkdir -p "$repo/.claude"
+  echo "old handoff" > "$repo/.claude/handoff_current.md"
+  touch -d "2020-03-04 05:06:07 UTC" "$repo/.claude/handoff_current.md"
+  ( cd "$repo" && PATH="$pathov" HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 bash "$WH" >/dev/null 2>&1 )
+  ls "$repo/.claude/handoff_history/" 2>/dev/null | head -1
+  rm -rf "$repo"
+}
+check "GNU: stamp reflects mtime" "handoff_2020-03-04_050607.md" "$(rotate_stamp "$PATH")"
+
+# BSD shims: stat supports only -f %m, date supports only -r EPOCH.
+bsd="$(path_without stat)"; bsd="$(PATH="$bsd" path_without date)"  # drop both real tools
+REAL_STAT="$(command -v stat)"; REAL_DATE="$(command -v date)"
+cat > "$bsd/stat" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" -c "*) exit 1 ;;                                   # GNU form: unsupported
+  *" -f "*) [[ "\$2" == "%m" ]] && exec "$REAL_STAT" -c %Y "\$3"; exit 1 ;;
+esac
+exit 1
+EOF
+cat > "$bsd/date" <<EOF
+#!/usr/bin/env bash
+real="$REAL_DATE"; new=(); epoch=""; have_r=0; i=1
+for ((; i<=\$#; i++)); do
+  a="\${!i}"
+  case "\$a" in
+    -d) exit 1 ;;                                        # GNU form: unsupported
+    -r) have_r=1; n=\$((i+1)); epoch="\${!n}"; i=\$n ;;   # BSD: epoch arg
+    *)  new+=("\$a") ;;
+  esac
+done
+if (( have_r )); then exec "\$real" -d "@\$epoch" "\${new[@]}"; else exec "\$real" "\${new[@]}"; fi
+EOF
+chmod +x "$bsd/stat" "$bsd/date"
+check "BSD-sim: stat -c rejected"  rejected "$(PATH="$bsd" stat -c %Y "$WH" >/dev/null 2>&1 && echo ok || echo rejected)"
+check "BSD-sim: stat -f works"     works    "$(PATH="$bsd" stat -f %m "$WH" >/dev/null 2>&1 && echo works || echo no)"
+check "BSD-sim: date -d rejected"  rejected "$(PATH="$bsd" date -d @100 >/dev/null 2>&1 && echo ok || echo rejected)"
+check "BSD-sim: stamp reflects mtime" "handoff_2020-03-04_050607.md" "$(rotate_stamp "$bsd")"
+rm -rf "$bsd"
+
+finish
