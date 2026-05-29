@@ -40,6 +40,12 @@ transcript_path="$(jq -r '.transcript_path // empty' <<<"$payload")"
 [[ -z "$transcript_path"   ]] && exit 0
 [[ ! -f "$transcript_path" ]] && exit 0
 
+# session_id is interpolated into filesystem paths (dump/cursor/lock/ctx files
+# below), so a value carrying a newline, slash, or ".." could break path
+# construction or escape the backup dir. Real Claude Code session IDs are UUIDs
+# (hex + dashes); accept only [A-Za-z0-9_-] and exit clean on anything else.
+[[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
+
 # --- Repo scope: only run inside git worktrees ---
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [[ -z "$repo_root" ]] && exit 0
