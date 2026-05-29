@@ -14,8 +14,15 @@
 # is backed up the same way before any patch. Re-runs are safe and only
 # touch what's actually missing.
 #
+# Installing from a volatile path (a /tmp worktree, git-archive extract, CI
+# scratch) auto-switches to copy mode, since symlinks into it would dangle once
+# it's cleaned up and the hooks would then fail silently. Override with --link.
+#
 # Usage:
-#   ./install.sh              # install (symlink + patch)
+#   ./install.sh              # install (symlink from a persistent clone, else copy)
+#   ./install.sh --copy       # force copy mode (good for ephemeral sources)
+#   ./install.sh --link       # force symlinks even from a volatile path
+#   ./install.sh --doctor     # report any dangling/missing installed hooks
 #   ./install.sh --uninstall  # remove symlinks + strip patched entries
 #   ./install.sh --help
 
@@ -33,6 +40,11 @@ claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
 ts="$(date +%Y%m%d_%H%M%S)"
 mode=install
+
+# Link strategy. "auto" symlinks from a persistent source and copies from a
+# volatile one (see is_volatile_path below); --copy / --link force the choice,
+# and HANDOFF_FORCE_SYMLINK=1 is an escape hatch for the volatile auto-copy.
+link_mode="auto"
 
 # Validate $claude_home before creating or patching anything under it: an empty,
 # root, or relative value would scatter symlinks and a patched settings.json
@@ -74,8 +86,11 @@ trap cleanup EXIT
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --uninstall) mode=uninstall ;;
+    --doctor)    mode=doctor ;;
+    --copy)      link_mode=copy ;;
+    --link)      link_mode=link ;;
     --help|-h)
-      sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -117,16 +132,56 @@ up_marker='$HOME/.claude/bin/handoff_ctx_check.sh'
 # installer can remind the user that copies don't auto-update on git pull.
 COPIED_ANY=0
 
+# A "volatile" repo_root is one likely to be deleted out from under us — a
+# /tmp worktree, a `git archive` extract, a CI scratch dir. Symlinking from
+# there leaves every ~/.claude/bin/*.sh dangling once it's cleaned up, and the
+# hooks then no-op silently (issue #21). Heuristics: under /tmp, /var/tmp,
+# /dev/shm, or $TMPDIR; or any path component that looks like an mktemp dir
+# (tmp.XXXX). A persistent clone like /mnt/ddrive/handoff matches none of these.
+is_volatile_path() {
+  local p="$1"
+  case "$p" in
+    /tmp|/tmp/*|/var/tmp|/var/tmp/*|/dev/shm/*) return 0 ;;
+    */tmp.*) return 0 ;;
+  esac
+  if [[ -n "${TMPDIR:-}" ]]; then
+    local t="${TMPDIR%/}"
+    [[ -n "$t" && ( "$p" == "$t" || "$p" == "$t"/* ) ]] && return 0
+  fi
+  return 1
+}
+
+# Decide symlink vs copy. --copy/--link are explicit; "auto" copies from a
+# volatile source (copies survive its cleanup) and symlinks otherwise. The
+# volatile auto-copy can be overridden with HANDOFF_FORCE_SYMLINK=1 (or --link).
+force_copy=0
+case "$link_mode" in
+  copy) force_copy=1 ;;
+  link) force_copy=0 ;;
+  auto)
+    if is_volatile_path "$repo_root" && [[ "${HANDOFF_FORCE_SYMLINK:-0}" != "1" ]]; then
+      force_copy=1
+      echo "warning: installing from a volatile path ($repo_root)." >&2
+      echo "         Symlinks would dangle when it's cleaned up and the hooks would" >&2
+      echo "         then fail silently — using COPY mode instead (the copies survive)." >&2
+      echo "         Re-run from a persistent clone for auto-updating symlinks, or pass" >&2
+      echo "         --link / HANDOFF_FORCE_SYMLINK=1 to force symlinks anyway." >&2
+    fi
+    ;;
+esac
+
 link() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
   if [[ -L "$dst" ]]; then
     local current
     current="$(readlink "$dst")"
-    if [[ "$current" == "$src" ]]; then
+    if [[ "$current" == "$src" ]] && (( ! force_copy )); then
       echo "  ok      $dst -> $src"
       return
     fi
+    # In copy mode, an existing symlink (even one pointing at src) must be
+    # replaced by a real copy, so don't early-return above.
     echo "  relink  $dst (was -> $current)"
     rm "$dst"
   elif [[ -e "$dst" ]]; then
@@ -141,16 +196,21 @@ link() {
   else
     echo "  new     $dst"
   fi
-  # Prefer a real symlink; fall back to copying when the platform can't make
-  # one. Git Bash on Windows without Developer Mode either errors on ln -s or
+  # Prefer a real symlink unless copy mode was chosen (volatile source or
+  # --copy). Otherwise fall back to copying when the platform can't make one:
+  # Git Bash on Windows without Developer Mode either errors on ln -s or
   # silently copies — the -L check catches the silent-copy case too.
-  if ln -s "$src" "$dst" 2>/dev/null && [[ -L "$dst" ]]; then
+  if (( ! force_copy )) && ln -s "$src" "$dst" 2>/dev/null && [[ -L "$dst" ]]; then
     return
   fi
   rm -f "$dst"
   cp "$src" "$dst"
   COPIED_ANY=1
-  echo "  copy    $dst (symlinks unavailable — re-run install.sh after updates)"
+  if (( force_copy )); then
+    echo "  copy    $dst (copy mode — re-run install.sh after updates)"
+  else
+    echo "  copy    $dst (symlinks unavailable — re-run install.sh after updates)"
+  fi
 }
 
 unlink_if_ours() {
@@ -447,9 +507,45 @@ unpatch_settings() {
   fi
 }
 
+# Self-check: verify each installed hook script under $claude_home/bin actually
+# resolves. A dangling symlink (e.g. installed from a temp checkout that was
+# later cleaned up) makes the corresponding hook no-op silently, so surface it
+# loudly here. Exit non-zero if anything is broken so CI / a wrapper can detect
+# it. (issue #21)
+doctor() {
+  local broken=0 dst tgt name
+  echo "doctor: checking installed handoff hooks under $claude_home/bin"
+  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start; do
+    dst="$claude_home/bin/$name.sh"
+    if [[ -e "$dst" ]]; then
+      if [[ -L "$dst" ]]; then
+        echo "  ok      $dst -> $(readlink "$dst")"
+      else
+        echo "  ok      $dst (copy)"
+      fi
+    elif [[ -L "$dst" ]]; then
+      tgt="$(readlink "$dst" 2>/dev/null || true)"
+      echo "  BROKEN  $dst -> $tgt (dangling symlink — hook is silently disabled)"
+      broken=$((broken + 1))
+    else
+      echo "  MISSING $dst (not installed)"
+      broken=$((broken + 1))
+    fi
+  done
+  echo
+  if (( broken )); then
+    echo "doctor: $broken hook(s) broken or missing." >&2
+    echo "        Re-run ./install.sh from a persistent clone (not a /tmp checkout)." >&2
+    return 1
+  fi
+  echo "doctor: all hooks resolve."
+}
+
 # ------------------------------------------------------------------------ main
 
-if [[ "$mode" == install ]]; then
+if [[ "$mode" == doctor ]]; then
+  doctor
+elif [[ "$mode" == install ]]; then
   echo "installing handoff skill from $repo_root into $claude_home"
   echo
   echo "symlinks:"
@@ -461,8 +557,8 @@ if [[ "$mode" == install ]]; then
   echo "done. start a new Claude Code session — /handoff is available now."
   if [[ "$COPIED_ANY" == "1" ]]; then
     echo
-    echo "note: real symlinks weren't available, so files were COPIED into"
-    echo "      $claude_home. After a future 'git pull' in this repo, re-run"
+    echo "note: files were COPIED into $claude_home (copy mode or symlinks"
+    echo "      unavailable). After a future 'git pull' in this repo, re-run"
     echo "      ./install.sh to refresh the copies — symlinked installs update"
     echo "      automatically, copies do not."
   fi
