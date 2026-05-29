@@ -24,6 +24,13 @@
 
 set -euo pipefail
 
+# Raw transcript dumps contain verbatim session content — including anything
+# sensitive surfaced in tool output — so every file this hook creates must be
+# owner-only. umask 077 makes the backup dir 0700 and the dump 0600 at creation
+# time (the mktemp sidecars were already 0600); the defensive chmod below also
+# tightens a dump left 0664 by a pre-0.8.1 version on upgrade.
+umask 077
+
 # --- Read hook payload ---
 payload="$(cat)"
 session_id="$(jq -r '.session_id // empty'      <<<"$payload")"
@@ -39,6 +46,20 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 
 backup_dir="$repo_root/.claude/handoff_backups"
 mkdir -p "$backup_dir"
+
+# Ensure the backup dir is git-ignored BEFORE we write any dump into it. The
+# dumps can carry secrets, and this Stop hook fires on the first prompt — long
+# before write_handoff.sh (SessionEnd) bootstraps the .gitignore — so without
+# this there is a window where a `git add` could stage a dump into history.
+# Mirrors write_handoff.sh's bootstrap and honors the same opt-out env var.
+if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]] \
+   && ! git -C "$repo_root" check-ignore -q ".claude/handoff_backups/" 2>/dev/null; then
+  gi="$repo_root/.gitignore"
+  if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
+    printf '\n' >> "$gi"
+  fi
+  echo ".claude/handoff_backups/" >> "$gi"
+fi
 
 dump_file="$backup_dir/handoff_raw_${session_id}.md"
 cursor_file="$backup_dir/.handoff_raw_${session_id}.cursor"
@@ -107,6 +128,9 @@ if [[ ! -f "$dump_file" ]]; then
     printf -- '---\n'
   } > "$dump_file"
 fi
+# Tighten perms even on a dump created by a pre-0.8.1 version (umask only
+# governs files created during *this* run); the contents may include secrets.
+chmod 600 "$dump_file" 2>/dev/null || true
 
 # --- Append new turn block ---
 {
