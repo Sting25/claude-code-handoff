@@ -86,7 +86,11 @@ current_bytes="$(cat "$size_file" 2>/dev/null || echo 0)"
 #          fresh projects where the user is a 1M user but hasn't typed
 #          here yet.
 window_tokens="${HANDOFF_CTX_WINDOW_TOKENS:-}"
-if [[ -z "$window_tokens" ]]; then
+# A non-positive-integer override (0, negative, or garbage) would make the
+# threshold/pct arithmetic below divide by zero — fatal under `set -e`. Treat
+# any such value as unset and fall through to auto-detection. The regex test
+# short-circuits the `(( ))` so a non-numeric value never reaches arithmetic.
+if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
   window_tokens=200000
   if [[ -f "$HOME/.claude.json" ]]; then
     # Step 1: per-project has [1m].

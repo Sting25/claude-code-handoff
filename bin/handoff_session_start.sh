@@ -22,7 +22,7 @@
 #       handoff-recover skill installed and wants the silent
 #       fallback-only behavior.
 
-set -eu
+set -euo pipefail
 
 repo="${CLAUDE_PROJECT_DIR:-$PWD}"
 current="$repo/.claude/handoff_current.md"
@@ -107,7 +107,10 @@ fi
 # Pointer to the history dir so the assistant knows older snapshots
 # exist and can run /handoff-more to pull them in deliberately.
 if [ -d "$history_dir" ]; then
-  count="$(ls -1 "$history_dir"/handoff_*.md 2>/dev/null | wc -l | tr -d ' ')"
+  # `|| true`: under `pipefail`, a non-matching glob makes `ls` fail and the
+  # whole pipeline non-zero, which `set -e` would treat as fatal. The count is
+  # defaulted to 0 below, so swallowing the status here is safe.
+  count="$(ls -1 "$history_dir"/handoff_*.md 2>/dev/null | wc -l | tr -d ' ' || true)"
   if [ "${count:-0}" -gt 0 ]; then
     echo
     echo "---"

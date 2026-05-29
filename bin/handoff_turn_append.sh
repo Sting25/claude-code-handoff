@@ -84,7 +84,26 @@ if command -v flock >/dev/null 2>&1; then
 else
   lock_mkdir="${lock_file}.d"
   if ! mkdir "$lock_mkdir" 2>/dev/null; then
-    exit 0
+    # The mkdir lock is released by the EXIT trap below, but a hard kill
+    # (SIGKILL, OOM, power loss) skips traps and leaves the dir behind —
+    # which would freeze appends for this session forever. If the existing
+    # lock dir is older than the staleness window, the holder is gone:
+    # reclaim it and retry once. A live Stop hook finishes in well under a
+    # second, so the default 60s window won't steal a lock from a slow-but-
+    # alive run. Age via GNU `stat -c` with a BSD `stat -f` fallback (this
+    # branch only runs where flock is absent — typically macOS/BSD).
+    stale_secs="${HANDOFF_LOCK_STALE_SECS:-60}"
+    lock_mtime="$(stat -c %Y "$lock_mkdir" 2>/dev/null \
+                  || stat -f %m "$lock_mkdir" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    if [[ "$lock_mtime" =~ ^[0-9]+$ ]] \
+       && (( now - lock_mtime >= stale_secs )) \
+       && rmdir "$lock_mkdir" 2>/dev/null \
+       && mkdir "$lock_mkdir" 2>/dev/null; then
+      :   # reclaimed a stale lock; proceed under the trap below
+    else
+      exit 0
+    fi
   fi
   trap 'rmdir "$lock_mkdir" 2>/dev/null || true' EXIT
 fi

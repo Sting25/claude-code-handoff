@@ -127,4 +127,26 @@ check "no-history -> 'no previous' copy"  yes "$(has "$out" "no previous handoff
 check "no-history -> no fallback header"  no  "$(has "$out" "Also loaded")"
 rm -rf "$proj"
 
+# --- pipefail + present-but-empty history dir: must not abort -----------------
+# Regression guard for `set -euo pipefail`: when handoff_history/ exists but
+# holds no handoff_*.md, the `ls ... | wc -l` pointer pipeline has `ls` fail on
+# the non-matching glob. Under pipefail that makes the whole pipeline non-zero,
+# which `set -e` would treat as fatal — aborting before the current handoff is
+# even fully emitted. The `|| true` keeps it clean: current content still
+# emitted, exit 0, and the "older handoff(s)" pointer is correctly absent.
+proj="$(mk_project)"
+cat > "$proj/.claude/handoff_current.md" <<EOF
+# handoff
+
+## Notes from this session
+
+Curated prose. MARKER_EMPTYHIST lives here.
+EOF
+mkdir -p "$proj/.claude/handoff_history"   # exists, but no handoff_*.md inside
+out="$(run_ss "$proj")"; rc=$?
+check "empty history dir -> exit 0"          0   "$rc"
+check "empty history dir -> content emitted" yes "$(has "$out" "MARKER_EMPTYHIST")"
+check "empty history dir -> no pointer"      no  "$(has "$out" "older handoff(s)")"
+rm -rf "$proj"
+
 finish

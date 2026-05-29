@@ -76,13 +76,26 @@ tx="$repo/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$t
 run_turn "$repo" LK "$tx" "$noflock"
 check "appends without flock"  yes "$([[ -f "$bd/handoff_raw_LK.md" ]] && echo yes || echo no)"
 check "lock dir released"      no  "$([[ -d "$bd/.handoff_raw_LK.lock.d" ]] && echo yes || echo no)"
-# Held lock blocks a fresh session (no append).
+# A FRESH lock dir (holder presumed alive) blocks a fresh session: no append.
 repo2="$(mk_repo)"; bd2="$repo2/.claude/handoff_backups"; mkdir -p "$bd2"
 mkdir "$bd2/.handoff_raw_HELD.lock.d"
 tx2="$repo2/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx2"
 run_turn "$repo2" HELD "$tx2" "$noflock"
-check "held lock blocks append" no "$([[ -f "$bd2/handoff_raw_HELD.md" ]] && echo yes || echo no)"
-rm -rf "$repo" "$repo2" "$noflock"
+check "fresh lock blocks append" no "$([[ -f "$bd2/handoff_raw_HELD.md" ]] && echo yes || echo no)"
+
+# A STALE lock dir (holder killed before its EXIT trap, mtime older than the
+# staleness window) must be reclaimed so the session keeps appending. Force a
+# 1s window and backdate the dir so it qualifies without a real wait.
+repo3="$(mk_repo)"; bd3="$repo3/.claude/handoff_backups"; mkdir -p "$bd3"
+mkdir "$bd3/.handoff_raw_STALE.lock.d"
+touch -d "1 hour ago" "$bd3/.handoff_raw_STALE.lock.d"
+tx3="$repo3/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx3"
+( cd "$repo3" && PATH="$noflock" HANDOFF_LOCK_STALE_SECS=1 \
+    printf '{"session_id":"STALE","transcript_path":"%s"}' "$tx3" \
+    | PATH="$noflock" HANDOFF_LOCK_STALE_SECS=1 bash "$TA" >/dev/null 2>&1 )
+check "stale lock reclaimed -> appends" yes "$([[ -f "$bd3/handoff_raw_STALE.md" ]] && echo yes || echo no)"
+check "stale lock released after run"   no  "$([[ -d "$bd3/.handoff_raw_STALE.lock.d" ]] && echo yes || echo no)"
+rm -rf "$repo" "$repo2" "$repo3" "$noflock"
 
 # ---------------------------------------------------------------------------
 echo "write_handoff.sh — rotation timestamp from file mtime (GNU + BSD)"
