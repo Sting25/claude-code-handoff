@@ -75,6 +75,17 @@ installs (the fix only affects fresh/repeat runs of `install.sh`).
   (Git Bash on Windows is GNU, so it was already fine; this is macOS-specific.)
 
 ### Added
+- **Behavioral coverage for the scripts' core paths**, beyond the per-fix
+  regression tests. `handoff_ctx_check.sh` and `handoff_session_start.sh`
+  previously had **no** tests; both are now covered (threshold / window /
+  token-vs-bytes fallback / suggest-vs-act / cooldown for the ctx hook;
+  placeholder detection / history fallback / recover banner / disable toggles
+  for SessionStart). Adds core coverage for `handoff_turn_append.sh` (cursor
+  dedup, incremental append, noise stripping, tool-result truncation, repo /
+  transcript guards) and `write_handoff.sh` (document shape, argument parsing,
+  `--if-stale-by` deprecation alias, history pruning + `HANDOFF_HISTORY_KEEP=0`,
+  `.gitignore` bootstrap toggle, pinned injection, in-flight `.md` listing,
+  substrate snapshot). Each test file verified with a negative control.
 - **Test suite** under `tests/` (`./tests/run.sh`) — dependency-free bash +
   git (jq-using tests self-skip without it). Covers the fixes above:
   `--if-curated` preserve-vs-overwrite across placeholder / curated / embedded-
