@@ -47,9 +47,19 @@ lock_file="$backup_dir/.handoff_raw_${session_id}.lock"
 # --- Serialize concurrent invocations: only one Stop hook may process
 #     this session at a time. If another instance is already running,
 #     we exit cleanly — it will pick up our turn.
-exec 9>"$lock_file"
-if ! flock -n 9; then
-  exit 0
+#     flock (util-linux) ships on Linux and Git Bash but not macOS; there we
+#     fall back to an atomic mkdir lock released by an EXIT trap.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$lock_file"
+  if ! flock -n 9; then
+    exit 0
+  fi
+else
+  lock_mkdir="${lock_file}.d"
+  if ! mkdir "$lock_mkdir" 2>/dev/null; then
+    exit 0
+  fi
+  trap 'rmdir "$lock_mkdir" 2>/dev/null || true' EXIT
 fi
 
 # --- Cursor: how many transcript lines we've already processed ---
@@ -179,8 +189,8 @@ wc -c < "$transcript_path" | tr -d ' ' > "$tmp_ctx"
 mv -f "$tmp_ctx" "$ctx_file"
 
 last_tokens="$(
-  tac "$transcript_path" 2>/dev/null \
-    | grep -m1 '"type":"assistant"' \
+  grep '"type":"assistant"' "$transcript_path" 2>/dev/null \
+    | tail -n 1 \
     | jq -r '
         (.message.usage.input_tokens // 0) +
         (.message.usage.cache_read_input_tokens // 0) +
@@ -195,19 +205,21 @@ if [[ "$last_tokens" =~ ^[0-9]+$ ]] && (( last_tokens > 0 )); then
 fi
 
 # --- Prune to 3 newest dump files (plus their cursor / ctx / flag files) ---
-mapfile -t to_delete < <(
-  ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | tail -n +4
-)
-for old in "${to_delete[@]:-}"; do
+# `mapfile` is a bash 4 builtin (absent from macOS's stock bash 3.2); read the
+# list with a while loop over a process substitution instead. The process-sub
+# exit status isn't checked, so a failing glob won't trip `set -e` (same safety
+# the mapfile form had).
+while IFS= read -r old; do
   [[ -z "$old" ]] && continue
-  rm -f -- "$old"
+  rm -f  -- "$old"
   base="$(basename "$old" .md)"      # handoff_raw_<id>
   id="${base#handoff_raw_}"
-  rm -f -- "$backup_dir/.handoff_raw_${id}.cursor"
-  rm -f -- "$backup_dir/.handoff_raw_${id}.lock"
-  rm -f -- "$backup_dir/.ctx_${id}"
-  rm -f -- "$backup_dir/.ctx_tokens_${id}"
-  rm -f -- "$backup_dir/.ctx_flagged_${id}"
-done
+  rm -f  -- "$backup_dir/.handoff_raw_${id}.cursor"
+  rm -f  -- "$backup_dir/.handoff_raw_${id}.lock"
+  rm -rf -- "$backup_dir/.handoff_raw_${id}.lock.d"   # mkdir-lock fallback dir
+  rm -f  -- "$backup_dir/.ctx_${id}"
+  rm -f  -- "$backup_dir/.ctx_tokens_${id}"
+  rm -f  -- "$backup_dir/.ctx_flagged_${id}"
+done < <(ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | tail -n +4)
 
 exit 0

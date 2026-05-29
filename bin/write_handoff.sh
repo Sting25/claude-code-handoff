@@ -193,12 +193,29 @@ fi
 # overwrite it. The rotated file's name reflects its original generation
 # time (file mtime), not the rotation time, so the history reads as a
 # chronological log of session endings. Then prune to HISTORY_KEEP newest.
+# Portable file-mtime as YYYY-mm-dd_HHMMSS in UTC. GNU and BSD/macOS differ on
+# both halves: `stat -c %Y` (GNU) vs `stat -f %m` (BSD) for the mtime epoch, and
+# `date -d @EPOCH` (GNU) vs `date -r EPOCH` (BSD) to format it. (The old
+# `date -u -r FILE` worked on GNU only; on BSD `-r` takes an epoch, not a path,
+# so it silently fell back to the current time and mis-stamped the rotation.)
+file_mtime_stamp() {
+  local f="$1" epoch
+  epoch="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || true)"
+  if [[ "$epoch" =~ ^[0-9]+$ ]]; then
+    date -u -d "@$epoch" +'%Y-%m-%d_%H%M%S' 2>/dev/null \
+      || date -u -r "$epoch" +'%Y-%m-%d_%H%M%S' 2>/dev/null \
+      || date -u +'%Y-%m-%d_%H%M%S'
+  else
+    date -u +'%Y-%m-%d_%H%M%S'
+  fi
+}
+
 rotate_existing_handoff() {
   [[ -f "$handoff_path" ]] || return 0
   [[ "$HISTORY_KEEP" -gt 0 ]] || return 0
   mkdir -p "$history_dir"
   local ts archived
-  ts="$(date -u -r "$handoff_path" +'%Y-%m-%d_%H%M%S' 2>/dev/null || date -u +'%Y-%m-%d_%H%M%S')"
+  ts="$(file_mtime_stamp "$handoff_path")"
   archived="$history_dir/handoff_${ts}.md"
   # If a file with the same timestamp already exists, append a counter
   # so we don't clobber. Only happens if two rotations land in the same

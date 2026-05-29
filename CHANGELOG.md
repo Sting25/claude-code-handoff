@@ -53,6 +53,19 @@ installs (the fix only affects fresh/repeat runs of `install.sh`).
   unwired. The `chmod` is now best-effort (`2>/dev/null || true`) — the
   scripts are committed mode 0755 so a normal checkout is already executable,
   and the `chmod` only rescues filesystems that don't preserve the exec bit.
+- **macOS / BSD portability of the hook scripts.** Four GNU/bash-4-isms that
+  break (or silently misbehave) on stock macOS are now portable:
+  - `handoff_turn_append.sh` used `flock` (util-linux, absent on macOS) — now
+    falls back to an atomic `mkdir` lock released by an `EXIT` trap;
+  - it used `tac` (absent on macOS) to find the last assistant turn — now
+    `grep … | tail -n 1`;
+  - it used the bash-4 `mapfile` builtin (macOS ships bash 3.2) for prune —
+    now a `while read` loop over a process substitution;
+  - `write_handoff.sh` used `date -u -r FILE` (GNU-only; on BSD `-r` means
+    epoch, so it silently fell back to *current* time and mis-stamped rotated
+    history filenames) — now a portable `stat`+`date` mtime helper covering
+    both GNU (`stat -c` / `date -d @`) and BSD (`stat -f` / `date -r`).
+  (Git Bash on Windows is GNU, so it was already fine; this is macOS-specific.)
 
 ### Added
 - **Test suite** under `tests/` (`./tests/run.sh`) — dependency-free bash +
@@ -61,7 +74,10 @@ installs (the fix only affects fresh/repeat runs of `install.sh`).
   sentinel / quoted-sentinel / malformed fixtures; install.sh surviving a
   failing `chmod`; and settings.json robustness (empty / malformed / absent /
   valid+idempotent inputs, and command-level uninstall preserving co-located
-  user hooks). New changes ship with a test going forward.
+  user hooks); and macOS/BSD portability (flock-absent mkdir-lock fallback,
+  tac→grep|tail token extraction, mapfile→while prune, and the stat+date mtime
+  stamp under simulated-BSD tool shims). New changes ship with a test going
+  forward.
 
 ## [0.7.2] — 2026-05-27
 
