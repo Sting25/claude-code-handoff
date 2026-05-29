@@ -27,6 +27,9 @@ settings="$claude_home/settings.json"
 ts="$(date +%Y%m%d_%H%M%S)"
 mode=install
 
+# Never leave a half-written jq temp behind, even on an unexpected abort.
+trap 'rm -f "$settings.tmp" 2>/dev/null || true' EXIT
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --uninstall) mode=uninstall ;;
@@ -215,11 +218,16 @@ maybe_uninstall_hook() {
     echo "  ok      hook $event (not present)"
     return
   fi
+  # Remove only the matching command(s), not the whole hook group: a group may
+  # hold a user's own co-located command alongside ours. Strip matching commands
+  # from each group's inner list, then drop groups that became empty, then drop
+  # the event if no groups remain.
   jq --arg e "$event" --arg m "$marker" '
-    .hooks[$e] |= (map(select(
-      (.hooks // []) | all((.command // "") | contains($m) | not)
-    )))
-    | if (.hooks[$e] | length) == 0 then del(.hooks[$e]) else . end
+    .hooks[$e] |= (
+        map(.hooks |= ((. // []) | map(select(((.command // "") | contains($m)) | not))))
+      | map(select((.hooks // []) | length > 0))
+    )
+    | if ((.hooks[$e] // []) | length) == 0 then del(.hooks[$e]) else . end
   ' "$settings" > "$settings.tmp"
   mv "$settings.tmp" "$settings"
   echo "  remove  hook $event"
@@ -252,10 +260,11 @@ migrate_legacy_ss_hook() {
     return
   fi
   jq --arg m "$marker" '
-    .hooks.SessionStart |= (map(select(
-      (.hooks // []) | all((.command // "") | contains($m) | not)
-    )))
-    | if (.hooks.SessionStart | length) == 0 then del(.hooks.SessionStart) else . end
+    .hooks.SessionStart |= (
+        map(.hooks |= ((. // []) | map(select(((.command // "") | contains($m)) | not))))
+      | map(select((.hooks // []) | length > 0))
+    )
+    | if ((.hooks.SessionStart // []) | length) == 0 then del(.hooks.SessionStart) else . end
   ' "$settings" > "$settings.tmp"
   mv "$settings.tmp" "$settings"
   echo "  migrate legacy SessionStart inline command removed (pre-0.3.0)"
@@ -275,14 +284,41 @@ migrate_legacy_se_hook() {
     return
   fi
   jq '
-    .hooks.SessionEnd |= (map(select(
-      (.hooks // []) | all(((.command // "") |
-        (contains("write_handoff.sh") and (contains("--if-curated") | not))) | not)
-    )))
-    | if (.hooks.SessionEnd | length) == 0 then del(.hooks.SessionEnd) else . end
+    .hooks.SessionEnd |= (
+        map(.hooks |= ((. // []) | map(select(((.command // "") |
+            (contains("write_handoff.sh") and (contains("--if-curated") | not))) | not))))
+      | map(select((.hooks // []) | length > 0))
+    )
+    | if ((.hooks.SessionEnd // []) | length) == 0 then del(.hooks.SessionEnd) else . end
   ' "$settings" > "$settings.tmp"
   mv "$settings.tmp" "$settings"
   echo "  migrate legacy SessionEnd command without --if-curated removed (pre-0.5.0)"
+}
+
+# Make settings.json safe to patch. Absent or empty -> seed `{}` (jq on empty
+# input silently emits nothing, which would blank the file with a false-success
+# exit 0). Non-empty but invalid JSON -> refuse to touch it rather than abort
+# mid-run or clobber recoverable user config; print the manual snippet instead.
+# Returns 0 when the file is valid JSON and safe to patch, 1 to skip patching.
+ensure_settings_json() {
+  if [[ ! -f "$settings" ]]; then
+    echo '{}' > "$settings"
+    echo "  new     $settings (created with {})"
+    return 0
+  fi
+  if [[ ! -s "$settings" ]]; then
+    echo '{}' > "$settings"
+    echo "  init    $settings was empty; set to {}"
+    return 0
+  fi
+  if ! jq -e . "$settings" >/dev/null 2>&1; then
+    echo
+    echo "  ERROR   $settings is not valid JSON — refusing to auto-patch (left untouched)."
+    echo "          Fix or remove it and re-run, or patch settings.json by hand:"
+    print_manual_snippet
+    return 1
+  fi
+  return 0
 }
 
 patch_settings() {
@@ -292,10 +328,7 @@ patch_settings() {
     print_manual_snippet
     return
   fi
-  if [[ ! -f "$settings" ]]; then
-    echo '{}' > "$settings"
-    echo "  new     $settings (created empty)"
-  fi
+  ensure_settings_json || return
   cp "$settings" "$settings.bak.$ts"
   echo "  backup  $settings -> $settings.bak.$ts"
   migrate_legacy_ss_hook
@@ -332,6 +365,14 @@ unpatch_settings() {
   fi
   if [[ ! -f "$settings" ]]; then
     echo "  ok      $settings does not exist; nothing to strip"
+    return
+  fi
+  if [[ ! -s "$settings" ]]; then
+    echo "  ok      $settings is empty; nothing to strip"
+    return
+  fi
+  if ! jq -e . "$settings" >/dev/null 2>&1; then
+    echo "  ERROR   $settings is not valid JSON — refusing to edit (left untouched)."
     return
   fi
   cp "$settings" "$settings.bak.$ts"

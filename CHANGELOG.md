@@ -16,6 +16,24 @@ No hook-command or permission changes; no re-install needed for existing
 installs (the fix only affects fresh/repeat runs of `install.sh`).
 
 ### Fixed
+- **`install.sh` is robust to empty / malformed `settings.json`, and uninstall
+  no longer deletes a user's co-located hook.** Three related issues, all in the
+  settings.json patching:
+  - *Empty file → silent false success.* An empty (0-byte) `settings.json`
+    isn't absent, so it wasn't seeded with `{}`; `jq` then read empty input,
+    emitted nothing, and the `> tmp; mv` blanked the file while exiting `0` —
+    the install reported success but wired no hooks. Now empty (and absent)
+    files are normalized to `{}` before patching.
+  - *Malformed file → mid-run abort + orphaned `.tmp`.* Invalid JSON made `jq`
+    fail mid-patch (exit 5), aborting after the backup and leaving a stray
+    `settings.json.tmp`. Now JSON is validated up front: a malformed file is
+    left **untouched** with a clear error + the manual snippet, and an `EXIT`
+    trap removes any stray temp file regardless.
+  - *Uninstall deleted co-located commands.* The uninstall/migrate `jq` filters
+    selected at the hook-**group** level, so removing our command dropped the
+    whole group — taking any user command sharing that group with it. Filtering
+    is now at the **command** level: only matching commands are removed, groups
+    that become empty are pruned, and unrelated commands are preserved.
 - **`--if-curated` no longer clobbers curated notes when the sentinel string
   appears elsewhere in the file (data loss).** The SessionEnd safety-net
   decided "this is an unedited placeholder, safe to overwrite" by grepping the
@@ -38,10 +56,12 @@ installs (the fix only affects fresh/repeat runs of `install.sh`).
 
 ### Added
 - **Test suite** under `tests/` (`./tests/run.sh`) — dependency-free bash +
-  git (jq-using tests self-skip without it). Covers the two fixes above:
+  git (jq-using tests self-skip without it). Covers the fixes above:
   `--if-curated` preserve-vs-overwrite across placeholder / curated / embedded-
-  sentinel / quoted-sentinel / malformed fixtures, and install.sh surviving a
-  failing `chmod`. New changes ship with a test going forward.
+  sentinel / quoted-sentinel / malformed fixtures; install.sh surviving a
+  failing `chmod`; and settings.json robustness (empty / malformed / absent /
+  valid+idempotent inputs, and command-level uninstall preserving co-located
+  user hooks). New changes ship with a test going forward.
 
 ## [0.7.2] — 2026-05-27
 
