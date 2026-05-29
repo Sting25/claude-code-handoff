@@ -273,13 +273,31 @@ snapshot_repo() {
 }
 
 list_inflight_md() {
-  # Untracked OR modified .md files under a given subdir of a given repo
+  # Untracked OR modified .md files under a given subdir of a given repo.
+  #
+  # Uses --porcelain -z: NUL-terminated records with paths emitted VERBATIM.
+  # Plain --porcelain splits status from path on a single space and C-quotes
+  # any path containing spaces (e.g. `"docs/my notes.md"`), so the old
+  # `awk '{print $2}'` truncated such a path at the first space and the `.md`
+  # filter then dropped it entirely — spaced filenames silently vanished.
   local root="$1"
   local subdir="$2"
-  git -C "$root" status --porcelain "$subdir" 2>/dev/null \
-    | awk '{print $1, $2}' \
-    | awk '$1 == "??" || $1 == "M" || $1 == "AM" || $1 == "MM" {print $2}' \
-    | grep -E '\.md$' || true
+  local xy path src
+  git -C "$root" status --porcelain -z "$subdir" 2>/dev/null \
+    | while IFS= read -r -d '' entry; do
+        xy="${entry:0:2}"      # two-char status field
+        path="${entry:3}"      # path begins after "XY " (status + one space)
+        # Rename/copy entries are followed by a second NUL-terminated field
+        # (the source path); consume it so it isn't read as the next entry.
+        case "$xy" in
+          R*|C*) IFS= read -r -d '' src || true ;;
+        esac
+        case "$xy" in
+          '??'|' M'|'M '|'MM'|'AM') ;;   # untracked or modified (staged/unstaged)
+          *) continue ;;
+        esac
+        [[ "$path" == *.md ]] && printf '%s\n' "$path"
+      done || true
 }
 
 {
