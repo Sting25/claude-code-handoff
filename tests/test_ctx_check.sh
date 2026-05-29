@@ -108,4 +108,22 @@ out="$(run_cc "$repo" PCT HANDOFF_CTX_THRESHOLD_PCT=70)"
 check "threshold 70% -> 60% does not fire" "" "$out"
 rm -rf "$repo"
 
+# --- WINDOW_TOKENS=0 must not divide-by-zero --------------------------------
+# A bogus HANDOFF_CTX_WINDOW_TOKENS=0 override would make the threshold/pct
+# arithmetic divide by zero, which aborts the script under `set -e` *before*
+# any reminder is emitted (so the negative control is empty output). The fix
+# ignores a non-positive override and falls through to auto-detection (200k or
+# 1M). 600k tokens crosses 50% of either, so a reminder must fire regardless of
+# this host's ~/.claude.json. Proves: no crash + valid pct computed.
+repo="$(mk_repo)"; seed "$repo" ZEROWIN 4000 600000
+out="$(run_cc "$repo" ZEROWIN HANDOFF_CTX_WINDOW_TOKENS=0)"
+check "WINDOW=0 -> no crash, reminder fires" yes "$(has "$out" "<system-reminder>")"
+rm -rf "$repo"
+
+# Non-numeric override is treated the same way (ignored, auto-detect).
+repo="$(mk_repo)"; seed "$repo" GARBAGEWIN 4000 600000
+out="$(run_cc "$repo" GARBAGEWIN HANDOFF_CTX_WINDOW_TOKENS=notanumber)"
+check "WINDOW=garbage -> no crash, fires"    yes "$(has "$out" "<system-reminder>")"
+rm -rf "$repo"
+
 finish
