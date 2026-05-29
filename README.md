@@ -221,6 +221,14 @@ settings.json (other hooks, theme, etc.) are left untouched.
 Requires `jq` for the settings.json patch. If you don't have it, the
 installer prints the JSON snippet for you to paste manually.
 
+### Compatibility
+
+Runs on Linux, macOS, and Windows (Git Bash / WSL). Needs `bash`, `git`,
+and `jq`; the Stop hook also uses `perl` to strip transcript noise. The
+hook scripts are kept portable across GNU and BSD/macOS userlands (e.g.
+`flock`/`tac`/`mapfile`/`date` differences are handled), and the test
+suite exercises the BSD code paths under tool shims.
+
 ## Updating
 
 Because the install is symlink-based, updating the scripts is just:
@@ -261,6 +269,7 @@ settings.json (backup first). The repo itself is untouched.
 │   │   └── SKILL.md               # /handoff-more slash command: load older handoffs into context
 │   └── handoff-recover/
 │       └── SKILL.md               # /handoff-recover slash command: retroactively compose Notes when the previous session crashed
+├── tests/                         # dependency-free bash test suite (./tests/run.sh)
 ├── install.sh                     # symlink + settings.json patcher
 ├── CHANGELOG.md
 ├── LICENSE                        # MIT
@@ -279,6 +288,10 @@ Edits land live (symlink install). Commit, push, pull on other
 machines. If you change any of the hook command strings or add a new
 hook / permission, update `CHANGELOG.md` so users know to re-run
 `./install.sh` after pulling.
+
+Run the test suite with `./tests/run.sh` — dependency-free bash + git
+(tests needing `jq`/`perl` self-skip when those are absent). Each suite
+file is a standalone `tests/test_*.sh`. New changes ship with a test.
 
 ## License
 

@@ -10,10 +10,13 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
-## [Unreleased] — 0.8.0
+## [0.8.0] — 2026-05-29
 
-No hook-command or permission changes; no re-install needed for existing
-installs (the fix only affects fresh/repeat runs of `install.sh`).
+Robustness, portability, and test coverage: macOS/BSD support for the hook
+scripts, hardened `install.sh` settings.json patching, a `--if-curated`
+data-loss fix, spaced-filename handling in the in-flight list, and a new
+`tests/` suite. No hook-command or permission changes — a `git pull` re-points
+the symlinked scripts; no re-install needed for existing installs.
 
 ### Fixed
 - **In-flight `.md` files with spaces in their names are no longer dropped from
@@ -96,6 +99,10 @@ installs (the fix only affects fresh/repeat runs of `install.sh`).
   portability (flock-absent mkdir-lock fallback, tac→grep|tail token
   extraction, mapfile→while prune, and the stat+date mtime stamp under
   simulated-BSD tool shims). New changes ship with a test going forward.
+- **README documents the `tests/` suite and platform compatibility.** The repo
+  tree now lists `tests/`, the Develop section explains `./tests/run.sh`, and a
+  Compatibility note records the supported platforms (Linux, macOS, Windows Git
+  Bash) and the `bash`/`git`/`jq`/`perl` dependencies.
 
 ## [0.7.2] — 2026-05-27
 
