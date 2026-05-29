@@ -88,4 +88,50 @@ check "uninstall: valid JSON"               yes "$(valid_json)"
 check "uninstall: no stray .tmp"            no  "$(stray_tmp)"
 rm -rf "$HOME_DIR"
 
+# --- D. uninstall preserves a user hook that only MENTIONS our script name ---
+# Exact-path markers: a user command containing the bare filename but NOT our
+# installed $HOME/.claude/bin/ path must survive uninstall. (With the old bare-
+# filename marker this user wrapper was wrongly removed.)
+read -r -d '' NAMECLASH <<'JSON' || true
+{ "hooks": {
+  "Stop": [ { "hooks": [
+    { "type": "command", "command": "bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true" },
+    { "type": "command", "command": "echo my own handoff_turn_append.sh wrapper" }
+  ] } ]
+} }
+JSON
+run_install "$NAMECLASH" --uninstall
+cmds="$(all_cmds)"
+check "uninstall: ours removed (exact path)"     yes "$(grep -q '\.claude/bin/handoff_turn_append.sh' <<<"$cmds" && echo no || echo yes)"
+check "uninstall: name-clash user cmd preserved" yes "$(grep -q 'my own handoff_turn_append.sh wrapper' <<<"$cmds" && echo yes || echo no)"
+check "uninstall: name-clash valid JSON"         yes "$(valid_json)"
+rm -rf "$HOME_DIR"
+
+# --- E. a mid-patch jq failure restores settings.json from the backup --------
+# Shim jq to fail the UserPromptSubmit hook WRITE (a non -e call) AFTER the
+# SessionStart/End/Stop writes have already modified the file. The EXIT trap
+# must roll settings.json back to its pre-patch contents, not leave it partial.
+src="$(mktemp -d)"; HOME_DIR="$(mktemp -d)"
+cp "$REPO_ROOT/install.sh" "$src/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src/"
+orig='{"permissions":{"allow":["Bash(ls:*)"]},"_sentinel":"KEEPME"}'
+printf '%s' "$orig" > "$HOME_DIR/settings.json"
+shim="$(mktemp -d)"; REAL_JQ="$(command -v jq)"
+cat > "$shim/jq" <<EOF
+#!/usr/bin/env bash
+# Detection/validation calls carry -e -> pass straight through.
+for a in "\$@"; do [[ "\$a" == "-e" ]] && exec "$REAL_JQ" "\$@"; done
+# The UserPromptSubmit WRITE carries the event name but no -e -> fail it.
+case " \$* " in *" UserPromptSubmit "*) exit 1 ;; esac
+exec "$REAL_JQ" "\$@"
+EOF
+chmod +x "$shim/jq"
+( cd "$src" && PATH="$shim:$PATH" CLAUDE_HOME="$HOME_DIR" bash install.sh >/dev/null 2>&1 ); rc=$?
+restored="$(cat "$HOME_DIR/settings.json")"
+check "mid-patch fail: nonzero exit"      nonzero "$(nonzero "$rc")"
+check "mid-patch fail: settings restored" yes     "$([[ "$restored" == "$orig" ]] && echo yes || echo no)"
+check "mid-patch fail: valid JSON"        yes     "$(valid_json)"
+check "mid-patch fail: backup retained"   yes     "$(ls "$HOME_DIR"/settings.json.bak.* >/dev/null 2>&1 && echo yes || echo no)"
+check "mid-patch fail: no stray .tmp"     no      "$(stray_tmp)"
+rm -rf "$src" "$shim" "$HOME_DIR"
+
 finish

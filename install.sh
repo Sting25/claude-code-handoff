@@ -27,8 +27,24 @@ settings="$claude_home/settings.json"
 ts="$(date +%Y%m%d_%H%M%S)"
 mode=install
 
-# Never leave a half-written jq temp behind, even on an unexpected abort.
-trap 'rm -f "$settings.tmp" 2>/dev/null || true' EXIT
+# Recovery state for the settings.json patch/unpatch sequence. The edits are a
+# series of separate jq writes; if the script aborts (set -e) partway through,
+# the EXIT trap both removes any half-written temp AND restores settings.json
+# from the backup taken before the first edit — so a mid-sequence failure can't
+# leave a half-patched (or corrupted) settings.json behind. patch_in_progress is
+# armed only between the backup and the successful end of the sequence.
+settings_backup=""
+patch_in_progress=0
+cleanup() {
+  local rc=$?
+  rm -f "$settings.tmp" 2>/dev/null || true
+  if (( patch_in_progress )) && (( rc != 0 )) \
+     && [[ -n "$settings_backup" && -f "$settings_backup" ]]; then
+    cp -f "$settings_backup" "$settings" 2>/dev/null || true
+    echo "  restore $settings from $settings_backup (aborted mid-patch, rc=$rc)" >&2
+  fi
+}
+trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,15 +70,21 @@ perm_ctx="Bash(bash $HOME/.claude/bin/handoff_ctx_check.sh)"
 perm_ss="Bash(bash $HOME/.claude/bin/handoff_session_start.sh)"
 
 # Marker substrings used to detect prior installs (and to remove on uninstall).
-ss_marker="handoff_session_start.sh"
+# These are the full installed command path (literal $HOME, exactly as stored in
+# the command string) — NOT the bare filename — so detection and removal can't
+# false-match a user's own unrelated hook that merely mentions the script name
+# (e.g. a wrapper called "my_handoff_turn_append.sh"). Every version of this
+# installer wrote the command with this path, so the match stays backward-
+# compatible. The permission entries already match by exact string.
+ss_marker='$HOME/.claude/bin/handoff_session_start.sh'
 # Legacy marker — pre-0.3.0 SessionStart was an inline bash one-liner that
 # cat'd handoff_current.md directly. We detect it (substring unique to the
 # inline form, not present in the new script-call form) and migrate it out
 # on re-install so users don't end up with both hooks firing.
 ss_legacy_marker='if [ -f "$f" ]; then echo'
-se_marker="write_handoff.sh"
-st_marker="handoff_turn_append.sh"
-up_marker="handoff_ctx_check.sh"
+se_marker='$HOME/.claude/bin/write_handoff.sh'
+st_marker='$HOME/.claude/bin/handoff_turn_append.sh'
+up_marker='$HOME/.claude/bin/handoff_ctx_check.sh'
 
 # -------------------------------------------------------------------- symlinks
 
@@ -331,6 +353,10 @@ patch_settings() {
   ensure_settings_json || return
   cp "$settings" "$settings.bak.$ts"
   echo "  backup  $settings -> $settings.bak.$ts"
+  # Arm restore-on-abort: from here until the sequence completes, any abort
+  # rolls settings.json back to this backup (see cleanup() / the EXIT trap).
+  settings_backup="$settings.bak.$ts"
+  patch_in_progress=1
   migrate_legacy_ss_hook
   migrate_legacy_se_hook
   maybe_install_hook SessionStart     "$ss_marker" "$ss_cmd"
@@ -341,6 +367,7 @@ patch_settings() {
   maybe_install_perm "$perm_stop"
   maybe_install_perm "$perm_ctx"
   maybe_install_perm "$perm_ss"
+  patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   # If no change vs backup, drop the redundant backup.
   if cmp -s "$settings" "$settings.bak.$ts"; then
     rm "$settings.bak.$ts"
@@ -377,6 +404,8 @@ unpatch_settings() {
   fi
   cp "$settings" "$settings.bak.$ts"
   echo "  backup  $settings -> $settings.bak.$ts"
+  settings_backup="$settings.bak.$ts"
+  patch_in_progress=1
   maybe_uninstall_hook SessionStart     "$ss_marker"
   maybe_uninstall_hook SessionStart     "$ss_legacy_marker"
   maybe_uninstall_hook SessionEnd       "$se_marker"
@@ -386,6 +415,7 @@ unpatch_settings() {
   maybe_uninstall_perm "$perm_stop"
   maybe_uninstall_perm "$perm_ctx"
   maybe_uninstall_perm "$perm_ss"
+  patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   if cmp -s "$settings" "$settings.bak.$ts"; then
     rm "$settings.bak.$ts"
     echo "  ok      no settings.json changes (backup removed)"
