@@ -161,7 +161,26 @@ pinned_relpath="${pinned_file#"$repo_root"/}"
 systemlog_file="${HANDOFF_SYSTEMLOG_FILE:-$repo_root/SYSTEM_LOG.md}"
 systemlog_relpath="${systemlog_file#"$repo_root"/}"
 
+# Symlink-safety. The final document write is a `>` redirect (and rotation does
+# `mv "$handoff_path" -> history`); `>` FOLLOWS a symlink and truncates its
+# target. A malicious repo can ship `.claude/handoff_current.md` (or `.claude`
+# itself) as a symlink to a victim file (~/.bashrc, ~/.claude/settings.json, a CI
+# key). On the default path rotation moves the link out of the way first, but
+# that is gated on HISTORY_KEEP>0 — so HANDOFF_HISTORY_KEEP=0 (a supported
+# setting, and what the test suite uses) would write straight through and destroy
+# the target. Refuse a symlinked .claude, and drop any symlink planted at the
+# handoff path so we always create a fresh real file in this repo and never write
+# through to the link target (this also stops rotation from relocating a planted
+# symlink into handoff_history/, where SessionStart would later cat through it).
+if [[ -L "$handoff_dir" ]]; then
+  echo "write_handoff.sh: $handoff_dir is a symlink; refusing to operate through it." >&2
+  exit 1
+fi
 mkdir -p "$handoff_dir"
+if [[ -L "$handoff_path" ]]; then
+  echo "write_handoff.sh: dropping planted symlink at $handoff_relpath (refusing to write through it)." >&2
+  rm -f "$handoff_path"
+fi
 
 # --if-curated guard: when the SessionEnd safety-net fires after a curated
 # /handoff write, we want to preserve the curated content rather than
@@ -186,6 +205,12 @@ bootstrap_gitignore() {
     return
   fi
   local gi="$repo_root/.gitignore"
+  # Don't append through a symlinked .gitignore (a malicious repo could point it
+  # at a victim file). Skip the bootstrap for this entry if it's a symlink.
+  if [[ -L "$gi" ]]; then
+    echo "write_handoff.sh: $gi is a symlink; skipping .gitignore bootstrap for '$entry'." >&2
+    return
+  fi
   if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
     printf '\n' >> "$gi"
   fi
@@ -340,6 +365,12 @@ list_inflight_md() {
       done || true
 }
 
+# Build the document in a temp file in $handoff_dir (same filesystem → the mv
+# below is an atomic rename). umask 077 makes it 0600 at creation; the trap
+# removes it if anything aborts before the final publish.
+handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
+trap 'rm -f "$handoff_tmp"' EXIT
+
 {
   printf '# %s — session handoff (auto-generated)\n\n' "$repo_name"
   printf '**Generated:** %s\n\n' "$ts_utc"
@@ -458,10 +489,15 @@ EOF
   printf 'snapshot above captures git state; the prose below captures intent\n'
   printf 'that only the conversation knows. The sentinel above is how the\n'
   printf 'SessionEnd safety-net detects whether curation has happened._\n'
-} > "$handoff_path"
+} > "$handoff_tmp"
 
-# Tighten even a doc created by a pre-0.8.2 version (umask only governs files
-# created during *this* run); the prose may include secrets.
-chmod 600 "$handoff_path" 2>/dev/null || true
+# Tighten before publishing (umask already makes it 0600 at creation; this also
+# covers a tmp produced under an unusual umask). The prose may include secrets.
+chmod 600 "$handoff_tmp" 2>/dev/null || true
+
+# Atomic, symlink-safe publish: mv replaces the destination NAME, so it can't be
+# made to write through a symlink that reappears after the guard above (TOCTOU),
+# and a crash mid-write can't leave a half-written handoff_current.md.
+mv -f "$handoff_tmp" "$handoff_path"
 
 echo "$handoff_path"
