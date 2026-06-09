@@ -10,6 +10,75 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.9.0] — 2026-06-09
+
+Security + robustness release from a full code & security audit of the hooks.
+**No hook-command or permission changes** — a `git pull` refreshes symlinked
+installs; copy-mode installs re-run `./install.sh`. Every fix ships with a
+regression test verified to fail against the pre-fix code.
+
+The headline issues are **malicious-repo** attacks: the hooks run automatically,
+with the user's privileges, in whatever repo Claude Code opens — so a crafted
+clone could plant symlinks or a crafted `handoff_current.md`.
+
+### Security
+- **Hooks no longer follow planted symlinks on write.** A malicious clone could
+  ship `.claude/handoff_backups` (or the dump file) as a symlink — the Stop
+  hook's `>>` append would then write the verbatim, secret-bearing transcript
+  dump through it to an attacker-chosen path on the first turn. Likewise a
+  symlinked `.claude/handoff_current.md` + `HANDOFF_HISTORY_KEEP=0` let the
+  `>` write truncate an arbitrary file (e.g. `~/.bashrc`). Both hooks now refuse
+  a symlinked `.claude`/backup-dir/dump, drop a planted `handoff_current.md`
+  symlink, and `write_handoff.sh` publishes atomically via `mktemp`+`mv -f`. (#25)
+- **SessionStart no longer injects unsanitized handoff content into model
+  context.** `handoff_current.md` / history snapshots are cat into the next
+  session verbatim; a crafted file could smuggle fake `<system-reminder>` /
+  `-*-*- ACTION` control structures. Those tags are now defanged to inert
+  guillemets and the block is framed as untrusted reference DATA. (#26)
+- **`handoff_ctx_check.sh` now validates `session_id`** before interpolating it
+  into `.ctx_*` paths, mirroring the Stop hook (the documented guard had only
+  ever landed in one of the two scripts). (#31)
+
+### Fixed
+- **Stop hook no longer silently produces empty dumps where `perl` is absent**
+  (Alpine, minimal containers, some CI). `strip_noise` was a bare `perl` call
+  that exited 127 and aborted the hook before the cursor advanced; it now falls
+  back to verbatim passthrough. (#27)
+- **Stop hook no longer aborts on a trailing user array-message** with no
+  tool_result (which froze the cursor and produced duplicate turn dumps). (#27)
+- **SessionStart loads the handoff when launched from a subdirectory.** It now
+  anchors on the git worktree top like the writer hooks, instead of
+  `CLAUDE_PROJECT_DIR`/`$PWD` (which silently no-op'd in monorepo subdirs). (#26)
+- **SessionStart placeholder detection is scoped** (matching `write_handoff.sh`),
+  so a curated handoff that merely quotes the sentinel no longer triggers a
+  spurious `/handoff-recover` banner. (#26)
+- **Rotated history snapshots are tightened to `0600`** — a doc left `0644` by a
+  pre-0.8.2 version no longer stays world-readable once rotated into history. (#29)
+- **`prune_history` is NUL/whitespace-safe.** A crafted history filename in a
+  cloned repo could make the old bare `xargs` mis-split or abort the whole
+  handoff write; it now uses a `read`/`rm -f --` loop. (#29)
+- **A `.gitignore` created by the hooks is `0644`,** not left `0600` by the
+  secret-protecting `umask 077`; an existing `.gitignore` is never re-moded. (#29)
+- **`install.sh` preserves a symlinked `settings.json`** (dotfiles pattern):
+  it resolves to and patches the target instead of replacing the link with a
+  plain file. (#30)
+- **`install.sh` refuses a valid-JSON-but-non-object `settings.json`** cleanly
+  up front instead of hitting a raw jq error mid-patch. (#30)
+- **`--uninstall` removes a dangling "ours" symlink** at the install path
+  instead of reporting it "already absent" and leaving it. (#30)
+- **Install backups no longer collide within the same clock second** (the
+  `.bak.<ts>` name now carries the PID), so a rapid second run can't destroy the
+  first run's pre-patch backup. (#30)
+
+### Tests
+- New regression suites for every fix above (symlink safety, perl-absent
+  capture, trailing-array-message, session-start hardening, rotation perms,
+  prune safety, install robustness, ctx-check validation).
+- **Test harness hardened against vacuous passes** (#28): a `must` setup guard
+  surfaces broken fixtures loudly and `mk_repo` now fails loudly instead of
+  returning an empty path — the gap that let a broken setup make a later
+  assertion trivially true.
+
 ## [0.8.2] — 2026-05-29
 
 Audit remainder (issue #16: MEDIUM/LOW/INFO findings after v0.8.1) plus a
