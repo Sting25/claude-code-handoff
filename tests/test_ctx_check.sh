@@ -126,4 +126,24 @@ out="$(run_cc "$repo" GARBAGEWIN HANDOFF_CTX_WINDOW_TOKENS=notanumber)"
 check "WINDOW=garbage -> no crash, fires"    yes "$(has "$out" "<system-reminder>")"
 rm -rf "$repo"
 
+# --- session_id validation (critic) -----------------------------------------
+# session_id is interpolated into the .ctx_/.ctx_tokens_/.ctx_flagged_ paths, so
+# a non-conforming value must be rejected BEFORE any path use — mirroring the
+# Stop hook's guard. Non-vacuous: for sid 'sub/evil' the size_file resolves to a
+# real over-threshold file, so the UNGUARDED hook would emit a reminder; the
+# guard makes it exit silently.
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; mkdir -p "$bd/.ctx_sub"
+printf '4000' > "$bd/.ctx_sub/evil"   # = $bd/.ctx_<sid> for sid 'sub/evil'; 4000B/4 > 500
+out="$(run_cc "$repo" "sub/evil")"; rc=$?
+check "bad session_id (slash) -> exit 0"      0  "$rc"
+check "bad session_id (slash) -> no reminder" "" "$out"
+rm -rf "$repo"
+
+# A '..'-bearing id is rejected too; and a valid neighbor still fires (the guard
+# must not over-reject real UUIDs).
+repo="$(mk_repo)"; seed "$repo" GOODSID 4000 600
+check "bad session_id (..) -> no reminder"    "" "$(run_cc "$repo" "../escape")"
+check "valid session_id still flags"          yes "$(has "$(run_cc "$repo" GOODSID)" "<system-reminder>")"
+rm -rf "$repo"
+
 finish
