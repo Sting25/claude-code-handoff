@@ -51,6 +51,25 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [[ -z "$repo_root" ]] && exit 0
 
 backup_dir="$repo_root/.claude/handoff_backups"
+
+# Symlink-safety. The dump is a plain `>>` append (further down), which FOLLOWS a
+# symlink at the destination, and it carries verbatim, secret-bearing transcript
+# content. A malicious repo can ship `.claude`, `.claude/handoff_backups`, or the
+# dump file itself as a symlink pointing outside the repo; on the very first Stop
+# fire the session's secrets would be written straight through it to an attacker-
+# chosen path (the directory variant needs no session-id knowledge). Refuse to
+# write through any symlinked component. The cursor/ctx/flag writes already dodge
+# this via mktemp+mv (which replaces the link name rather than following it) —
+# only the dump append is exposed. Silent exit (this is a hook); the message is
+# visible when the script is run by hand or under the test suite.
+refuse_symlink() {  # <path> <label>; warns and returns 1 if <path> is a symlink
+  if [[ -L "$1" ]]; then
+    echo "handoff_turn_append.sh: $2 ($1) is a symlink; refusing to write through it." >&2
+    return 1
+  fi
+}
+refuse_symlink "$repo_root/.claude" ".claude dir" || exit 0
+refuse_symlink "$backup_dir"        "backup dir"  || exit 0
 mkdir -p "$backup_dir"
 
 # Ensure the backup dir is git-ignored BEFORE we write any dump into it. The
@@ -61,15 +80,26 @@ mkdir -p "$backup_dir"
 if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]] \
    && ! git -C "$repo_root" check-ignore -q ".claude/handoff_backups/" 2>/dev/null; then
   gi="$repo_root/.gitignore"
-  if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
-    printf '\n' >> "$gi"
+  # Don't append through a symlinked .gitignore (a malicious repo could point it
+  # at a victim file). If it's a symlink, skip the bootstrap — the dump is still
+  # protected by the backup-dir symlink guard above, and worst case it shows up
+  # in `git status` rather than leaking.
+  if [[ ! -L "$gi" ]]; then
+    if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
+      printf '\n' >> "$gi"
+    fi
+    echo ".claude/handoff_backups/" >> "$gi"
   fi
-  echo ".claude/handoff_backups/" >> "$gi"
 fi
 
 dump_file="$backup_dir/handoff_raw_${session_id}.md"
 cursor_file="$backup_dir/.handoff_raw_${session_id}.cursor"
 lock_file="$backup_dir/.handoff_raw_${session_id}.lock"
+
+# backup_dir is confirmed a real dir above; this catches a per-file symlink
+# planted at the exact dump name. (The lock below is acquired with mktemp-style
+# guarantees / a UUID-scoped name, so the dump content sink is the one to guard.)
+refuse_symlink "$dump_file" "dump file" || exit 0
 
 # --- Serialize concurrent invocations: only one Stop hook may process
 #     this session at a time. If another instance is already running,
