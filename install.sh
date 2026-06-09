@@ -38,7 +38,10 @@ umask 077
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
-ts="$(date +%Y%m%d_%H%M%S)"
+# Include the PID so two installs in the same clock second don't collide on the
+# same .bak.<ts> name — without it, the second run's `cp` would overwrite the
+# first run's pre-patch settings.json backup, destroying the only safe copy.
+ts="$(date +%Y%m%d_%H%M%S)_$$"
 mode=install
 
 # Link strategy. "auto" symlinks from a persistent source and copies from a
@@ -62,6 +65,30 @@ case "$claude_home" in
 esac
 if [[ -n "${HOME:-}" && "$claude_home" != "$HOME" && "$claude_home" != "$HOME"/* ]]; then
   echo "warning: CLAUDE_HOME='$claude_home' is outside \$HOME ($HOME); proceeding." >&2
+fi
+
+# If settings.json is a symlink (a common dotfiles pattern — stow/chezmoi/etc.
+# point ~/.claude/settings.json at a tracked file), operate on its TARGET. The
+# patch writes via tmp+mv, and `mv` onto a symlink replaces the LINK with a plain
+# file — silently disconnecting the user's source-of-truth. Resolving to the real
+# path keeps tmp+mv atomic AND leaves the symlink intact (Claude Code follows it
+# to read). Portable manual resolve (readlink -f is GNU-only), capped against
+# loops, falling back to the link path itself.
+resolve_symlink() {  # <path> -> physical path on stdout
+  local p="$1" n=0 t
+  while [[ -L "$p" ]] && (( n++ < 40 )); do
+    t="$(readlink "$p")" || break
+    case "$t" in
+      /*) p="$t" ;;
+      *)  p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/$t" ;;
+    esac
+  done
+  printf '%s\n' "$p"
+}
+if [[ -L "$settings" ]]; then
+  settings_resolved="$(resolve_symlink "$settings")"
+  echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
+  settings="$settings_resolved"
 fi
 
 # Recovery state for the settings.json patch/unpatch sequence. The edits are a
@@ -218,6 +245,15 @@ unlink_if_ours() {
   if [[ -L "$dst" ]] && [[ "$(readlink "$dst")" == "$src" ]]; then
     rm "$dst"
     echo "  remove  $dst"
+  elif [[ -L "$dst" && ! -e "$dst" ]]; then
+    # Dangling symlink at our canonical install path — a stale install from a
+    # clone that was moved/removed, so its target no longer exists (and may point
+    # at a DIFFERENT path than this run's $src, which is why the exact-match
+    # branch above misses it). Safe to remove: nothing live sits behind a broken
+    # link, and a user would not place their own link here. Without this it was
+    # reported "already absent" and left behind. (install#1)
+    echo "  remove  $dst (stale dangling link -> $(readlink "$dst"))"
+    rm "$dst"
   elif [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
     # Copy-mode install (identical content) — ours to remove.
     rm "$dst"
@@ -421,6 +457,19 @@ ensure_settings_json() {
   if ! jq -e . "$settings" >/dev/null 2>&1; then
     echo
     echo "  ERROR   $settings is not valid JSON — refusing to auto-patch (left untouched)."
+    echo "          Fix or remove it and re-run, or patch settings.json by hand:"
+    print_manual_snippet
+    return 1
+  fi
+  # Valid JSON, but the patch jq programs index it as an object (.hooks //= {},
+  # .permissions.allow, …). A valid non-object root ([], 42, "x", true) would
+  # otherwise sail past the check above and hit a raw jq runtime error mid-patch
+  # (caught by the rollback trap, but ugly and confusing). Refuse it cleanly up
+  # front instead. (settings#3)
+  if ! jq -e 'type == "object"' "$settings" >/dev/null 2>&1; then
+    echo
+    echo "  ERROR   $settings is valid JSON but not a JSON object (got: $(jq -r 'type' "$settings" 2>/dev/null))."
+    echo "          settings.json must be an object — refusing to auto-patch (left untouched)."
     echo "          Fix or remove it and re-run, or patch settings.json by hand:"
     print_manual_snippet
     return 1
