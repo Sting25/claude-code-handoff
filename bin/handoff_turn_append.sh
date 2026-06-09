@@ -158,16 +158,29 @@ if (( curr_count == prev_count )); then
 fi
 
 # --- Strip Claude Code noise tags that get re-injected each turn ---
-strip_noise() {
-  perl -0pe '
-    s{<system-reminder>.*?</system-reminder>\s*}{}gs;
-    s{<command-name>.*?</command-name>\s*}{}gs;
-    s{<command-message>.*?</command-message>\s*}{}gs;
-    s{<command-args>.*?</command-args>\s*}{}gs;
-    s{<local-command-stdout>.*?</local-command-stdout>\s*}{}gs;
-    s{\n{3,}}{\n\n}g;
-  '
-}
+# perl is the one transcript-processing tool with no POSIX guarantee — it is
+# absent from Alpine, minimal containers, and some CI images. Without a fallback,
+# the bare `perl` call below exited 127, and under `set -euo pipefail` that
+# aborted the hook BEFORE the cursor update — so every turn re-scanned the
+# transcript from line 1 and the dump accumulated empty `## Turn` headers,
+# capturing nothing (a silent failure of the whole raw-dump safety net, since the
+# hook is wired as `... 2>/dev/null || true`). When perl is missing, fall back to
+# a passthrough: capturing the turn VERBATIM (noise tags un-stripped) is far
+# better than capturing nothing.
+if command -v perl >/dev/null 2>&1; then
+  strip_noise() {
+    perl -0pe '
+      s{<system-reminder>.*?</system-reminder>\s*}{}gs;
+      s{<command-name>.*?</command-name>\s*}{}gs;
+      s{<command-message>.*?</command-message>\s*}{}gs;
+      s{<command-args>.*?</command-args>\s*}{}gs;
+      s{<local-command-stdout>.*?</local-command-stdout>\s*}{}gs;
+      s{\n{3,}}{\n\n}g;
+    '
+  }
+else
+  strip_noise() { cat; }
+fi
 
 # --- Initialize dump file on first append ---
 if [[ ! -f "$dump_file" ]]; then
@@ -202,7 +215,7 @@ chmod 600 "$dump_file" 2>/dev/null || true
         user)
           content_kind="$(jq -r '.message.content | type' <<<"$line" 2>/dev/null || echo null)"
           if [[ "$content_kind" == "string" ]]; then
-            text="$(jq -r '.message.content' <<<"$line" | strip_noise)"
+            text="$(jq -r '.message.content' <<<"$line" | strip_noise || true)"
             # Skip if everything was noise
             if [[ -n "$(printf '%s' "$text" | tr -d '[:space:]')" ]]; then
               printf '**User:**\n\n%s\n\n' "$text"
@@ -226,7 +239,14 @@ chmod 600 "$dump_file" 2>/dev/null || true
                   ) | .[0:800]
                 ) + "\n```\n"
             ' <<<"$line" 2>/dev/null || true)"
-            [[ -n "$tool_results" ]] && printf '%s\n' "$tool_results"
+            # NB: keep this as if/fi, not `[[ ]] && printf`. When tool_results is
+            # empty this is the LAST command in the loop body; a bare `&&` would
+            # return 1, pipefail would propagate it, and set -e would abort the
+            # whole append block before the cursor update — so the cursor never
+            # advanced and the next fire re-appended the same turn (duplicate
+            # dumps, stale ctx, prune skipped). Reachable whenever the last new
+            # transcript line is a user array-message with no tool_result.
+            if [[ -n "$tool_results" ]]; then printf '%s\n' "$tool_results"; fi
           fi
           ;;
         assistant)
