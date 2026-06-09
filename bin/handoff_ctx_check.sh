@@ -55,6 +55,14 @@ payload="$(cat 2>/dev/null || true)"
 
 session_id="$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)"
 [[ -z "$session_id" ]] && exit 0
+# session_id is interpolated into the .ctx_/.ctx_tokens_/.ctx_flagged_ paths
+# below, so a value carrying a slash, newline, or ".." could escape backup_dir.
+# Mirror handoff_turn_append.sh's guard (its comment, and the CHANGELOG, describe
+# this validation — but it had only ever been applied to the Stop hook, not to
+# this companion that interpolates the same value into the same path family).
+# Real Claude Code session IDs are UUIDs; accept only [A-Za-z0-9_-] and exit
+# clean otherwise.
+[[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
 
 # --- Repo scope (matches Stop-hook scoping) ---
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
