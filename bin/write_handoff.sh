@@ -211,10 +211,16 @@ bootstrap_gitignore() {
     echo "write_handoff.sh: $gi is a symlink; skipping .gitignore bootstrap for '$entry'." >&2
     return
   fi
+  local existed=1; [[ -e "$gi" ]] || existed=0
   if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
     printf '\n' >> "$gi"
   fi
   echo "$entry" >> "$gi"
+  # A .gitignore is not secret and is normally world-readable + committed; the
+  # script-wide `umask 077` (which protects the handoff docs/dumps) would
+  # otherwise leave a freshly-created one 0600 — surprising for a shared project
+  # file. Normalize only a file WE just created; never touch one the user had.
+  (( existed )) || chmod 644 "$gi" 2>/dev/null || true
   echo "write_handoff.sh: added '$entry' to $gi (set HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 to skip)" >&2
 }
 if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]]; then
@@ -269,15 +275,27 @@ rotate_existing_handoff() {
     archived="${archived%.md}_${n}.md"
   fi
   mv "$handoff_path" "$archived"
+  # Tighten a doc written 0644 by a pre-0.8.2 version: `mv` preserves the source
+  # mode, so without this a world-readable handoff stays world-readable once
+  # rotated into history (the prose can hold secrets). New docs are already 0600.
+  chmod 600 "$archived" 2>/dev/null || true
 }
 prune_history() {
   [[ -d "$history_dir" ]] || return 0
-  # List newest-first by filename (timestamps are sortable), skip the
-  # first HISTORY_KEEP, delete the rest.
+  # Delete all but the HISTORY_KEEP newest. Use a `while IFS= read -r` loop with
+  # `rm -f --` (mirroring handoff_turn_append.sh) rather than a bare `xargs -r
+  # rm -f`: history files live in a repo the user may have cloned, and a crafted
+  # filename containing whitespace or a quote would make xargs mis-split it or
+  # abort with a parse error — and under set -e that abort would take the whole
+  # handoff write down with it. read -r preserves the line verbatim and `--`
+  # stops a leading dash from being read as an rm option.
+  local f
   ls -1 "$history_dir"/handoff_*.md 2>/dev/null \
     | sort -r \
     | tail -n +$((HISTORY_KEEP + 1)) \
-    | xargs -r rm -f
+    | while IFS= read -r f; do
+        [[ -n "$f" ]] && rm -f -- "$f"
+      done
 }
 # Capture the HEAD recorded in the previous handoff BEFORE rotation moves
 # it away. The rotation boundary is a usable proxy for "since last session,"
@@ -290,7 +308,7 @@ if [[ -f "$handoff_path" ]]; then
 fi
 
 rotate_existing_handoff
-prune_history
+prune_history || true   # a prune failure must never abort the handoff write
 
 # Optional substrate detection — sibling repo at $HANDOFF_SUBSTRATE_NAME
 substrate_root=""

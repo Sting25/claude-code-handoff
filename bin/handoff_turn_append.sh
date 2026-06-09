@@ -85,10 +85,15 @@ if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]] \
   # protected by the backup-dir symlink guard above, and worst case it shows up
   # in `git status` rather than leaking.
   if [[ ! -L "$gi" ]]; then
+    existed=1; [[ -e "$gi" ]] || existed=0
     if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
       printf '\n' >> "$gi"
     fi
     echo ".claude/handoff_backups/" >> "$gi"
+    # A .gitignore is not secret; don't let the script-wide `umask 077` leave a
+    # freshly-created one 0600 (see write_handoff.sh). Only normalize a file WE
+    # just created; never touch one the user already had.
+    (( existed )) || chmod 644 "$gi" 2>/dev/null || true
   fi
 fi
 
