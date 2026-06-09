@@ -1,6 +1,15 @@
 # Shared helpers for the handoff test suite. Source this from a test_*.sh file.
 # Dependency-free: bash + git + (for some tests) jq, all already required by the
-# shipped scripts. No -e: tests assert on exit codes and must not abort early.
+# shipped scripts.
+#
+# Why no `set -e`: many tests run a hook EXPECTING it to fail and assert on the
+# captured exit code (`cmd; rc=$?`); `set -e` would abort the test the moment
+# such a command returned non-zero. (`-u` and `pipefail` are kept — they catch
+# unset vars and broken pipes without that conflict.) The trade-off is that a
+# broken *setup* command (a failed mk_repo / mkdir / cat-redirect) is otherwise
+# silent, which can make a later assertion pass VACUOUSLY — e.g. "secret not in
+# file" is trivially true if the file was never written. Guard fixture setup with
+# `must` (below) so such failures surface loudly instead.
 set -uo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,21 +31,44 @@ check() {
 
 skip() { printf '  SKIP  %s\n' "$1"; }
 
+# must <cmd...> — run a SETUP command that is expected to succeed. On failure,
+# record a failure + print a loud diagnostic, so a broken fixture can't make a
+# later assertion pass vacuously. Use for fixture setup (mkdir, cp, cat-redirect,
+# etc.); do NOT use it for the command under test when asserting on its exit code
+# (capture that with `cmd; rc=$?` as usual). Redirections bind to the whole call,
+# so `must cat > "$f" <<EOF ... EOF` works.
+must() {
+  if "$@"; then
+    return 0
+  else
+    # First statement in the else branch: $? is still the failed command's rc.
+    # (Reading $? AFTER `fi` would yield 0 — a not-taken if returns success.)
+    local rc=$?
+    printf '  FAIL  setup command failed (rc=%d): %s\n' "$rc" "$*"
+    _fail=$((_fail + 1))
+    return "$rc"
+  fi
+}
+
 # Print the tally and return non-zero if anything failed (drives run.sh).
 finish() {
   printf '  --- %d passed, %d failed ---\n' "$_pass" "$_fail"
   [[ $_fail -eq 0 ]]
 }
 
-# Make a throwaway git repo with one commit. Echoes its path.
+# Make a throwaway git repo with one commit. Echoes its path on success; on any
+# setup failure (e.g. mktemp can't create under a bad TMPDIR, git unavailable) it
+# warns on stderr and returns non-zero rather than echoing an empty/half-built
+# path that a caller would then build vacuous assertions on.
 mk_repo() {
   local d
-  d="$(mktemp -d)"
-  git -C "$d" init -q
-  git -C "$d" config user.email t@t
-  git -C "$d" config user.name t
-  echo seed > "$d/seed.txt"
-  git -C "$d" add seed.txt
-  git -C "$d" commit -qm "seed commit"
+  d="$(mktemp -d)" || { echo "mk_repo: mktemp -d failed" >&2; return 1; }
+  git -C "$d" init -q \
+    && git -C "$d" config user.email t@t \
+    && git -C "$d" config user.name t \
+    && echo seed > "$d/seed.txt" \
+    && git -C "$d" add seed.txt \
+    && git -C "$d" commit -qm "seed commit" \
+    || { echo "mk_repo: failed to build repo in $d" >&2; return 1; }
   printf '%s\n' "$d"
 }
