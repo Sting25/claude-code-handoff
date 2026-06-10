@@ -46,7 +46,7 @@ check "no .ctx file -> no output" "" "$out"
 rm -rf "$repo"
 
 # --- Below threshold -> no reminder -----------------------------------------
-# window 1000, pct 50 -> threshold 500 tokens; 100 tokens is well under.
+# window 1000, pct 40 -> threshold 400 tokens; 100 tokens is well under.
 repo="$(mk_repo)"; seed "$repo" LOW 4000 100
 out="$(run_cc "$repo" LOW)"
 check "below threshold -> no output" "" "$out"
@@ -81,18 +81,54 @@ check "act mode -> self-invoke copy"      yes "$(has "$out" "invoke /handoff you
 check "act mode -> not passive-mention"   no  "$(has "$out" "passive mention")"
 rm -rf "$repo"
 
-# --- Cooldown: a recent flag within COOLDOWN_KB suppresses re-flag -----------
+# --- Cooldown (uncapped via MAX_FLAGS=0 so the cooldown, not the cap, is what
+#     we're exercising here) -----------------------------------------------
 # current_bytes 200000, flagged at 200000, cooldown 100KB(=102400):
 # 200000 < 200000+102400 -> suppressed.
 repo="$(mk_repo)"; seed "$repo" CD 200000 600 200000
-out="$(run_cc "$repo" CD)"
+out="$(run_cc "$repo" CD HANDOFF_CTX_MAX_FLAGS=0)"
 check "within cooldown -> suppressed" "" "$out"
 rm -rf "$repo"
 
 # Beyond cooldown: flagged long ago (0) -> 200000 >= 0+102400 -> re-fires.
 repo="$(mk_repo)"; seed "$repo" CD2 200000 600 0
-out="$(run_cc "$repo" CD2)"
-check "beyond cooldown -> re-fires" yes "$(has "$out" "<system-reminder>")"
+out="$(run_cc "$repo" CD2 HANDOFF_CTX_MAX_FLAGS=0)"
+check "beyond cooldown -> re-fires (uncapped)" yes "$(has "$out" "<system-reminder>")"
+rm -rf "$repo"
+
+# --- Per-session cap (the over-nagging fix) ---------------------------------
+# Default suggest mode caps at 1 flag: even far beyond the cooldown, a session
+# that has already flagged once stays silent. This is the fix for "the handoff
+# message shows up more than is correct" on long/idle sessions.
+repo="$(mk_repo)"; seed "$repo" CAP1 200000 600 0   # one prior flag, way past cooldown
+out="$(run_cc "$repo" CAP1)"                          # suggest default -> MAX_FLAGS=1
+check "suggest default caps at one flag" "" "$out"
+rm -rf "$repo"
+
+# act mode is uncapped by default: same setup re-fires (autonomous self-refresh).
+repo="$(mk_repo)"; seed "$repo" CAPACT 200000 600 0
+out="$(run_cc "$repo" CAPACT HANDOFF_CTX_REMINDER_MODE=act)"
+check "act mode uncapped -> re-fires" yes "$(has "$out" "<system-reminder>")"
+rm -rf "$repo"
+
+# Explicit MAX_FLAGS=2 allows a second flag but not a third. Two prior flags
+# (two lines) past the cooldown -> capped.
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"
+seed "$repo" CAP2 200000 600
+printf '0\n0\n' > "$bd/.ctx_flagged_CAP2"            # two prior flags
+out="$(run_cc "$repo" CAP2 HANDOFF_CTX_MAX_FLAGS=2)"
+check "MAX_FLAGS=2 with 2 prior -> capped" "" "$out"
+# One prior flag, MAX_FLAGS=2, past cooldown -> still allowed.
+printf '0\n' > "$bd/.ctx_flagged_CAP2"
+out="$(run_cc "$repo" CAP2 HANDOFF_CTX_MAX_FLAGS=2)"
+check "MAX_FLAGS=2 with 1 prior -> fires" yes "$(has "$out" "<system-reminder>")"
+rm -rf "$repo"
+
+# The flag file accumulates one line per flag (so the cap can count them).
+repo="$(mk_repo)"; seed "$repo" ACCUM 200000 600 0
+run_cc "$repo" ACCUM HANDOFF_CTX_MAX_FLAGS=0 >/dev/null    # was 1 line, fires -> 2 lines
+lines="$(grep -c '' "$repo/.claude/handoff_backups/.ctx_flagged_ACCUM" 2>/dev/null || echo 0)"
+check "flag file appends (1 prior + 1 new = 2 lines)" 2 "$lines"
 rm -rf "$repo"
 
 # First crossing always fires regardless of byte size (no flag file yet).
@@ -113,7 +149,7 @@ rm -rf "$repo"
 # arithmetic divide by zero, which aborts the script under `set -e` *before*
 # any reminder is emitted (so the negative control is empty output). The fix
 # ignores a non-positive override and falls through to auto-detection (200k or
-# 1M). 600k tokens crosses 50% of either, so a reminder must fire regardless of
+# 1M). 600k tokens crosses 40% of either, so a reminder must fire regardless of
 # this host's ~/.claude.json. Proves: no crash + valid pct computed.
 repo="$(mk_repo)"; seed "$repo" ZEROWIN 4000 600000
 out="$(run_cc "$repo" ZEROWIN HANDOFF_CTX_WINDOW_TOKENS=0)"
