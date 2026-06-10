@@ -10,6 +10,32 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.8.4] — 2026-06-10
+
+Robustness release: `/handoff-recover` now rescues the final turn(s) a crash
+dropped from the raw dump. **No hook-command or permission changes.** There is,
+however, a **new installed script** (`bin/handoff_recover_tail.sh`) — symlinked
+installs must **re-run `./install.sh`** after `git pull` to link it (a pull alone
+won't create the new symlink); copy-mode installs re-run `./install.sh` as usual.
+Without it, `/handoff-recover` degrades gracefully (it skips the tail step). Ships
+with a regression test verified to fail against the pre-fix code.
+
+### Fixed
+- **`/handoff-recover` no longer silently loses the last turn before an abrupt
+  end.** The raw dump is built turn-by-turn by the Stop hook, which fires *after*
+  each turn — so a session killed before its final Stop (OOM, SIGKILL, closed
+  terminal) never folds its last exchange into the dump, even though Claude Code
+  already wrote it to the transcript JSONL. Recover read only the dump and lost
+  it. New `bin/handoff_recover_tail.sh` compares the Stop hook's cursor against
+  the JSONL and emits any turns past it (the un-captured tail) for the skill to
+  fold into the recovered Notes; it counts lines with `awk NR` so a
+  crash-truncated, newline-less final line is rescued rather than dropped. (#34)
+
+### Added
+- `bin/handoff_recover_tail.sh` — new installed script, wired into
+  `install.sh`'s link / chmod / uninstall paths. Not a hook itself (no
+  settings.json entry); invoked by the `/handoff-recover` skill. (#34)
+
 ## [0.8.3] — 2026-06-09
 
 Security + robustness release from a full code & security audit of the hooks.
