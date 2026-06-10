@@ -137,9 +137,18 @@ if ! [[ "$HISTORY_KEEP" =~ ^[0-9]+$ ]]; then
   HISTORY_KEEP=5
 fi
 
+# Project scope: prefer the git worktree top; fall back to the Claude Code
+# project dir (or cwd) so handoff works in projects NOT under git. `in_git`
+# gates the git-only pieces below (commit snapshot, .gitignore bootstrap,
+# the verify-state command block).
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+in_git=1
 if [[ -z "$repo_root" ]]; then
-  echo "ERROR: not in a git repo (cwd=$PWD)" >&2
+  in_git=0
+  repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+fi
+if [[ -z "$repo_root" ]]; then
+  echo "ERROR: cannot resolve a project directory (no git worktree, CLAUDE_PROJECT_DIR, or PWD)" >&2
   exit 1
 fi
 
@@ -201,6 +210,10 @@ fi
 # pollute `git status`. Skip if HANDOFF_NO_GITIGNORE_BOOTSTRAP=1.
 bootstrap_gitignore() {
   local entry="$1"
+  # Nothing to ignore when this project isn't under git. (return 0 — a bare
+  # `return` would propagate the failed `(( in_git ))` status and, since this
+  # function is called as a bare statement, trip `set -e`.)
+  (( in_git )) || return 0
   if git -C "$repo_root" check-ignore -q "$entry" 2>/dev/null; then
     return
   fi
@@ -334,9 +347,17 @@ snapshot_repo() {
   local root="$1"
   local label="$2"
   local upstream
-  upstream="$(git -C "$root" status -sb 2>/dev/null | head -1 | sed 's/^## //')"
 
   printf '## %s\n\n' "$label"
+
+  # Off-git: no commit/branch/working-tree state to report. Emit a clear note
+  # instead of a wall of "?" placeholders, and skip the git commands entirely.
+  if ! git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '_Not a git repository — no commit, branch, or working-tree state to snapshot._\n\n'
+    return
+  fi
+
+  upstream="$(git -C "$root" status -sb 2>/dev/null | head -1 | sed 's/^## //')"
   printf '**HEAD:** `%s` — %s\n\n' "$(git_short "$root")" "$(git_subj "$root")"
   printf '**Branch:** `%s` (%s)\n\n' "$(git_branch "$root")" "$upstream"
 
@@ -366,6 +387,10 @@ list_inflight_md() {
   local root="$1"
   local subdir="$2"
   local xy path src
+  # "In-flight .md" is a git concept (untracked/modified). Off-git there's
+  # nothing to list — and the git pipeline below would fail under `pipefail`
+  # and could abort the caller's `found=$(...)` under `set -e`. Return empty.
+  git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   git -C "$root" status --porcelain -z "$subdir" 2>/dev/null \
     | while IFS= read -r -d '' entry; do
         xy="${entry:0:2}"      # two-char status field
@@ -466,9 +491,15 @@ EOF
 
   printf '## Verify state matches reality\n\n'
   printf '```bash\n'
-  printf 'git -C %s status && git -C %s log --oneline -5\n' "$repo_root" "$repo_root"
-  if [[ -n "$substrate_root" ]]; then
-    printf 'git -C %s log --oneline -5\n' "$substrate_root"
+  if (( in_git )); then
+    printf 'git -C %s status && git -C %s log --oneline -5\n' "$repo_root" "$repo_root"
+    if [[ -n "$substrate_root" ]]; then
+      printf 'git -C %s log --oneline -5\n' "$substrate_root"
+    fi
+  else
+    # Non-git project: no commit/branch state to verify against. Point at the
+    # handoff artifacts instead so the next session can confirm they exist.
+    printf 'ls -la %s/.claude/\n' "$repo_root"
   fi
   printf '```\n\n'
 

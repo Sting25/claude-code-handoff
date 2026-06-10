@@ -53,7 +53,10 @@ if [[ -n "${HANDOFF_BACKUP_DIR:-}" ]]; then
   backup_dir="$HANDOFF_BACKUP_DIR"
 else
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  [[ -z "$repo_root" ]] && { echo "handoff_recover_tail.sh: not in a git repo and HANDOFF_BACKUP_DIR unset" >&2; exit 0; }
+  # Off-git, fall back to the Claude Code project dir / cwd, matching the writer
+  # hooks so the backup dir resolves to the same place they wrote it.
+  [[ -n "$repo_root" ]] || repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [[ -z "$repo_root" ]] && { echo "handoff_recover_tail.sh: cannot resolve project dir and HANDOFF_BACKUP_DIR unset" >&2; exit 0; }
   backup_dir="$repo_root/.claude/handoff_backups"
 fi
 cursor_file="$backup_dir/.handoff_raw_${session_id}.cursor"

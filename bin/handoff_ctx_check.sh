@@ -88,8 +88,10 @@ session_id="$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)"
 # clean otherwise.
 [[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
 
-# --- Repo scope (matches Stop-hook scoping) ---
+# --- Project scope (matches Stop-hook scoping): git worktree top, else the
+#     Claude Code project dir / cwd so non-git projects work too. ---
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$repo_root" ]] || repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
 [[ -z "$repo_root" ]] && exit 0
 
 backup_dir="$repo_root/.claude/handoff_backups"

@@ -46,8 +46,15 @@ transcript_path="$(jq -r '.transcript_path // empty' <<<"$payload")"
 # (hex + dashes); accept only [A-Za-z0-9_-] and exit clean on anything else.
 [[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
 
-# --- Repo scope: only run inside git worktrees ---
+# --- Project scope. Prefer the git worktree top; fall back to the Claude Code
+#     project dir (or cwd) so handoff also works in projects NOT under git.
+#     `in_git` gates the git-only .gitignore bootstrap below. ---
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+in_git=1
+if [[ -z "$repo_root" ]]; then
+  in_git=0
+  repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+fi
 [[ -z "$repo_root" ]] && exit 0
 
 backup_dir="$repo_root/.claude/handoff_backups"
@@ -77,7 +84,8 @@ mkdir -p "$backup_dir"
 # before write_handoff.sh (SessionEnd) bootstraps the .gitignore — so without
 # this there is a window where a `git add` could stage a dump into history.
 # Mirrors write_handoff.sh's bootstrap and honors the same opt-out env var.
-if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]] \
+if (( in_git )) \
+   && [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]] \
    && ! git -C "$repo_root" check-ignore -q ".claude/handoff_backups/" 2>/dev/null; then
   gi="$repo_root/.gitignore"
   # Don't append through a symlinked .gitignore (a malicious repo could point it

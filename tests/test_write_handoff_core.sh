@@ -46,11 +46,17 @@ check "dirty tree -> not _clean_"     no  "$(has "$doc" "_clean_")"
 check "dirty tree -> lists the file"  yes "$(has "$doc" "dirty.txt")"
 rm -rf "$repo"
 
-# --- Not a git repo -> exit 1 -----------------------------------------------
+# --- Not a git repo -> git-optional: writes a handoff anchored on cwd, with a
+#     "not a git repository" snapshot note instead of erroring out ------------
 notrepo="$(mktemp -d)"
-err="$( cd "$notrepo" && bash "$WH" 2>&1 >/dev/null )"; rc=$?
-check "non-repo -> exit 1"            1   "$rc"
-check "non-repo -> error mentions git" yes "$(has "$err" "not in a git repo")"
+rc=0
+out="$( cd "$notrepo" && env -u CLAUDE_PROJECT_DIR bash "$WH" 2>/dev/null )" || rc=$?
+doc="$(cat "$notrepo/.claude/handoff_current.md" 2>/dev/null)"
+check "non-repo -> exit 0"                  0   "$rc"
+check "non-repo -> handoff path printed"    yes "$(has "$out" ".claude/handoff_current.md")"
+check "non-repo -> 'not a git repo' note"   yes "$(has "$doc" "Not a git repository")"
+check "non-repo -> verify block uses ls"    yes "$(has "$doc" "ls -la")"
+check "non-repo -> no git in verify block"  no  "$(has "$doc" "git -C")"
 rm -rf "$notrepo"
 
 # --- Unknown argument -> exit 2 ---------------------------------------------
