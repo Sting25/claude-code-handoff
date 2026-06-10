@@ -16,7 +16,7 @@
 #                               project's lastModelUsage records a model
 #                               with a `[1m]` suffix, defaults to 1000000;
 #                               otherwise 200000.
-#   HANDOFF_CTX_THRESHOLD_PCT   percent of window that triggers (default: 50).
+#   HANDOFF_CTX_THRESHOLD_PCT   percent of window that triggers (default: 40).
 #                               Lower (e.g. 30) is recommended for projects
 #                               that opt into REMINDER_MODE=act below — the
 #                               model needs runway to find a clean boundary
@@ -35,7 +35,19 @@
 #                               gentler behavior.
 #   HANDOFF_CTX_COOLDOWN_KB     transcript growth required between re-flags
 #                               (default: 100, i.e. wait ~100KB before
-#                               flagging again so we don't nag every turn)
+#                               flagging again so we don't nag every turn).
+#                               Only relevant once re-flags are allowed —
+#                               see HANDOFF_CTX_MAX_FLAGS.
+#   HANDOFF_CTX_MAX_FLAGS       hard cap on how many times a single session
+#                               flags, regardless of growth. Defaults: 1 in
+#                               "suggest" mode (one gentle nudge per session,
+#                               then silence — a session left idle or running
+#                               long won't keep nagging), 0 (= unlimited, gated
+#                               only by the cooldown) in "act" mode, where the
+#                               assistant is expected to keep refreshing its own
+#                               context as it fills. Set 0 to restore the old
+#                               always-cooldown-gated behavior; set N>1 to allow
+#                               up to N nudges spaced by the cooldown.
 #
 # Token count comes from the latest assistant turn's `usage` — the same
 # number Claude Code's /context shows. When that file is absent (first
@@ -45,9 +57,21 @@
 
 set -euo pipefail
 
-THRESHOLD_PCT="${HANDOFF_CTX_THRESHOLD_PCT:-50}"
+THRESHOLD_PCT="${HANDOFF_CTX_THRESHOLD_PCT:-40}"
 COOLDOWN_KB="${HANDOFF_CTX_COOLDOWN_KB:-100}"
 REMINDER_MODE="${HANDOFF_CTX_REMINDER_MODE:-suggest}"
+# Per-session flag cap. Default depends on mode: "suggest" nudges once and then
+# stays quiet (the common complaint is over-nagging on long/idle sessions);
+# "act" leaves it uncapped so an autonomous project keeps self-refreshing.
+if [[ -n "${HANDOFF_CTX_MAX_FLAGS:-}" ]]; then
+  MAX_FLAGS="$HANDOFF_CTX_MAX_FLAGS"
+elif [[ "$REMINDER_MODE" == "act" ]]; then
+  MAX_FLAGS=0
+else
+  MAX_FLAGS=1
+fi
+# Non-numeric override -> treat as the safe "uncapped" sentinel rather than abort.
+[[ "$MAX_FLAGS" =~ ^[0-9]+$ ]] || MAX_FLAGS=0
 
 # --- Read hook payload ---
 payload="$(cat 2>/dev/null || true)"
@@ -138,13 +162,19 @@ if (( est_tokens < threshold_tokens )); then
   exit 0
 fi
 
-# --- Cooldown: only re-flag after meaningful additional growth.
-#     Gate applies only to re-flags — the first time a session crosses
-#     the threshold, the reminder always fires regardless of transcript
-#     byte size. (Otherwise a token-heavy / byte-light session could be
-#     gated on the byte minimum even on its first crossing.)
+# --- Per-session cap + cooldown.
+#     flag_file holds one line per flag emitted this session: its line count is
+#     how many times we've flagged, its last line is the byte size at the most
+#     recent flag. The first crossing always fires (no prior flag); subsequent
+#     ones are gated by (a) the MAX_FLAGS cap and (b) the cooldown growth.
 if [[ -f "$flag_file" ]]; then
-  last_flagged_bytes="$(cat "$flag_file" 2>/dev/null || echo 0)"
+  flag_count="$(grep -c '' "$flag_file" 2>/dev/null || echo 0)"
+  [[ "$flag_count" =~ ^[0-9]+$ ]] || flag_count=0
+  # Cap: 0 means uncapped; otherwise stop once we've flagged MAX_FLAGS times.
+  if (( MAX_FLAGS > 0 && flag_count >= MAX_FLAGS )); then
+    exit 0
+  fi
+  last_flagged_bytes="$(tail -n 1 "$flag_file" 2>/dev/null || echo 0)"
   [[ "$last_flagged_bytes" =~ ^[0-9]+$ ]] || last_flagged_bytes=0
   cooldown_bytes=$((COOLDOWN_KB * 1024))
   if (( current_bytes < last_flagged_bytes + cooldown_bytes )); then
@@ -172,9 +202,19 @@ EOF
     ;;
 esac
 
-# --- Record this flag so the cooldown is honored on the next prompt ---
-tmp_flag="$(mktemp "${flag_file}.XXXXXX")"
-echo "$current_bytes" > "$tmp_flag"
-mv -f "$tmp_flag" "$flag_file"
+# --- Record this flag (append one line) so the cap + cooldown see it next
+#     prompt. UserPromptSubmit hooks run serially per session, so a plain append
+#     is safe here (no concurrent writers like the Stop hook). Refuse a planted
+#     symlink at the flag path, matching the Stop hook's dump guard.
+if [[ ! -L "$flag_file" ]]; then
+  # If a pre-existing flag file (e.g. a single value written by a pre-cap
+  # version, or a hand-edited one) lacks a trailing newline, our append would
+  # fuse onto its last line and undercount. Normalize first, like the Stop
+  # hook does for .gitignore.
+  if [[ -s "$flag_file" ]] && [[ "$(tail -c1 "$flag_file" | wc -l)" -eq 0 ]]; then
+    printf '\n' >> "$flag_file"
+  fi
+  printf '%s\n' "$current_bytes" >> "$flag_file"
+fi
 
 exit 0
