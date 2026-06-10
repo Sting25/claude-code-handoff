@@ -270,6 +270,7 @@ install_symlinks() {
   link "$repo_root/bin/handoff_turn_append.sh"    "$claude_home/bin/handoff_turn_append.sh"
   link "$repo_root/bin/handoff_ctx_check.sh"      "$claude_home/bin/handoff_ctx_check.sh"
   link "$repo_root/bin/handoff_session_start.sh"  "$claude_home/bin/handoff_session_start.sh"
+  link "$repo_root/bin/handoff_recover_tail.sh"   "$claude_home/bin/handoff_recover_tail.sh"
   link "$repo_root/skills/handoff/SKILL.md"          "$claude_home/skills/handoff/SKILL.md"
   link "$repo_root/skills/handoff/README.md"         "$claude_home/skills/handoff/README.md"
   link "$repo_root/skills/handoff-more/SKILL.md"     "$claude_home/skills/handoff-more/SKILL.md"
@@ -282,7 +283,8 @@ install_symlinks() {
   chmod +x "$repo_root/bin/write_handoff.sh" \
            "$repo_root/bin/handoff_turn_append.sh" \
            "$repo_root/bin/handoff_ctx_check.sh" \
-           "$repo_root/bin/handoff_session_start.sh" 2>/dev/null || true
+           "$repo_root/bin/handoff_session_start.sh" \
+           "$repo_root/bin/handoff_recover_tail.sh" 2>/dev/null || true
 }
 
 uninstall_symlinks() {
@@ -290,6 +292,7 @@ uninstall_symlinks() {
   unlink_if_ours "$claude_home/bin/handoff_turn_append.sh"    "$repo_root/bin/handoff_turn_append.sh"
   unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"      "$repo_root/bin/handoff_ctx_check.sh"
   unlink_if_ours "$claude_home/bin/handoff_session_start.sh"  "$repo_root/bin/handoff_session_start.sh"
+  unlink_if_ours "$claude_home/bin/handoff_recover_tail.sh"   "$repo_root/bin/handoff_recover_tail.sh"
   unlink_if_ours "$claude_home/skills/handoff/SKILL.md"          "$repo_root/skills/handoff/SKILL.md"
   unlink_if_ours "$claude_home/skills/handoff/README.md"         "$repo_root/skills/handoff/README.md"
   unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$repo_root/skills/handoff-more/SKILL.md"
