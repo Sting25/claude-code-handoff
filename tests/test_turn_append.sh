@@ -76,12 +76,19 @@ check "tool result head kept"           yes "$(has "$body" "HEADMARK")"
 check "tool result tail truncated off"  no  "$(has "$body" "TAILMARK")"
 rm -rf "$repo"
 
-# --- Not a git repo -> exit 0, no backups -----------------------------------
+# --- Not a git repo -> git-optional: still dumps, anchored on cwd/CLAUDE_PROJECT_DIR.
+#     env -u CLAUDE_PROJECT_DIR makes the cwd ($PWD after cd) the anchor so the
+#     test is deterministic regardless of the outer environment. ------------
 notrepo="$(mktemp -d)"; tx="$notrepo/tx.jsonl"
-printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
-run_turn "$notrepo" NR "$tx"; rc=$?
-check "non-repo -> exit 0"            0  "$rc"
-check "non-repo -> no backups dir"    no "$([[ -d "$notrepo/.claude/handoff_backups" ]] && echo yes || echo no)"
+printf '{"type":"user","message":{"content":"hi NONGITMARK"}}\n' > "$tx"
+rc=0
+( cd "$notrepo" && printf '{"session_id":"NR","transcript_path":"%s"}' "$tx" \
+    | env -u CLAUDE_PROJECT_DIR bash "$TA" >/dev/null 2>&1 ) || rc=$?
+ndump="$notrepo/.claude/handoff_backups/handoff_raw_NR.md"
+check "non-repo -> exit 0"                       0   "$rc"
+check "non-repo (git-optional) -> dump written"  yes "$([[ -f "$ndump" ]] && echo yes || echo no)"
+check "non-repo -> dump has content"             yes "$(has "$(cat "$ndump" 2>/dev/null)" "NONGITMARK")"
+check "non-repo -> no .gitignore bootstrap"      no  "$([[ -f "$notrepo/.gitignore" ]] && echo yes || echo no)"
 rm -rf "$notrepo"
 
 # --- Missing transcript file -> exit 0, no dump -----------------------------
