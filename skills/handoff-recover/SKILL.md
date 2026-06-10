@@ -76,6 +76,29 @@ into the current session's context and persists it back into
    in-flight tracks, open questions, "next session" cautions. Skip
    transient tool output and routine acknowledgements.
 
+   **The raw dump can be missing the final turn(s).** It is built
+   incrementally by the `Stop` hook, which fires *after* each assistant
+   turn. A session killed before its final `Stop` ran — OOM, SIGKILL,
+   power loss, terminal closed mid-turn — never folds its last exchange
+   into the dump, yet Claude Code already wrote it to the transcript
+   JSONL. That last turn is often the most valuable thing to recover
+   ("what I was about to do next"). The dump alone silently loses it.
+
+   Run the recovery helper to surface anything the dump missed:
+
+   ```bash
+   bash ~/.claude/bin/handoff_recover_tail.sh <previous_session_id>
+   ```
+
+   It compares the dump's cursor against the transcript JSONL and prints
+   any turns past the cursor (formatted like the dump). Empty output
+   means the dump is already complete — the normal clean-`/handoff`
+   case; nothing to do. Non-empty output is the un-captured tail: read
+   it and fold anything load-bearing into the recovered Notes below,
+   same as content from the dump itself. If the helper isn't installed
+   (older install) or prints a "no transcript" notice, skip it — the
+   dump is your only source and you proceed with what it has.
+
 3. **Read the most recent curated handoff from history.** The
    SessionStart hook already cat'd this above if one existed, so
    it may already be in your context — confirm by checking for a

@@ -37,12 +37,13 @@ dst="$home/bin/handoff_session_start.sh"
 check "target exists"          yes "$([[ -e "$dst" ]] && echo yes || echo no)"
 check "target is NOT a symlink" yes "$([[ ! -L "$dst" ]] && echo yes || echo no)"
 check "target is a real copy"   yes "$([[ -f "$dst" ]] && cmp -s "$src/bin/handoff_session_start.sh" "$dst" && echo yes || echo no)"
-# All four bin scripts should have copied, not just one.
+# All bin scripts should have copied, not just one.
 copied=0
-for f in write_handoff.sh handoff_turn_append.sh handoff_ctx_check.sh handoff_session_start.sh; do
+for f in write_handoff.sh handoff_turn_append.sh handoff_ctx_check.sh \
+         handoff_session_start.sh handoff_recover_tail.sh; do
   [[ -f "$home/bin/$f" && ! -L "$home/bin/$f" ]] && copied=$((copied + 1))
 done
-check "all four bin scripts copied" 4 "$copied"
+check "all five bin scripts copied" 5 "$copied"
 # The installer must surface the "copies don't auto-update" warning (COPIED_ANY).
 check "warns about copy mode" yes "$(case "$out" in *"COPIED"*|*"copy"*) echo yes ;; *) echo no ;; esac)"
 # settings.json still patched (fallback must not abort the run).
