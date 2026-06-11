@@ -5,6 +5,25 @@ session starts blind — you re-explain the project, the in-flight work,
 the decisions you made twenty minutes ago, all from memory. This skill
 makes the next session not blind.
 
+**In plain terms, it:**
+
+- **Saves a snapshot of where you left off** — your git state (branch,
+  recent commits, what's changed) plus a short written summary of the
+  decisions made, what's in flight, and what to do next.
+- **Auto-loads it into your next session** in the same repo, so Claude
+  picks up with context instead of a blank slate. No copy-paste, no
+  kickoff prompt.
+- **Backs itself up automatically** — saves git state on every clean
+  exit, keeps a per-turn backup so a crash doesn't lose everything, and
+  can reconstruct a summary after a session that ended without one.
+- **Nudges you before you run out** — quietly flags a good moment to
+  hand off once your context is getting full, while Claude is still
+  sharp enough to write a good summary.
+
+You drive it with `/handoff` at the end of a working session; the rest
+(loading, backups, the nudge) happens through hooks without you
+thinking about it.
+
 Three paths, doing different jobs:
 
 - **`/handoff` (preferred, you invoke it at session end):** writes
