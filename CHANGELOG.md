@@ -12,13 +12,19 @@ are appended).
 
 ## [0.8.4] — 2026-06-10
 
-Robustness release: `/handoff-recover` now rescues the final turn(s) a crash
-dropped from the raw dump. **No hook-command or permission changes.** There is,
-however, a **new installed script** (`bin/handoff_recover_tail.sh`) — symlinked
+Robustness + reach batch. Three changes: `/handoff-recover` now rescues the final
+turn(s) a crash dropped from the raw dump (#34); the context-pressure reminder no
+longer over-fires on long/idle sessions (#36); and the hooks now work in projects
+that aren't under git at all (#37).
+
+**No settings.json changes are required** — the hook commands and permissions are
+unchanged — but two runtime behaviors shift (ctx-check threshold and nag
+frequency, see below) and one new env var is recognized (`HANDOFF_CTX_MAX_FLAGS`).
+There is also a **new installed script** (`bin/handoff_recover_tail.sh`): symlinked
 installs must **re-run `./install.sh`** after `git pull` to link it (a pull alone
 won't create the new symlink); copy-mode installs re-run `./install.sh` as usual.
-Without it, `/handoff-recover` degrades gracefully (it skips the tail step). Ships
-with a regression test verified to fail against the pre-fix code.
+Without it, `/handoff-recover` degrades gracefully (it skips the tail step). Every
+change ships with a test; the new git-optional contract is covered end to end.
 
 ### Fixed
 - **`/handoff-recover` no longer silently loses the last turn before an abrupt
@@ -30,11 +36,35 @@ with a regression test verified to fail against the pre-fix code.
   the JSONL and emits any turns past it (the un-captured tail) for the skill to
   fold into the recovered Notes; it counts lines with `awk NR` so a
   crash-truncated, newline-less final line is rescued rather than dropped. (#34)
+- **The context-pressure reminder no longer nags repeatedly on a long or idle
+  session.** Once a session crossed the threshold the hook re-flagged every
+  ~100KB of transcript growth, so a session left open kept prompting. The flag
+  file now appends one line per flag (newline-normalized so a pre-cap
+  single-value file can't fuse and undercount) and a per-session cap counts them.
+  (#36)
+
+### Changed
+- **ctx-check default threshold lowered 50% → 40%.** One earlier nudge gives more
+  runway to reach a clean boundary before quality degrades. (#36)
+- **One nudge per session by default.** New per-session cap `HANDOFF_CTX_MAX_FLAGS`
+  defaults to `1` in "suggest" mode (one gentle nudge, then silence) and `0`
+  (uncapped, cooldown-gated) in "act" mode, where an autonomous project keeps
+  self-refreshing. Override to taste. (#36)
 
 ### Added
 - `bin/handoff_recover_tail.sh` — new installed script, wired into
   `install.sh`'s link / chmod / uninstall paths. Not a hook itself (no
   settings.json entry); invoked by the `/handoff-recover` skill. (#34)
+- **Git is now optional — handoff works in projects not under git.** The hooks
+  anchored on `git rev-parse --show-toplevel` and no-op'd (or, for
+  `write_handoff.sh`, errored) outside a git worktree. Every script now falls
+  back to `CLAUDE_PROJECT_DIR` (then `$PWD`) when there's no git top — matching
+  the resolver `handoff_session_start.sh` already used — so the `.claude/`
+  artifacts land where the loader looks. Off-git, `write_handoff.sh` emits a
+  "Not a git repository" note instead of a wall of `?`, points the verify block
+  at `.claude/` via `ls -la`, and git-gates the `.gitignore` bootstrap. Shipped
+  as a `feat` in a patch release by choice. (#37)
+- `HANDOFF_CTX_MAX_FLAGS` env var (see **Changed**). (#36)
 
 ## [0.8.3] — 2026-06-09
 
