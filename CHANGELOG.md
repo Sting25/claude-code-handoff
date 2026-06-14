@@ -10,6 +10,23 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.8.5] — 2026-06-14
+
+Docs-only release. Leads the README with a plain-language "In plain terms, it:"
+bullet summary — snapshot, auto-load, self-backup, context nudge — plus a one-line
+"how you drive it", so a newcomer gets what the tool does before the detailed
+three-paths section. (#39)
+
+**No settings.json changes** — hook commands and permissions are unchanged, and
+there are no new installed scripts. A `git pull` is sufficient; nothing to re-run.
+No behavior change.
+
+### Changed
+- **README opens with a plain-language bullet summary.** A four-bullet "In plain
+  terms" block plus a one-line "how you drive it" now precede the detailed
+  sections, so a human gets the gist first. Docs only; existing sections
+  unchanged. (#39)
+
 ## [0.8.4] — 2026-06-10
 
 Robustness + reach batch. Three changes: `/handoff-recover` now rescues the final
