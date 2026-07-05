@@ -1,0 +1,43 @@
+# CI for claude-code-handoff — the automated gate this repo was missing.
+#
+# tests-linux is the authoritative check (ubuntu = bash 5 + GNU coreutils),
+# and is the one to mark "required" under branch protection.
+# tests-macos is intentionally NON-blocking: it surfaces the bash-3.2 / BSD
+# portability gaps that otherwise only bite on a dev's Mac, without blocking
+# merges on them.
+#
+# DRAFT: the first run is the real measurement — it confirms the suite is
+# green on Linux and shows exactly what (if anything) macOS still needs.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  tests-linux:
+    name: tests (ubuntu / bash 5) — required
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run test suite
+        run: ./tests/run.sh
+
+  tests-macos:
+    name: tests (macOS / bash 3.2) — advisory
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run test suite (surfaces BSD / bash-3.2 portability gaps)
+        run: ./tests/run.sh
+
+  shellcheck:
+    name: shellcheck — advisory
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck all scripts
+        run: shellcheck bin/*.sh tests/*.sh install.sh

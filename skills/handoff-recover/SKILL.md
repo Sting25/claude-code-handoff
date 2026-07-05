@@ -161,8 +161,32 @@ into the current session's context and persists it back into
    Wait for the user. If they correct or add, update the in-chat
    summary AND re-edit `handoff_current.md` with the corrections.
 
-9. **Then continue with the session's actual work.** With the
-   retroactive Notes in context, you have a working baseline.
+9. **Reconcile the working tree before resuming — don't redo done
+   work.** A crashed session's in-progress edits are usually still in
+   the working tree, uncommitted; `git status` and `git diff` are the
+   ground truth for what it already applied. Before resuming:
+
+   - **Treat already-applied edits as done — never re-apply them.**
+     If the recovered Notes say "edited X to do Y" and `git diff`
+     already shows Y in X, that step is complete. Re-running the edit
+     duplicates it or corrupts the file. This is the single most
+     common recovery mistake: a fresh session, blind to what the dead
+     one did, redoes it.
+   - **Verify scope.** The diff should touch only the files the
+     recovered work intended — flag anything extra. Don't be fooled
+     by noise: line-ending / `.gitattributes` churn appears as
+     modified files with zero changed lines.
+   - **Baseline the tests, then read the result honestly.** If the
+     repo has a suite, run it *before* any new edits. A failure on a
+     file that is byte-identical to `HEAD` is environmental (OS,
+     shell version, a missing tool) — not a regression the recovered
+     work caused. Prove it (`git diff --stat` the file) instead of
+     assuming; environmental red must not scare you off good work,
+     and must not mask a real one.
+
+10. **Then continue with the session's actual work.** With the
+    retroactive Notes in context and the tree reconciled, you have a
+    working baseline.
 
 ## What gets persisted to disk
 
@@ -210,6 +234,10 @@ gap is better than a silent gap.
   recovery work itself — including it would create a circular
   recovery. Use the mtime/size heuristic or the session registry to
   disambiguate.
+- **Do not re-apply work the crashed session already did.** Its
+  uncommitted edits live in the working tree; `git diff` is the
+  source of truth for what's done. Blindly redoing a step from the
+  recovered Notes duplicates edits or corrupts files (see step 9).
 - **Do not modify `handoff_history/` files.** Those are historical
   snapshots from prior sessions; treat them as read-only.
 - **Do not skip the user confirmation step.** Retroactive composition
