@@ -149,13 +149,22 @@ fi
 WINDOW_TOKENS="$window_tokens"
 
 # --- Tokens: prefer the real measurement; fall back to bytes/4. ---
+# token_source records which path won so the emitted reminder can say so. A
+# bytes/4 estimate runs high — transcript bytes include tool results, thinking
+# blocks, and reminder injections that aren't in the real context window — so a
+# reader must not treat an estimated pct as ground truth (this is the "reports
+# ~40% when /context shows ~9%" surprise). When the Stop hook has recorded real
+# usage (.ctx_tokens_*), the source stays "measured" and the note is empty, so
+# normal reminders are byte-for-byte unchanged.
 est_tokens=0
+token_source="measured"
 if [[ -f "$tokens_file" ]]; then
   est_tokens="$(cat "$tokens_file" 2>/dev/null || echo 0)"
   [[ "$est_tokens" =~ ^[0-9]+$ ]] || est_tokens=0
 fi
 if (( est_tokens == 0 )); then
   est_tokens=$((current_bytes / 4))
+  token_source="estimated"
 fi
 
 # --- Threshold check ---
@@ -187,18 +196,27 @@ fi
 # --- Compose and emit the system-reminder ---
 pct=$((est_tokens * 100 / WINDOW_TOKENS))
 
+# On the bytes/4 fallback, mark the figure as an estimate so a reader (and the
+# model acting on this reminder) knows the pct is a rough upper bound, not the
+# measured /context value. Empty in the measured path -> reminders unchanged.
+if [[ "$token_source" == "estimated" ]]; then
+  est_note=' NOTE: this figure is ESTIMATED from transcript byte size (bytes/4), not a measured token count — the per-turn Stop hook has not recorded real usage for this session (it may be uninstalled, stale from an upgrade, or this is the first turn). The byte estimate typically runs high, so the true percentage is likely lower; treat it as a rough upper bound.'
+else
+  est_note=''
+fi
+
 case "$REMINDER_MODE" in
   act)
     cat <<EOF
 <system-reminder>
-Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window). This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself — do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. Cooldown: this reminder will not re-fire for ~${COOLDOWN_KB}KB of further transcript growth.
+Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window).${est_note} This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself — do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. Cooldown: this reminder will not re-fire for ~${COOLDOWN_KB}KB of further transcript growth.
 </system-reminder>
 EOF
     ;;
   *)
     cat <<EOF
 <system-reminder>
-Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window). This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than at 5%. Flag to the user as a passive mention — no question mark, no "want me to?". One line, e.g. "Flagging: ~${pct}% of context used — natural /handoff moment if you want to lock in the prose while I'm still sharp." Don't repeat for at least another ${COOLDOWN_KB}KB of growth.
+Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window).${est_note} This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than at 5%. Flag to the user as a passive mention — no question mark, no "want me to?". One line, e.g. "Flagging: ~${pct}% of context used — natural /handoff moment if you want to lock in the prose while I'm still sharp." Don't repeat for at least another ${COOLDOWN_KB}KB of growth.
 </system-reminder>
 EOF
     ;;

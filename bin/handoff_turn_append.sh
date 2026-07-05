@@ -295,6 +295,17 @@ mv -f "$tmp_cursor" "$cursor_file"
 #     cache_read + cache_creation from the latest assistant turn's usage)
 #     is the real measurement Claude Code's /context uses, and is far more
 #     accurate than the 4-bytes-per-token estimate.
+#
+#     We scan for the LAST assistant line that (a) is on the main chain
+#     (not an isSidechain sub-agent turn) and (b) actually carries a usage
+#     block, rather than blindly taking the final assistant line. Two real
+#     transcripts break the naive `tail -n 1`: a turn whose last assistant
+#     line has no usage (sum 0 -> tokens file never written -> the ctx-check
+#     hook silently falls back to bytes/4 and over-reports), and a turn ending
+#     in a Task sub-agent whose isSidechain usage reflects the sub-agent's
+#     small context, not the main thread's. Selecting the last main-chain,
+#     usage-bearing line fixes both, so ctx-check's fallback never runs
+#     whenever any real usage exists in the transcript.
 ctx_file="$backup_dir/.ctx_${session_id}"
 tmp_ctx="$(mktemp "${ctx_file}.XXXXXX")"
 wc -c < "$transcript_path" | tr -d ' ' > "$tmp_ctx"
@@ -302,12 +313,16 @@ mv -f "$tmp_ctx" "$ctx_file"
 
 last_tokens="$(
   grep '"type":"assistant"' "$transcript_path" 2>/dev/null \
-    | tail -n 1 \
     | jq -r '
-        (.message.usage.input_tokens // 0) +
-        (.message.usage.cache_read_input_tokens // 0) +
-        (.message.usage.cache_creation_input_tokens // 0)
-      ' 2>/dev/null || true
+        select(.isSidechain != true)
+        | select(.message.usage != null)
+        | (.message.usage.input_tokens // 0)
+        + (.message.usage.cache_read_input_tokens // 0)
+        + (.message.usage.cache_creation_input_tokens // 0)
+      ' 2>/dev/null \
+    | grep -E '^[0-9]+$' \
+    | tail -n 1 \
+    || true
 )"
 if [[ "$last_tokens" =~ ^[0-9]+$ ]] && (( last_tokens > 0 )); then
   tokens_file="$backup_dir/.ctx_tokens_${session_id}"
