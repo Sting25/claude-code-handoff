@@ -406,6 +406,7 @@ while IFS= read -r old; do
   rm -f  -- "$backup_dir/.ctx_tokens_${id}"
   rm -f  -- "$backup_dir/.ctx_model_${id}"
   rm -f  -- "$backup_dir/.ctx_flagged_${id}"
+  rm -f  -- "$backup_dir/.ctx_sl_${id}"        # statusline cache sidecar
 done < <(ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | tail -n +4)
 
 exit 0
