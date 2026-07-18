@@ -14,8 +14,10 @@ LEGACY="The /handoff skill should append decisions"
 
 # Run the hook against a project dir, capture stdout. Extra args are env=val.
 run_ss() {  # <project_dir> [ENV=VAL ...]
+  # </dev/null: the hook reads its JSON payload from stdin now (compact
+  # detection); inheriting the test runner's stdin would be nondeterministic.
   local dir="$1"; shift
-  ( cd "$dir" && env CLAUDE_PROJECT_DIR="$dir" "$@" bash "$SS" 2>/dev/null )
+  ( cd "$dir" && env CLAUDE_PROJECT_DIR="$dir" "$@" bash "$SS" </dev/null 2>/dev/null )
 }
 
 # has <haystack> <needle> -> yes|no

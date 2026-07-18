@@ -74,6 +74,10 @@ The tool loads the handoff into context; verifying it is the new session's job.
    handoff that disagrees with the repository is an exception to escalate, not
    an obstacle to work around.
 3. **Then** load the fences and intent as the session's starting context.
+   In the shipped tool the fences layer (the `## Rules` block and the pin)
+   loads as *binding* rules — not just reference data — when the handoff's
+   provenance verifies (written locally and signed, not clone-delivered);
+   see the main README's "Trusted rules" section.
 
 ---
 

@@ -355,6 +355,26 @@ export HANDOFF_CTX_NO_STATUSLINE=1
 # "logout", "prompt_input_exit", "other") always write by default.
 # Curated /handoff and manual runs never consult this list.
 export HANDOFF_SESSIONEND_SKIP_REASONS=resume
+
+# --- Trusted-rules tier (issue #42) ---
+
+# Path of the per-machine HMAC secret used to sign handoffs so the next
+# session can load the Rules/pinned blocks as BINDING (see the main
+# README's "Trusted rules" section). Default: ~/.claude/handoff_secret —
+# auto-generated 0600 on first signed write; never commit it anywhere.
+export HANDOFF_SECRET_FILE=~/.claude/handoff_secret
+
+# Set to 1 to turn the trusted-rules tier off entirely: handoffs aren't
+# signed, and everything (rules included) loads with the classic
+# untrusted-DATA framing. Default: enabled (signing happens when openssl
+# is on PATH; without openssl the behavior is identical to disabling).
+export HANDOFF_TRUST_DISABLE=1
+
+# Transcript growth (KB) between re-injections of the verified rules
+# block by the UserPromptSubmit hook (rules decay as context grows and
+# can be lost to compaction). Default: 200. 0 disables re-injection;
+# SessionStart still loads the rules at session start either way.
+export HANDOFF_FENCES_REINJECT_KB=200
 ```
 
 ### Substrate pattern

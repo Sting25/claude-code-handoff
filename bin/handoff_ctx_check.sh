@@ -61,6 +61,10 @@
 #                               flagging again so we don't nag every turn).
 #                               Only relevant once re-flags are allowed —
 #                               see HANDOFF_CTX_MAX_FLAGS.
+#   HANDOFF_FENCES_REINJECT_KB  transcript growth (KB) between re-injections
+#                               of the handoff's provenance-verified rules
+#                               block (default: 200; 0 disables). See the
+#                               "Rules re-injection" section below.
 #   HANDOFF_CTX_MAX_FLAGS       hard cap on how many times a single session
 #                               flags, regardless of growth. Defaults: 1 in
 #                               "suggest" mode (one gentle nudge per session,
@@ -172,6 +176,67 @@ fi
 
 current_bytes="$(cat "$size_file" 2>/dev/null || echo 0)"
 [[ "$current_bytes" =~ ^[0-9]+$ ]] || exit 0
+
+# --- Rules re-injection against decay (issue #42) ----------------------------
+# SessionStart loads the handoff's BIND-marked rules with binding framing (see
+# handoff_session_start.sh), but that injection ages: as the transcript grows
+# it drifts out of attention, and compaction can summarize it away entirely.
+# Periodically re-emit JUST the small rules block, gated the same way
+# (provenance must verify — untracked + valid HMAC) and cooldown-limited via
+# the flag-file pattern the ctx nudge below already uses.
+#
+#   HANDOFF_FENCES_REINJECT_KB   transcript growth (KB) between re-injections
+#                                (default: 200). 0 disables re-injection.
+#
+# The flag file (.fences_<session_id>) holds the transcript byte size at the
+# last (re-)injection. On the first pass of a session it is seeded WITHOUT
+# emitting — SessionStart just delivered the rules — so re-injection only
+# starts after real growth. This block must never break the ctx nudge below:
+# every failure path just skips it.
+FENCES_KB="${HANDOFF_FENCES_REINJECT_KB:-200}"
+[[ "$FENCES_KB" =~ ^[0-9]+$ ]] || FENCES_KB=200
+handoff_doc="$repo_root/.claude/handoff_current.md"
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if (( FENCES_KB > 0 )) && [[ -f "$handoff_doc" ]] \
+   && [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+  if handoff_provenance_ok "$handoff_doc" "$repo_root" ".claude/handoff_current.md" \
+     && handoff_bind_has_content "$handoff_doc"; then
+    fences_flag="$backup_dir/.fences_${session_id}"
+    emit_fences=0
+    if [[ -f "$fences_flag" ]]; then
+      last_fences="$(cat "$fences_flag" 2>/dev/null || echo 0)"
+      [[ "$last_fences" =~ ^[0-9]+$ ]] || last_fences=0
+      if (( current_bytes >= last_fences + FENCES_KB * 1024 )); then
+        emit_fences=1
+      fi
+    fi
+    # Seed (first sight) or advance (just emitted) the flag file. mktemp+mv
+    # keeps the write atomic; refuse a planted symlink at the flag path,
+    # matching the nudge flag guard below.
+    if [[ ! -f "$fences_flag" || "$emit_fences" == "1" ]] && [[ ! -L "$fences_flag" ]]; then
+      if fences_tmp="$(mktemp "$backup_dir/.fences.XXXXXX" 2>/dev/null)"; then
+        # Guard the write+rename so a full disk / unwritable dir can't abort the
+        # hook under set -e (the ctx nudge below must still run). Clean up the
+        # temp on any failure so we don't leak .fences.XXXXXX orphans.
+        { printf '%s\n' "$current_bytes" > "$fences_tmp" \
+            && mv -f "$fences_tmp" "$fences_flag"; } 2>/dev/null \
+          || rm -f "$fences_tmp" 2>/dev/null || true
+      fi
+    fi
+    if (( emit_fences )); then
+      echo "<system-reminder>"
+      echo "Re-injecting the standing rules from the session handoff (provenance"
+      echo "verified: written locally by write_handoff.sh, untracked in git, valid"
+      echo "HMAC). Earlier copies may have drifted out of attention or been"
+      echo "compacted away. These bind until the user lifts them:"
+      echo
+      handoff_bind_content "$handoff_doc" | handoff_defang
+      echo "</system-reminder>"
+    fi
+  fi
+fi
 
 # --- Window: explicit env wins; otherwise auto-detect.
 #

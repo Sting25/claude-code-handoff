@@ -418,6 +418,7 @@ while IFS= read -r old; do
   rm -f  -- "$backup_dir/.ctx_model_${id}"
   rm -f  -- "$backup_dir/.ctx_flagged_${id}"
   rm -f  -- "$backup_dir/.ctx_sl_${id}"        # statusline cache sidecar
+  rm -f  -- "$backup_dir/.fences_${id}"        # rules re-injection cooldown state (issue #42)
 done < <(ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | tail -n +4)
 
 exit 0

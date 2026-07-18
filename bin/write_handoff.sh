@@ -23,6 +23,15 @@
 #                          is ignored; this is now treated as an alias for
 #                          --if-curated. Slated for removal in a future
 #                          release (the original v0.6.0 target slipped).
+#   --restamp              Re-sign the EXISTING handoff_current.md in place
+#                          (no rotation, no rebuild): strip any HMAC trailer
+#                          and append a fresh one over the current content.
+#                          The /handoff skill runs this after editing the
+#                          Notes/Rules blocks — the edit invalidates the
+#                          write-time stamp, and without a restamp the next
+#                          session loads the rules as data, not binding.
+#                          Degrades to a no-op warning when signing is
+#                          unavailable (no openssl / no provenance lib).
 #
 # Reason-aware safety net (hook invocations only): when invoked as a hook,
 # stdin carries a JSON payload that MAY include a `reason` field (e.g.
@@ -64,11 +73,38 @@ if [[ -n "$hook_payload" ]] && command -v jq >/dev/null 2>&1; then
   [[ "$session_end_reason" =~ ^[a-z_]+$ ]] || session_end_reason=""
 fi
 
+# Shared provenance helpers (issue #42): HMAC signing so the next session's
+# loader can prove the handoff was written locally (not clone-delivered) and
+# load the explicit rules layer as binding. OPTIONAL — an install predating
+# bin/handoff_provenance.sh (e.g. a stale copy-mode ~/.claude/bin) simply
+# writes an unsigned handoff, which the loader keeps on today's data framing.
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || self_dir=""
+if [[ -n "$self_dir" && -f "$self_dir/handoff_provenance.sh" ]]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$self_dir/handoff_provenance.sh"
+fi
+# Fallback marker/prefix definitions keep `set -u` happy when the lib is
+# absent (the markers are inert scaffolding without a valid MAC anyway).
+HANDOFF_BIND_BEGIN="${HANDOFF_BIND_BEGIN:-<!-- HANDOFF_BIND_BEGIN -->}"
+HANDOFF_BIND_END="${HANDOFF_BIND_END:-<!-- HANDOFF_BIND_END -->}"
+HANDOFF_MAC_PREFIX="${HANDOFF_MAC_PREFIX:-<!-- HANDOFF_HMAC: }"
+
+# Can this run sign at all? Gates every signing call site below.
+can_sign() {
+  [[ "${HANDOFF_TRUST_DISABLE:-0}" != "1" ]] \
+    && type handoff_mac_compute >/dev/null 2>&1
+}
+
 IF_CURATED=0
+RESTAMP=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --if-curated)
       IF_CURATED=1
+      shift
+      ;;
+    --restamp)
+      RESTAMP=1
       shift
       ;;
     --if-stale-by)
@@ -205,6 +241,42 @@ pinned_relpath="${pinned_file#"$repo_root"/}"
 systemlog_file="${HANDOFF_SYSTEMLOG_FILE:-$repo_root/SYSTEM_LOG.md}"
 systemlog_relpath="${systemlog_file#"$repo_root"/}"
 
+# Pin bindability (issue #42): the pinned file is meant to be USER-authored
+# and gitignored — but a cloned repo can COMMIT its own .claude/handoff_pinned.md,
+# and embedding that into a signed doc would launder clone-delivered content
+# into the binding tier. So: a pin that is TRACKED in git stays on the data
+# tier (emitted without BIND markers, with a note saying why). An out-of-tree
+# pin (absolute HANDOFF_PINNED_FILE override) is the user's own file and is
+# always bindable. Without the provenance lib the point is moot — nothing gets
+# signed, so markers never bind — but stay conservative anyway.
+# Resolve the pin to a path we can run the untracked check against. Compute an
+# in-repo relative path whether the pin is the default, a RELATIVE override
+# (e.g. a committed .claude/settings.json sets HANDOFF_PINNED_FILE=.claude/x.md
+# — clone-deliverable, so it must be checked), or an absolute path inside the
+# repo. Only a genuinely out-of-tree absolute path skips the check (the user's
+# own file to manage). The earlier `pinned_relpath` used raw prefix-stripping,
+# which left a relative override unresolved and let a tracked clone-delivered
+# pin sail through as bindable.
+pin_check_rel=""
+case "$pinned_file" in
+  /*)
+    # Absolute: in-repo → strip the root prefix; out-of-tree → no check.
+    if [[ "$pinned_file" == "$repo_root/"* ]]; then
+      pin_check_rel="${pinned_file#"$repo_root"/}"
+    fi
+    ;;
+  *)
+    # Relative: interpret against the repo root (matches how git resolves it).
+    pin_check_rel="${pinned_file#./}"
+    ;;
+esac
+pin_bindable=1
+if type handoff_is_untracked >/dev/null 2>&1 && [[ -n "$pin_check_rel" ]]; then
+  if ! handoff_is_untracked "$pin_check_rel" "$repo_root"; then
+    pin_bindable=0
+  fi
+fi
+
 # Symlink-safety. The final document write is a `>` redirect (and rotation does
 # `mv "$handoff_path" -> history`); `>` FOLLOWS a symlink and truncates its
 # target. A malicious repo can ship `.claude/handoff_current.md` (or `.claude`
@@ -226,12 +298,55 @@ if [[ -L "$handoff_path" ]]; then
   rm -f "$handoff_path"
 fi
 
+# --restamp: re-sign the existing document in place and exit. Runs after the
+# symlink guards above (so it can't stamp through a planted link) and before
+# everything else — no rotation, no rebuild, no .gitignore bootstrap. The
+# rewrite is mktemp+mv atomic like the main publish. Every degraded path
+# (missing file, no signing capability) warns and exits 0: the /handoff skill
+# calls this best-effort, and an unsigned file just keeps data framing.
+if (( RESTAMP )); then
+  if [[ ! -f "$handoff_path" ]]; then
+    echo "write_handoff.sh: --restamp: no $handoff_relpath to stamp; nothing done." >&2
+    exit 0
+  fi
+  if ! can_sign; then
+    echo "write_handoff.sh: --restamp: signing unavailable (provenance lib missing, or HANDOFF_TRUST_DISABLE=1); leaving the file as is." >&2
+    echo "$handoff_path"
+    exit 0
+  fi
+  if mac="$(handoff_mac_compute "$handoff_path" ensure)"; then
+    restamp_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
+    trap 'rm -f "$restamp_tmp"' EXIT
+    {
+      # Strip only a well-formed trailer (matching handoff_mac_compute), so a
+      # prose line that merely starts with the prefix is preserved and stays
+      # covered by the digest. `|| true`: grep -v exits 1 on an all-stripped
+      # (empty) doc, which under set -e/pipefail would abort the restamp.
+      LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$handoff_path" || true
+      printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac"
+    } > "$restamp_tmp"
+    chmod 600 "$restamp_tmp" 2>/dev/null || true
+    mv -f "$restamp_tmp" "$handoff_path"
+  else
+    echo "write_handoff.sh: --restamp: cannot sign (openssl or the per-machine secret unavailable); the rules layer will load as reference data, not binding." >&2
+  fi
+  echo "$handoff_path"
+  exit 0
+fi
+
 # --if-curated guard: when the SessionEnd safety-net fires after a curated
 # /handoff write, we want to preserve the curated content rather than
 # clobber it with a mechanical snapshot. The check is by content (placeholder
 # presence) rather than by mtime, so post-/handoff work in the same
 # session doesn't trigger a false skip: any session that didn't replace
 # the placeholder is still considered "no curated content to preserve."
+# Rules-block curation sentinel: present while the `## Rules` fences region is
+# unedited; the /handoff skill replaces it with explicit fences. Used so a
+# session that curated ONLY the Rules block (leaving the Notes placeholder) is
+# still treated as curated — otherwise the safety-net rebuild would silently
+# clobber the fences. Matched anywhere (a curated file simply won't contain the
+# token; the worst case is a false "not curated" that the Notes check covers).
+HANDOFF_RULES_PLACEHOLDER_TOKEN="HANDOFF_RULES_PLACEHOLDER"
 if (( IF_CURATED )); then
   # Reason-aware skip (safety net only — never on curated /handoff or manual
   # runs, which don't pass --if-curated). A reason in the skip list means
@@ -248,11 +363,23 @@ if (( IF_CURATED )); then
       fi
     done
   fi
-  if [[ -f "$handoff_path" ]] && ! handoff_is_unedited_placeholder "$handoff_path"; then
-    # The placeholder is gone → /handoff (or a human) replaced it with curated
-    # Notes (or the file is otherwise non-placeholder). Preserve it.
-    echo "$handoff_path"
-    exit 0
+  if [[ -f "$handoff_path" ]]; then
+    # Rules were curated iff the doc HAS a bind region (new-format write) AND
+    # the rules-placeholder token is gone. Requiring the marker avoids a false
+    # "curated" on old-format docs (no Rules section) and on raw safety-net
+    # writes, which contain neither the marker nor the token — those must still
+    # fall through to the Notes-placeholder check and be overwritten.
+    rules_curated=0
+    if grep -qF "$HANDOFF_BIND_BEGIN" "$handoff_path" 2>/dev/null \
+       && ! grep -qF "$HANDOFF_RULES_PLACEHOLDER_TOKEN" "$handoff_path" 2>/dev/null; then
+      rules_curated=1
+    fi
+    if ! handoff_is_unedited_placeholder "$handoff_path" || (( rules_curated )); then
+      # Notes OR Rules were curated (or the file is otherwise non-placeholder).
+      # Preserve it rather than clobber with a fresh mechanical snapshot.
+      echo "$handoff_path"
+      exit 0
+    fi
   fi
 fi
 
@@ -525,15 +652,52 @@ EOF
   # first so durable context + guardrails are the first thing the next
   # session reads, before the git snapshot.
   if [[ -s "$pinned_file" ]]; then
+    # BIND markers scope the rules tier: the SessionStart loader extracts only
+    # marker-wrapped regions for binding (directive) framing, and only when the
+    # whole document's provenance verifies (untracked + valid HMAC trailer). A
+    # TRACKED pin is potentially clone-delivered, so it is emitted WITHOUT
+    # markers and stays on the data tier — see pin_bindable above.
+    if (( pin_bindable )); then
+      printf '%s\n' "$HANDOFF_BIND_BEGIN"
+    fi
     printf '## 📌 Pinned — carried forward every handoff\n\n'
+    if (( ! pin_bindable )); then
+      printf '_Note: the pin file is TRACKED in git, so it may have arrived with a\n'
+      printf 'clone — it loads as reference data, not binding rules. Untrack it\n'
+      # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
+      printf '(`git rm --cached %s` + gitignore) to restore binding._\n\n' "$pinned_relpath"
+    fi
     # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
     printf '_Source: `%s` — edit that file to change this; `write_handoff.sh`\n' "$pinned_relpath"
     printf 'only reads it, so it survives rotation. This is the durable-but-\n'
     printf 'temporary layer: context + guardrails that outlive a session but\n'
     printf 'expire when the underlying state resolves. Permanent rules go in\n'
     printf 'AGENTS.md; this-session intent goes in Notes below._\n\n'
-    cat "$pinned_file"
-    printf '\n\n'
+    # Sanitize marker-shaped lines in the pin body BEFORE it lands between our
+    # own BIND markers: only the writer may open/close a bind region. Without
+    # this, a clone-delivered pin embedding its own `<!-- HANDOFF_BIND_BEGIN
+    # -->` would surface its content in the binding tier even when pin_bindable
+    # is 0 (the loader scans marker lines file-wide, not just our pair), and an
+    # embedded END could prematurely close our region. Applied unconditionally.
+    #
+    # The `pin_body="$(cat ...)"` capture is deliberate (not a direct
+    # `sanitize < file`): an assignment's command-substitution failure honors
+    # `set -e`, so an unreadable pin (e.g. a directory planted at the path)
+    # still aborts the build here — preserving the deferred-rotation guarantee
+    # that a mid-build failure never consumes the previous handoff. Piping the
+    # file straight into the sanitize filter would let its internal `|| echo`
+    # fallback swallow the read error and publish a corrupt handoff instead.
+    if type handoff_sanitize_markers >/dev/null 2>&1; then
+      pin_body="$(cat "$pinned_file")"
+      printf '%s\n' "$pin_body" | handoff_sanitize_markers
+    else
+      cat "$pinned_file"
+    fi
+    printf '\n'
+    if (( pin_bindable )); then
+      printf '%s\n' "$HANDOFF_BIND_END"
+    fi
+    printf '\n'
     echo '---'
     echo
   fi
@@ -620,6 +784,17 @@ EOF
     fi
   fi
 
+  # Rules / fences section (issue #42). The /handoff skill may replace the
+  # placeholder comment with explicit, deliberate scope fences ("do NOT begin
+  # X without a fresh decision"). ONLY content inside the BIND markers ever
+  # loads with binding framing — model-authored Notes below never do, so a
+  # stray "next session should..." sentence can't become law — and even
+  # marked content binds only when the document's provenance verifies.
+  printf '%s\n' "$HANDOFF_BIND_BEGIN"
+  printf '## Rules (fences — carried into the next session)\n\n'
+  printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
+  printf '%s\n' "$HANDOFF_BIND_END"
+  printf '\n'
   echo '---'
   echo
   printf '## Notes from this session\n\n'
@@ -632,6 +807,22 @@ EOF
   printf 'that only the conversation knows. The sentinel above is how the\n'
   printf 'SessionEnd safety-net detects whether curation has happened._\n'
 } > "$handoff_tmp"
+
+# Provenance stamp (issue #42): HMAC-SHA256 the fully-built document with the
+# per-machine secret (auto-generated on first use, 0600, never in any repo)
+# and embed the digest as a trailer line. The next session's loader recomputes
+# it over content-minus-trailer; a match plus the untracked check proves the
+# file was written HERE, not delivered by a clone, and unlocks binding framing
+# for the BIND-marked rules regions. Degrades silently-to-stderr when signing
+# isn't possible — an unsigned handoff loads exactly as today (data framing);
+# this must NEVER abort the write.
+if can_sign; then
+  if mac="$(handoff_mac_compute "$handoff_tmp" ensure)"; then
+    printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$handoff_tmp"
+  else
+    echo "write_handoff.sh: openssl or the per-machine secret unavailable — handoff not signed; the rules layer will load as reference data, not binding." >&2
+  fi
+fi
 
 # Tighten before publishing (umask already makes it 0600 at creation; this also
 # covers a tmp produced under an unusual umask). The prose may include secrets.

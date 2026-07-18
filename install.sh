@@ -328,6 +328,7 @@ install_symlinks() {
   link "$repo_root/bin/handoff_recover_tail.sh"   "$claude_home/bin/handoff_recover_tail.sh"
   link "$repo_root/bin/handoff_statusline.sh"     "$claude_home/bin/handoff_statusline.sh"
   link "$repo_root/bin/handoff_compact_reset.sh"  "$claude_home/bin/handoff_compact_reset.sh"
+  link "$repo_root/bin/handoff_provenance.sh"     "$claude_home/bin/handoff_provenance.sh"
   link "$repo_root/skills/handoff/SKILL.md"          "$claude_home/skills/handoff/SKILL.md"
   link "$repo_root/skills/handoff/README.md"         "$claude_home/skills/handoff/README.md"
   link "$repo_root/skills/handoff-more/SKILL.md"     "$claude_home/skills/handoff-more/SKILL.md"
@@ -337,6 +338,8 @@ install_symlinks() {
   # bit (e.g. NTFS). It must never abort the install — under set -e a chmod on
   # source files the running user doesn't own (e.g. a forge user installing
   # from chris-owned files) would otherwise fail and skip patch_settings.
+  # (handoff_provenance.sh is deliberately NOT in this list: it is a sourced
+  # library, never executed, so it needs no exec bit.)
   chmod +x "$repo_root/bin/write_handoff.sh" \
            "$repo_root/bin/handoff_turn_append.sh" \
            "$repo_root/bin/handoff_ctx_check.sh" \
@@ -354,10 +357,58 @@ uninstall_symlinks() {
   unlink_if_ours "$claude_home/bin/handoff_recover_tail.sh"   "$repo_root/bin/handoff_recover_tail.sh"
   unlink_if_ours "$claude_home/bin/handoff_statusline.sh"     "$repo_root/bin/handoff_statusline.sh"
   unlink_if_ours "$claude_home/bin/handoff_compact_reset.sh"  "$repo_root/bin/handoff_compact_reset.sh"
+  unlink_if_ours "$claude_home/bin/handoff_provenance.sh"     "$repo_root/bin/handoff_provenance.sh"
   unlink_if_ours "$claude_home/skills/handoff/SKILL.md"          "$repo_root/skills/handoff/SKILL.md"
   unlink_if_ours "$claude_home/skills/handoff/README.md"         "$repo_root/skills/handoff/README.md"
   unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$repo_root/skills/handoff-more/SKILL.md"
   unlink_if_ours "$claude_home/skills/handoff-recover/SKILL.md"  "$repo_root/skills/handoff-recover/SKILL.md"
+}
+
+# Remove the per-machine HMAC secret that write_handoff.sh generates on first
+# signed write (issue #42), so --uninstall is a true inverse and no key
+# material is left behind by a tool the user believes they removed.
+#
+# Deliberately conservative — this is the ONE path where uninstall deletes a
+# file the installer never created itself, so it must prove the file is ours
+# before touching it. Any doubt => leave it and say so:
+#   - only the DEFAULT path under $claude_home. A HANDOFF_SECRET_FILE override
+#     may point at a shared/managed location that is not ours to delete.
+#   - never a symlink (don't follow it, don't remove it — the target could be
+#     anything the user cares about).
+#   - only a regular file whose entire content is the exact 64-hex digest we
+#     generate. Anything else is someone else's file that happens to sit at
+#     that name, and it survives untouched.
+# The content is shape-checked, never printed (it is secret material).
+remove_secret_if_ours() {
+  local secret="$claude_home/handoff_secret" body
+  if [[ -n "${HANDOFF_SECRET_FILE:-}" ]]; then
+    echo "  skip    handoff secret (HANDOFF_SECRET_FILE override set; leaving '$HANDOFF_SECRET_FILE' alone)"
+    return 0
+  fi
+  if [[ -L "$secret" ]]; then
+    echo "  skip    $secret (symlink — not ours to remove; leaving it and its target alone)"
+    return 0
+  fi
+  if [[ ! -e "$secret" ]]; then
+    echo "  ok      $secret (already absent)"
+    return 0
+  fi
+  if [[ ! -f "$secret" ]]; then
+    echo "  skip    $secret (not a regular file; leaving alone)"
+    return 0
+  fi
+  # Shape check only — 64 lowercase hex, optional trailing newline. Read with
+  # tr -d to tolerate the newline our two generators differ on.
+  body="$(tr -d '[:space:]' < "$secret" 2>/dev/null || true)"
+  if [[ ! "$body" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "  skip    $secret (not the shape this tool generates; leaving alone)"
+    return 0
+  fi
+  rm -f "$secret"
+  echo "  remove  $secret (per-machine HMAC secret)"
+  echo "          Any existing signed handoffs now load as reference data"
+  echo "          instead of binding rules — nothing breaks; re-installing"
+  echo "          and running /handoff re-signs them with a fresh secret."
 }
 
 # ------------------------------------------------------------------ settings.json
@@ -699,7 +750,16 @@ doctor() {
     echo "  BROKEN  jq not found on PATH (Stop hook, ctx nudge, and /handoff-recover tail rescue are silently disabled)"
     broken=$((broken + 1))
   fi
-  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_statusline handoff_compact_reset; do
+  # openssl is an OPTIONAL runtime dependency (HMAC-signing the handoff so its
+  # rules layer can load as binding — issue #42). Its absence is a designed
+  # degradation, not breakage: everything still works, the rules just load as
+  # reference data. Advisory note only; never counts toward broken.
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "  note    openssl not found on PATH (optional): handoffs won't be"
+    echo "          HMAC-signed, so the rules/pinned layer loads as reference"
+    echo "          data instead of binding rules. Install openssl to enable."
+  fi
+  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_statusline handoff_compact_reset handoff_provenance; do
     dst="$claude_home/bin/$name.sh"
     if [[ -e "$dst" ]]; then
       if [[ -L "$dst" ]]; then
@@ -784,6 +844,9 @@ else
   echo
   echo "settings.json:"
   unpatch_settings
+  echo
+  echo "local state:"
+  remove_secret_if_ours
   echo
   echo "done. the repo at $repo_root is untouched."
 fi
