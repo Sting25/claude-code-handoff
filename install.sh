@@ -171,15 +171,38 @@ COPIED_ANY=0
 # hooks then no-op silently (issue #21). Heuristics: under /tmp, /var/tmp,
 # /dev/shm, or $TMPDIR; or any path component that looks like an mktemp dir
 # (tmp.XXXX). A persistent clone like /mnt/ddrive/handoff matches none of these.
+#
+# Both the LOGICAL path and its physical (`pwd -P`) form are matched: on macOS
+# /tmp and /var are symlinks to /private/tmp and /private/var, so an installer
+# invoked via the canonical path (`bash /private/tmp/handoff/install.sh`, or
+# any caller that ran the path through realpath) used to sail past the literal
+# patterns and get symlink mode — reintroducing the dangling-link failure this
+# guard exists to prevent. The /private/* and /var/folders/* spellings (macOS
+# per-user temp, i.e. $TMPDIR's real location) are also matched explicitly so
+# detection works even when TMPDIR is unset (launchd/cron/CI contexts), and
+# TMPDIR itself is compared in both its logical and physical forms.
 is_volatile_path() {
-  local p="$1"
-  case "$p" in
-    /tmp|/tmp/*|/var/tmp|/var/tmp/*|/dev/shm/*) return 0 ;;
-    */tmp.*) return 0 ;;
-  esac
+  local p="$1" phys cand
+  phys="$(cd "$p" 2>/dev/null && pwd -P)" || phys=""
+  for cand in "$p" "$phys"; do
+    [[ -n "$cand" ]] || continue
+    case "$cand" in
+      /tmp|/tmp/*|/var/tmp|/var/tmp/*|/dev/shm/*) return 0 ;;
+      /private/tmp|/private/tmp/*|/private/var/tmp|/private/var/tmp/*) return 0 ;;
+      /var/folders/*|/private/var/folders/*) return 0 ;;
+      */tmp.*) return 0 ;;
+    esac
+  done
   if [[ -n "${TMPDIR:-}" ]]; then
-    local t="${TMPDIR%/}"
-    [[ -n "$t" && ( "$p" == "$t" || "$p" == "$t"/* ) ]] && return 0
+    local t="${TMPDIR%/}" tphys
+    tphys="$(cd "$t" 2>/dev/null && pwd -P)" || tphys=""
+    for cand in "$t" "$tphys"; do
+      [[ -n "$cand" ]] || continue
+      if [[ "$p" == "$cand" || "$p" == "$cand"/* \
+            || ( -n "$phys" && ( "$phys" == "$cand" || "$phys" == "$cand"/* ) ) ]]; then
+        return 0
+      fi
+    done
   fi
   return 1
 }

@@ -80,4 +80,39 @@ check "doctor dangling: nonzero exit"   nonzero "$([[ "$rc2" -ne 0 ]] && echo no
 check "doctor dangling: reports BROKEN" yes "$(has "$out" "BROKEN")"
 rm -rf "$src" "$home"
 
+# --- F. is_volatile_path covers macOS /private + /var/folders forms ----------
+# (audit 2026-07-17) The /private/... spellings are macOS-only paths that can't
+# be created on other hosts, so probe the matcher directly: extract the
+# function from install.sh (nonexistent dirs make the physical-path lookup a
+# no-op, exercising the literal patterns).
+eval "$(sed -n '/^is_volatile_path()/,/^}/p' "$REPO_ROOT/install.sh")"
+probe() {  # <path> [TMPDIR value|__UNSET__] -> volatile|persistent
+  local p="$1" td="${2:-__UNSET__}"
+  if [[ "$td" == "__UNSET__" ]]; then
+    ( unset TMPDIR; is_volatile_path "$p" ) && echo volatile || echo persistent
+  else
+    ( TMPDIR="$td" is_volatile_path "$p" ) && echo volatile || echo persistent
+  fi
+}
+check "canonical /private/tmp is volatile"          volatile   "$(probe /private/tmp/handoff)"
+check "canonical /private/var/tmp is volatile"      volatile   "$(probe /private/var/tmp/handoff)"
+check "/private/var/folders (TMPDIR unset) volatile" volatile  "$(probe /private/var/folders/zz/xy/T/handoff)"
+check "/var/folders (TMPDIR unset) is volatile"     volatile   "$(probe /var/folders/zz/xy/T/handoff)"
+check "control: plain home-ish path stays persistent" persistent "$(probe /opt/checkouts/handoff)"
+
+# --- G. symlink-aliased volatile source is caught via pwd -P -----------------
+# A source reached through a clean-looking symlink whose target lives in /tmp:
+# the literal path matches nothing, only canonicalization catches it. Without
+# the fix this installed dangling-prone symlinks (issue #21 regression class).
+real="$(mktemp -d /tmp/handoff_iv_real.XXXXXX)"
+alias_dir="$(mktemp -d "$HOME/.handoff_test_alias.XXXXXX")"
+cp "$REPO_ROOT/install.sh" "$real/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$real/"
+ln -s "$real" "$alias_dir/src"
+home="$(mktemp -d)"
+out="$(CLAUDE_HOME="$home" bash "$alias_dir/src/install.sh" 2>&1)"; rc=$?
+check "aliased volatile src: exit 0"           0   "$rc"
+check "aliased volatile src: detected (warns)" yes "$(has "$out" "volatile path")"
+check "aliased volatile src: installed a copy" yes "$(is_copy "$home/bin/$SS")"
+rm -rf "$real" "$alias_dir" "$home"
+
 finish
