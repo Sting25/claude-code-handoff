@@ -66,7 +66,12 @@ Three paths, doing different jobs:
   `--if-curated`, so if you already ran `/handoff` this session (it
   replaced the placeholder block with curated Notes), the safety-net
   write is a no-op — your curated content
-  stays put rather than being rotated into history.
+  stays put rather than being rotated into history. A `/resume`
+  session-switch (which fires `SessionEnd` with reason `resume`) is
+  treated as a pause, not an ending, and skips the safety-net write;
+  tune via `HANDOFF_SESSIONEND_SKIP_REASONS` (set it empty to always
+  write). The same safety net also fires on **compaction** — see
+  [Compaction safety net](#compaction-safety-net).
 
 The next session in the same repo auto-loads the latest snapshot via
 the `SessionStart` hook. No `/compact` to remember, no kickoff prompt
@@ -95,6 +100,59 @@ A third hook (`Stop`) does two jobs each assistant turn:
    `<system-reminder>` telling the assistant to flag this passively as
    a natural `/handoff` moment. That's how the assistant knows to
    mention it without you having to glance at the meter.
+   When the [status line](#status-line) is wired, the hook prefers
+   Claude Code's **own** window and usage numbers (cached from the
+   statusLine payload) over the model-regex auto-detection — the env
+   pin `HANDOFF_CTX_WINDOW_TOKENS` still overrides everything, and
+   `HANDOFF_CTX_NO_STATUSLINE=1` restores the regex-only chain.
+
+### Status line
+
+`bin/handoff_statusline.sh` is an optional statusLine command that
+renders one plain line at the bottom of Claude Code:
+
+```
+Fable | ctx 34% (340k/1000k) | handoff: curated
+```
+
+The `handoff:` segment reads `none` (no snapshot yet), `auto` (the
+safety net wrote a placeholder — run `/handoff` to curate), or
+`curated`. Beyond the display, the script sideband-caches Claude
+Code's authoritative `context_window_size` / `used_percentage` /
+`current_usage` numbers into
+`.claude/handoff_backups/.ctx_sl_<session_id>`, which the
+`UserPromptSubmit` nudge then prefers over model-id guessing.
+
+The installer wires `statusLine` **only when you don't already have
+one** — an existing statusLine setting is never overwritten; the
+installer prints the manual step instead. To keep your own status
+line AND feed the cache, call
+`bash ~/.claude/bin/handoff_statusline.sh` from your existing
+statusline command (its stdout is the line; pipe or discard as you
+prefer). Without `jq` the script prints a static
+`handoff (ctx n/a - jq missing)` line and caches nothing. On Claude
+Code versions that don't send `context_window` in the statusLine
+payload, the line degrades to model + handoff state.
+
+### Compaction safety net
+
+Compaction (auto or manual `/compact`) destroys conversational
+context just like a session ending — and `SessionEnd` hooks don't
+fire on it. Two hooks cover it:
+
+- **`PreCompact`** runs the same `write_handoff.sh --if-curated`
+  safety net as `SessionEnd`, so an uncurated session gets a
+  mechanical checkpoint before the conversation is compacted away.
+  If you already ran `/handoff`, it's a no-op. (Un-curated
+  placeholder snapshots are deleted — not archived — on rotation, so
+  repeated compactions can't churn curated snapshots out of the
+  keep-N history.)
+- **`PostCompact`** (Claude Code ≥ 2.1.76; older versions simply
+  never fire it) runs `bin/handoff_compact_reset.sh`, which clears
+  the session's context-measurement sidecars. The freed window is
+  treated as session-start fresh: no nudge can fire off stale
+  pre-compact numbers, and the once-per-session nudge cap re-arms so
+  the assistant can flag `/handoff` again when the window refills.
 
 ### Where the handoff files live
 
@@ -237,9 +295,12 @@ cd ~/code/claude-code-handoff
 That:
 
 1. Symlinks the bin scripts and skills into `~/.claude/`.
-2. Patches `~/.claude/settings.json` to add four hooks
-   (`SessionStart`, `SessionEnd`, `Stop`, `UserPromptSubmit`) and
-   four permission entries.
+2. Patches `~/.claude/settings.json` to add six hooks
+   (`SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`,
+   `Stop`, `UserPromptSubmit`), six permission entries, and — **only
+   if you don't already have one** — the `statusLine` command. An
+   existing statusLine is never overwritten; the installer prints
+   the manual wiring step instead (see [Status line](#status-line)).
 
 Settings.json is backed up before any change and the patch is
 idempotent — existing hooks and permissions are detected by marker
@@ -313,11 +374,13 @@ settings.json (backup first). The repo itself is untouched.
 ```
 .
 ├── bin/
-│   ├── write_handoff.sh           # snapshot script (used by skill + SessionEnd hook); also rotates history
+│   ├── write_handoff.sh           # snapshot script (skill + SessionEnd/PreCompact hooks); also rotates history
 │   ├── handoff_session_start.sh   # SessionStart hook: cats current + previous-as-fallback + history pointer
 │   ├── handoff_turn_append.sh     # Stop hook: per-turn dump + records transcript size
 │   ├── handoff_ctx_check.sh       # UserPromptSubmit hook: flags /handoff past threshold
-│   └── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
+│   ├── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
+│   ├── handoff_statusline.sh      # statusLine command: status line + caches CC's own ctx numbers
+│   └── handoff_compact_reset.sh   # PostCompact hook: resets ctx sidecars for the freed window
 ├── skills/
 │   ├── handoff/
 │   │   ├── SKILL.md               # /handoff slash command spec

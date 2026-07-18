@@ -12,10 +12,71 @@ are appended).
 
 ## [Unreleased]
 
-**No settings.json changes** — hook commands and permissions are unchanged, and
-there are no new installed scripts. Symlinked installs pick the fix up with a
-`git pull`; copy-mode installs re-run `./install.sh`. One new env var is
-recognized (`HANDOFF_CTX_1M_MODEL_REGEX`).
+**settings.json changes — re-run `./install.sh` after `git pull`.** This
+release adds two new hook events (`PreCompact`, `PostCompact`), a
+`statusLine` command (wired **only if you don't already have one** — an
+existing statusLine is never overwritten; the installer prints the manual
+step instead), two new permission entries, and two **new installed scripts**
+(`bin/handoff_statusline.sh`, `bin/handoff_compact_reset.sh`) that a `git
+pull` alone won't symlink. The existing four hook commands are byte-for-byte
+unchanged. Everything degrades gracefully on Claude Code versions that lack
+the new events/payload fields (see each entry). New env vars:
+`HANDOFF_CTX_NO_STATUSLINE`, `HANDOFF_SESSIONEND_SKIP_REASONS`, plus
+`HANDOFF_CTX_1M_MODEL_REGEX` from the earlier fix below.
+
+### Added
+- **Status line (`bin/handoff_statusline.sh`).** Renders
+  `model | ctx N% (usedk/windowk) | handoff: curated/auto/none` and caches
+  Claude Code's OWN `context_window_size` / `used_percentage` /
+  `current_usage` into `.claude/handoff_backups/.ctx_sl_<session_id>`
+  (single key=value file, atomic mv). `total_input_tokens` /
+  `total_output_tokens` are deliberately never read — their semantics
+  flipped at CC 2.1.132 (cumulative → current) and would be
+  confidently-wrong on older builds. No jq → static minimal line, no cache;
+  no `context_window` in the payload (pre-2.1.6 CC) → model-only line.
+- **ctx-check prefers CC's own numbers.** When the statusline cache is
+  present and fresh, `handoff_ctx_check.sh` adopts its window (skipping the
+  model-regex / lastModelUsage guesswork that mis-sized 1M-native models)
+  and its token count. `HANDOFF_CTX_WINDOW_TOKENS` still beats everything
+  (contract unchanged, existing suite passes unmodified); a statusline
+  window is never ratcheted; a stale cache (statusline unwired mid-session,
+  mtime older than the Stop hook's tokens file) falls back to the previous
+  chain; `HANDOFF_CTX_NO_STATUSLINE=1` ignores the cache entirely.
+- **Compaction safety net (`PreCompact` + `PostCompact`).** PreCompact runs
+  the same `write_handoff.sh --if-curated` command as SessionEnd (no
+  matcher — fires on auto AND manual compaction; matcher semantics on older
+  CC are unverified and firing on both is correct anyway). PostCompact runs
+  new `bin/handoff_compact_reset.sh`, clearing the session's
+  `.ctx_*` measurement/flag sidecars (keeping `.ctx_model_`) so the freed
+  window is treated as session-start fresh: no stale-number nudge, and the
+  once-per-session nudge cap re-arms. PostCompact only exists on CC ≥
+  2.1.76; on older builds the entry never fires and behavior is unchanged.
+- **Reason-aware SessionEnd safety net.** `write_handoff.sh --if-curated`
+  now parses an optional `reason` from the hook payload and skips the write
+  for reasons in `HANDOFF_SESSIONEND_SKIP_REASONS` (default `resume` — a
+  `/resume` session-switch is a pause, not an ending, and each fire rotated
+  placeholder churn through history). Absent/renamed field or missing jq →
+  parse yields empty → today's always-write behavior (the guess can only
+  add the skip, never subtract the safety net). Curated `/handoff` and
+  manual runs never consult the list.
+
+### Changed
+- **Un-curated placeholder snapshots are deleted, not archived, on
+  rotation.** They carry no curated prose, and with PreCompact the safety
+  net can fire several times per session — archiving each one would evict
+  curated snapshots from the keep-N history. Curated docs archive exactly
+  as before.
+
+### Deferred
+- **Stop-payload `last_assistant_message` fallback in `handoff_turn_append.sh`
+  (D2).** Evaluated and deliberately not implemented: the payload holds only
+  the final assistant text (no user text, tool calls/results, usage, or
+  model), so the transcript scan stays mandatory regardless; and a
+  payload-derived block for the missing-transcript case creates a
+  cursor-duplication hazard (the cursor never advanced, so a reappearing
+  transcript would re-capture the same text) that costs more machinery than
+  the rarely-rescued content is worth. Recorded as a `DEFERRED(D2)` comment
+  at the missing-transcript guard.
 
 ### Fixed
 - **Context reminders no longer over-report 5x on 1M-native models (Claude 5
