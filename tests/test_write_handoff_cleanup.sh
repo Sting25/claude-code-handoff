@@ -67,6 +67,38 @@ chmod 600 "$repo/.gitignore"
 check "perms#1: pre-existing .gitignore mode untouched" 600 "$(file_mode "$repo/.gitignore")"
 rm -rf "$repo"
 
+echo "write_handoff.sh — mid-build abort must not consume handoff_current.md (audit 2026-07-17)"
+# Rotation used to run BEFORE the new doc was built, so an abort during the
+# build (ENOSPC, a git failure) moved the old handoff into history and
+# published nothing — the next SessionStart silently loaded no context. Force
+# a mid-build failure by pointing HANDOFF_PINNED_FILE at a DIRECTORY: it
+# passes the `-s` gate, then `cat` on it fails inside the doc-build group and
+# set -e aborts the script exactly in the old danger window.
+repo="$(mk_repo)"; must mkdir -p "$repo/.claude" "$repo/pinned_is_a_dir"
+must cat > "$repo/.claude/handoff_current.md" <<'EOF'
+# old handoff
+## Notes from this session
+PRIOR_SESSION_PROSE_MARKER
+EOF
+( cd "$repo" && HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 \
+    HANDOFF_PINNED_FILE="$repo/pinned_is_a_dir" bash "$WH" >/dev/null 2>&1 ); rc=$?
+check "mid-build abort: nonzero exit"              nonzero "$([[ $rc -ne 0 ]] && echo nonzero || echo zero)"
+check "mid-build abort: handoff_current.md intact" yes \
+  "$(grep -q 'PRIOR_SESSION_PROSE_MARKER' "$repo/.claude/handoff_current.md" 2>/dev/null && echo yes || echo no)"
+check "mid-build abort: nothing rotated to history" 0 \
+  "$(ls -1 "$repo/.claude/handoff_history"/handoff_*.md 2>/dev/null | wc -l | tr -d ' ')"
+check "mid-build abort: no stray tmp left behind"   0 \
+  "$(ls -1 "$repo/.claude"/.handoff_current.* 2>/dev/null | wc -l | tr -d ' ')"
+# Control: the same repo without the poisoned pin succeeds — the old doc is
+# rotated into history and a fresh one published.
+( cd "$repo" && HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 bash "$WH" >/dev/null 2>&1 ); rc=$?
+check "control: write succeeds after abort"        0 "$rc"
+check "control: old handoff rotated into history"  yes \
+  "$(grep -q 'PRIOR_SESSION_PROSE_MARKER' "$repo/.claude/handoff_history"/handoff_*.md 2>/dev/null && echo yes || echo no)"
+check "control: new handoff published"             yes \
+  "$(grep -q 'auto-generated' "$repo/.claude/handoff_current.md" 2>/dev/null && echo yes || echo no)"
+rm -rf "$repo"
+
 echo "handoff_turn_append.sh — bootstrapped .gitignore perms (perms#1)"
 if command -v jq >/dev/null 2>&1; then
   repo="$(mk_repo)"; tx="$repo/tx.jsonl"

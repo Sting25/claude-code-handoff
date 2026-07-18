@@ -323,8 +323,11 @@ if [[ -f "$handoff_path" ]]; then
     | sed -E 's/.*`([0-9a-fA-F]+)`.*/\1/' | grep -Ei '^[0-9a-f]+$' || true)"
 fi
 
-rotate_existing_handoff
-prune_history || true   # a prune failure must never abort the handoff write
+# NB: rotation is deferred until the replacement document is fully built (see
+# just above the publish mv at the bottom). Rotating here — before the build —
+# meant any abort in between (ENOSPC, a git failure under pipefail) consumed
+# the previous handoff_current.md and published nothing: the next SessionStart
+# then loaded no context at all, silently.
 
 # Optional substrate detection — sibling repo at $HANDOFF_SUBSTRATE_NAME
 substrate_root=""
@@ -561,6 +564,13 @@ EOF
 # Tighten before publishing (umask already makes it 0600 at creation; this also
 # covers a tmp produced under an unusual umask). The prose may include secrets.
 chmod 600 "$handoff_tmp" 2>/dev/null || true
+
+# Rotate the previous handoff only NOW that its replacement is fully built.
+# Any failure during the doc build above leaves handoff_current.md untouched
+# (the EXIT trap just removes the tmp); the destructive window is reduced to
+# the two renames here and below.
+rotate_existing_handoff
+prune_history || true   # a prune failure must never abort the handoff write
 
 # Atomic, symlink-safe publish: mv replaces the destination NAME, so it can't be
 # made to write through a symlink that reappears after the guard above (TOCTOU),
