@@ -144,11 +144,18 @@ else
     # (SIGKILL, OOM, power loss) skips traps and leaves the dir behind —
     # which would freeze appends for this session forever. If the existing
     # lock dir is older than the staleness window, the holder is gone:
-    # reclaim it and retry once. A live Stop hook finishes in well under a
-    # second, so the default 60s window won't steal a lock from a slow-but-
-    # alive run. Age via GNU `stat -c` with a BSD `stat -f` fallback (this
-    # branch only runs where flock is absent — typically macOS/BSD).
-    stale_secs="${HANDOFF_LOCK_STALE_SECS:-60}"
+    # reclaim it and retry once. A live Stop hook normally finishes in well
+    # under a second, but a FIRST fire over a long backlog (session resume
+    # with a new id, cursor evicted by the prune) forks several jq per
+    # transcript line and can run for minutes — so the holder re-touches the
+    # lock dir periodically during the append loop (see below), keeping a
+    # live lock's mtime fresh, and the default window is 300s: comfortably
+    # above both the touch interval and Claude Code's 60s hook timeout, so a
+    # slow-but-alive run can't have its lock stolen (which interleaved dump
+    # content and clobbered the cursor). Age via GNU `stat -c` with a BSD
+    # `stat -f` fallback (this branch only runs where flock is absent —
+    # typically macOS/BSD).
+    stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
     lock_mtime="$(stat -c %Y "$lock_mkdir" 2>/dev/null \
                   || stat -f %m "$lock_mkdir" 2>/dev/null || echo 0)"
     now="$(date +%s)"
@@ -232,8 +239,22 @@ chmod 600 "$dump_file" 2>/dev/null || true
   printf '\n## Turn at %s\n\n' "$(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
   # Process only the new JSONL lines (prev_count+1 .. curr_count)
+  lines_since_touch=0
   sed -n "$((prev_count + 1)),${curr_count}p" "$transcript_path" \
   | while IFS= read -r line; do
+      # Keep the mkdir-lock fresh during a long backlog append: the stale
+      # reclaim above is purely mtime-based, so without this a live holder
+      # running past the staleness window would get its lock stolen by a
+      # concurrent Stop fire. Every 200 lines (~a couple of seconds of jq
+      # forks) is far inside the 300s default window. flock holders don't
+      # need it — the OS releases their lock on process exit.
+      if [[ -n "${lock_mkdir:-}" ]]; then
+        lines_since_touch=$((lines_since_touch + 1))
+        if (( lines_since_touch >= 200 )); then
+          touch "$lock_mkdir" 2>/dev/null || true
+          lines_since_touch=0
+        fi
+      fi
       [[ -z "$line" ]] && continue
 
       entry_type="$(jq -r '.type // empty' <<<"$line" 2>/dev/null || true)"

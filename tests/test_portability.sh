@@ -99,7 +99,23 @@ tx3="$repo3/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "
     | PATH="$noflock" HANDOFF_LOCK_STALE_SECS=1 bash "$TA" >/dev/null 2>&1 )
 check "stale lock reclaimed -> appends" yes "$([[ -f "$bd3/handoff_raw_STALE.md" ]] && echo yes || echo no)"
 check "stale lock released after run"   no  "$([[ -d "$bd3/.handoff_raw_STALE.lock.d" ]] && echo yes || echo no)"
-rm -rf "$repo" "$repo2" "$repo3" "$noflock"
+
+# DEFAULT staleness window (audit 2026-07-17): the old 60s default exactly
+# equaled Claude Code's hook timeout, so a live first-fire backlog (which can
+# legitimately run for minutes) could have its lock stolen by a concurrent
+# fire. The default is now 300s and the holder re-touches the lock dir during
+# long appends. A lock dir 120s old — stale under the OLD default, fresh under
+# the new one — must NOT be reclaimed.
+repo4="$(mk_repo)"; bd4="$repo4/.claude/handoff_backups"; mkdir -p "$bd4"
+mkdir "$bd4/.handoff_raw_MIDAGE.lock.d"
+perl -e 'utime time-120, time-120, $ARGV[0]' "$bd4/.handoff_raw_MIDAGE.lock.d"
+tx4="$repo4/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx4"
+run_turn "$repo4" MIDAGE "$tx4" "$noflock"
+check "120s-old lock NOT reclaimed (default now 300s)" no \
+  "$([[ -f "$bd4/handoff_raw_MIDAGE.md" ]] && echo yes || echo no)"
+check "120s-old lock left in place for its holder" yes \
+  "$([[ -d "$bd4/.handoff_raw_MIDAGE.lock.d" ]] && echo yes || echo no)"
+rm -rf "$repo" "$repo2" "$repo3" "$repo4" "$noflock"
 
 # ---------------------------------------------------------------------------
 echo "write_handoff.sh — rotation timestamp from file mtime (GNU + BSD)"
