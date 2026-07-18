@@ -39,13 +39,22 @@ history_dir="$repo/.claude/handoff_history"
 
 # Untrusted-content safety. handoff_current.md and the history snapshots are cat
 # verbatim into the next session's MODEL CONTEXT, and in a cloned/downloaded repo
-# they are attacker-influenceable. Neutralize embedded text that could pose as a
-# live control signal to the model: rewrite Claude Code control tags
-# (<system-reminder>, <command-*>, <local-command-stdout>) — which never
-# legitimately appear in a handoff doc (the Stop hook even strips them from raw
-# dumps) — to inert guillemets, and prepend a caveat framing the block as
-# reference DATA, not instructions. `sed -E` is portable (GNU + BSD); no perl/jq,
-# so SessionStart stays dependency-light and never fails to load context.
+# they are attacker-influenceable (a malicious repo can COMMIT its own
+# .claude/handoff_current.md — the .gitignore entry only shields this project's
+# devs). Neutralize embedded text that could pose as a live control signal to
+# the model: rewrite Claude Code control tags (<system-reminder>, <command-*>,
+# <local-command-stdout>) AND tool-conversation structures (<tool_result>,
+# <tool_use>, <function_calls>, <function_results>, <invoke>, <parameter>,
+# with or without an antml: namespace prefix and with or without attributes) —
+# none of which legitimately appear in a handoff doc (the Stop hook even
+# strips the noise tags from raw dumps) — to inert guillemets, and prepend a
+# caveat framing the block as reference DATA, not instructions. A fabricated
+# tool-result block reads as trustworthy structured data rather than prose, so
+# it is a stronger injection than plain text and must not survive the load.
+# This is an allowlist that should track Claude Code's authoritative-tag set;
+# extend it when new control tags ship. `sed -E` is portable (GNU + BSD); no
+# perl/jq, so SessionStart stays dependency-light and never fails to load
+# context.
 #
 # LC_ALL=C: BSD sed under a UTF-8 locale exits 1 ("RE error: illegal byte
 # sequence") on any line with a byte invalid in the locale — e.g. a Latin-1
@@ -54,7 +63,7 @@ history_dir="$repo/.claude/handoff_history"
 # is pure ASCII, so byte-oriented C-locale matching is equivalent. Belt and
 # braces: if sed still fails, surface it instead of dying silently.
 defang_untrusted() {  # <file> -> defanged content on stdout
-  LC_ALL=C sed -E 's#<(/?(system-reminder|command-name|command-message|command-args|local-command-stdout))>#«\1»#g' "$1" \
+  LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' "$1" \
     || echo "⚠️  handoff: defang filter failed — handoff content above may be truncated"
 }
 emit_untrusted() {  # <file> -> caveat + defanged content
