@@ -642,6 +642,7 @@ unpatch_settings() {
     echo "  - $perm_write"
     echo "  - $perm_stop"
     echo "  - $perm_ctx"
+    echo "  - $perm_ss"
     echo "  - $perm_sl"
     echo "  - $perm_reset"
     return
