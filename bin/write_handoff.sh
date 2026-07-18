@@ -87,7 +87,9 @@ HANDOFF_PLACEHOLDER_SENTINEL="<!-- HANDOFF_PLACEHOLDER: keep until /handoff repl
 handoff_is_unedited_placeholder() {
   local path="$1"
   [[ -f "$path" ]] || return 1
-  awk -v sentinel="$HANDOFF_PLACEHOLDER_SENTINEL" '
+  # LC_ALL=C: BSD awk under a UTF-8 locale can choke on invalid byte sequences
+  # in the file; the sentinel comparison is byte-exact ASCII, so C is equivalent.
+  LC_ALL=C awk -v sentinel="$HANDOFF_PLACEHOLDER_SENTINEL" '
     # Skip everything until the Notes header (the snapshot lives above it).
     !seen { if ($0 == "## Notes from this session") seen = 1; next }
     /^[[:space:]]*$/ { next }                     # skip blank lines after header
@@ -357,7 +359,12 @@ snapshot_repo() {
     return
   fi
 
-  upstream="$(git -C "$root" status -sb 2>/dev/null | head -1 | sed 's/^## //')"
+  # `head -1` closes the pipe after one line; on a big dirty tree (thousands of
+  # untracked paths, ~64KB+ of status output) git then dies of SIGPIPE, and
+  # under pipefail that aborted the whole write — after the old handoff had
+  # already been rotated away, leaving no handoff_current.md at all. The branch
+  # line is emitted before head exits, so `|| true` loses nothing.
+  upstream="$(git -C "$root" status -sb 2>/dev/null | head -1 | sed 's/^## //' || true)"
   printf '**HEAD:** `%s` — %s\n\n' "$(git_short "$root")" "$(git_subj "$root")"
   printf '**Branch:** `%s` (%s)\n\n' "$(git_branch "$root")" "$upstream"
 
@@ -371,7 +378,9 @@ snapshot_repo() {
     printf '_clean_\n\n'
   else
     printf '```\n'
-    git -C "$root" status -s
+    # Unguarded, this bare statement would abort the write under set -e if git
+    # failed here — in the same rotated-but-not-yet-published window as above.
+    git -C "$root" status -s 2>/dev/null || true
     printf '```\n\n'
   fi
 }
