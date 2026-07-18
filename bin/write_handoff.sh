@@ -503,13 +503,25 @@ prune_history() {
   # abort with a parse error — and under set -e that abort would take the whole
   # handoff write down with it. read -r preserves the line verbatim and `--`
   # stops a leading dash from being read as an rm option.
+  #
+  # ONLY DELETE FILES WE GENERATED. The `-name 'handoff_*.md'` glob is far
+  # broader than what rotate_existing_handoff writes, so a file the USER put
+  # here — hand-preserving a snapshot as e.g. `handoff_2026-01-05_IMPORTANT.md`
+  # is a natural thing to do — used to match, sort into the tail, and get
+  # deleted with no warning and no backup. Filter to the exact shape we emit:
+  # `handoff_<YYYY-MM-DD>_<HHMMSS>.md`, plus the `_<N>` same-second collision
+  # suffix. Anything else is someone else's file and is left untouched. (#46)
   local f
   find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
+    | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
     | sort -r \
     | tail -n +$((HISTORY_KEEP + 1)) \
     | while IFS= read -r f; do
         [[ -n "$f" ]] && rm -f -- "$f"
       done
+  # `grep` exiting 1 (nothing ours to consider) must not fail the pipeline under
+  # pipefail — the caller already guards with `|| true`, but be explicit.
+  return 0
 }
 # Capture the HEAD recorded in the previous handoff BEFORE rotation moves
 # it away. The rotation boundary is a usable proxy for "since last session,"

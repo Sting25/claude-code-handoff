@@ -404,7 +404,33 @@ fi
 # list with a while loop over a process substitution instead. The process-sub
 # exit status isn't checked, so a failing glob won't trip `set -e` (same safety
 # the mapfile form had).
-# shellcheck disable=SC2012  # ls -t is deliberate: prune needs mtime ordering and BSD find has no -printf; dump filenames are tool-generated session ids (no whitespace/newlines)
+#
+# ONLY DELETE FILES WE GENERATED. The `handoff_raw_*.md` glob is broader than
+# what this hook writes, and the filename alone cannot prove ownership: a user's
+# hand-dropped `handoff_raw_my_own_archive.md` has an "id" that satisfies the
+# same [A-Za-z0-9_-]+ charset real session ids do. Previously such a file
+# matched, fell outside the 3 newest by mtime, and was deleted with no warning.
+#
+# The reliable ownership proof is the COMPANION CURSOR: every dump this hook
+# writes gets `.handoff_raw_<id>.cursor` written next to it (tmp+mv, just after
+# the append). A file the user placed here has no cursor, so it is never a
+# prune candidate. Filtering happens BEFORE the keep-3 cut, so foreign files
+# don't consume retention slots and push our real dumps out early.
+#
+# Safe-direction trade-off: a dump of ours whose cursor was manually removed is
+# no longer pruned (it lingers) rather than risking someone else's file. (#46)
+list_our_dumps() {
+  local f base id
+  # shellcheck disable=SC2012  # ls -t is deliberate: prune needs mtime ordering and BSD find has no -printf
+  ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    base="$(basename "$f" .md)"       # handoff_raw_<id>
+    id="${base#handoff_raw_}"
+    [[ "$id" =~ ^[A-Za-z0-9_-]+$ ]] || continue
+    [[ -f "$backup_dir/.handoff_raw_${id}.cursor" ]] || continue
+    printf '%s\n' "$f"
+  done
+}
 while IFS= read -r old; do
   [[ -z "$old" ]] && continue
   rm -f  -- "$old"
@@ -419,6 +445,6 @@ while IFS= read -r old; do
   rm -f  -- "$backup_dir/.ctx_flagged_${id}"
   rm -f  -- "$backup_dir/.ctx_sl_${id}"        # statusline cache sidecar
   rm -f  -- "$backup_dir/.fences_${id}"        # rules re-injection cooldown state (issue #42)
-done < <(ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | tail -n +4)
+done < <(list_our_dumps | tail -n +4)
 
 exit 0

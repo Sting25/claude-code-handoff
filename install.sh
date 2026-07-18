@@ -252,6 +252,33 @@ case "$link_mode" in
     ;;
 esac
 
+# Append a durable record of a symlink we replaced that pointed somewhere the
+# user chose, so their original wiring can always be recovered. (#45)
+#
+# Append-only by contract: if the log already exists we ADD a line and never
+# rewrite or truncate it — the file may hold records from earlier installs the
+# user still needs, and it is not ours to prune. A fresh file is created 0600
+# (it records paths from the user's home). Best-effort throughout: a failure to
+# write the log must never abort an install, so every step is guarded and the
+# old target is still echoed to stdout as before.
+record_replaced_link() {  # <dst> <old_target>
+  local dst="$1" old="$2" log="$claude_home/handoff-install.log" existed=1
+  [[ -e "$log" ]] || existed=0
+  # Never write through a symlinked log (it could point at a file of theirs).
+  if [[ -L "$log" ]]; then
+    echo "          (note: $log is a symlink; not recording the old target there)"
+    return 0
+  fi
+  if printf '%s\treplaced symlink %s\n\t\twas -> %s\n' \
+       "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$dst" "$old" >> "$log" 2>/dev/null; then
+    (( existed )) || chmod 600 "$log" 2>/dev/null || true
+    echo "          recorded old target in $log"
+  else
+    echo "          (note: could not write $log; old target above is the only record)"
+  fi
+  return 0
+}
+
 link() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
@@ -265,6 +292,16 @@ link() {
     # In copy mode, an existing symlink (even one pointing at src) must be
     # replaced by a real copy, so don't early-return above.
     echo "  relink  $dst (was -> $current)"
+    # A symlink pointing SOMEWHERE ELSE is the user's own wiring (a customized
+    # fork, a second clone, a dotfiles manager). A regular file in that position
+    # gets a .bak.<ts>; a symlink used to be removed with the old target
+    # recorded only on stdout — gone the moment that scrolled past, or
+    # immediately if the installer ran with output redirected. Append a durable
+    # note first so the wiring is always recoverable. Same-target relinks (the
+    # ordinary copy-mode case) record nothing. (#45)
+    if [[ "$current" != "$src" ]]; then
+      record_replaced_link "$dst" "$current"
+    fi
     rm "$dst"
   elif [[ -e "$dst" ]]; then
     # A regular file identical to src is our own copy-mode install from a

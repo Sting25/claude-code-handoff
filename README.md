@@ -193,6 +193,14 @@ The retention dir is bootstrapped into the repo's `.gitignore` on
 first write — handoffs are intentionally per-developer, not
 checked-in artifacts.
 
+**Retention only ever deletes files this tool generated.** If you drop
+your own file into `handoff_history/` or `handoff_backups/` — say you
+hand-preserve a snapshot you care about — it is left alone regardless of
+what you name it, and it doesn't consume a retention slot. History prunes
+only the exact shape it writes (`handoff_<YYYY-MM-DD>_<HHMMSS>.md`), and
+a raw dump is only ever pruned when its companion cursor file (written
+beside every dump the tool creates) is present.
+
 ### Pinned context (carried forward every handoff)
 
 Some context outlives a single session but isn't a permanent rule —
@@ -387,6 +395,13 @@ symlinks.
 ./install.sh --link      # force symlinks even from a volatile path
 ./install.sh --doctor     # report any dangling/missing installed hooks (exit ≠0 if broken)
 ```
+
+If a path the installer manages already holds a symlink of **yours**
+pointing somewhere else (a customized fork, a second clone, a dotfiles
+manager), it is replaced — your file is never touched, and the old target
+is appended to `~/.claude/handoff-install.log` so the wiring stays
+recoverable. That log is append-only: an existing one is added to, never
+rewritten, and `--uninstall` leaves it in place.
 
 `HANDOFF_FORCE_SYMLINK=1` is the env-var escape hatch for the volatile
 auto-copy. If a previous install left dangling links (e.g. you installed
