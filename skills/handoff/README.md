@@ -357,8 +357,11 @@ hook command in `settings.json` to drop the `echo` lines.
 - **The handoff is per-repo.** If you `cd` between repos in one
   session, the handoff captures only the repo where you invoke. For
   cross-repo handoffs, run `/handoff` once in each.
-- **The script assumes `git` is on PATH and the cwd is a git
-  worktree.** It errors otherwise.
+- **Git is optional (since 0.8.4).** Outside a git worktree (or with
+  no `git` on PATH) the script anchors on `CLAUDE_PROJECT_DIR` (falling
+  back to the cwd) and omits the git-only sections — the commit/branch
+  snapshot, the `.gitignore` bootstrap, and the git-based verify block.
+  Everything else (rotation, history, notes, the hooks) works the same.
 
 ## License
 
