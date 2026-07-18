@@ -126,10 +126,16 @@ rm -rf "$repo"
 # Three pre-existing sessions with .ctx_sl_ sidecars + one new fire = 4 dumps;
 # prune keeps the 3 newest, so OLD1 (oldest) is evicted WITH its sl sidecar.
 # OLD3 survives the prune, so its sidecar must too (negative control).
+#
+# Each fixture dump also gets the companion `.handoff_raw_<id>.cursor` that the
+# hook writes beside every dump it creates: since #46 that cursor is the proof
+# a dump is OURS to prune, so a cursor-less fixture would model a file the user
+# dropped in (correctly preserved) rather than a real session. See
+# tests/test_prune_ownership.sh for the negative control on that path.
 repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; mkdir -p "$bd"; tx="$repo/tx.jsonl"
 printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
 for i in 1 2 3; do
-  must eval "echo d > '$bd/handoff_raw_OLD$i.md'; echo s > '$bd/.ctx_sl_OLD$i'"
+  must eval "echo d > '$bd/handoff_raw_OLD$i.md'; echo s > '$bd/.ctx_sl_OLD$i'; echo 0 > '$bd/.handoff_raw_OLD$i.cursor'"
   must touch -t "20200101000$i" "$bd/handoff_raw_OLD$i.md"
 done
 run_turn "$repo" NEWSL "$tx"

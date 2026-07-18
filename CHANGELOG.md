@@ -55,6 +55,39 @@ installs re-run `./install.sh` as usual. New env vars: `HANDOFF_SECRET_FILE`,
   reference-data framing after removal (nothing breaks; `/handoff` re-signs
   on the next install).
 
+## [Unreleased]
+
+**No settings.json changes and no new installed scripts** — a `git pull` is
+enough (copy-mode installs re-run `./install.sh` as usual).
+
+### Fixed
+- **Pruning could delete files the user put in `.claude/handoff_history/` or
+  `.claude/handoff_backups/` (#46).** Both retention loops selected with a
+  loose glob (`handoff_*.md`, `handoff_raw_*.md`) and deleted everything past
+  the keep-N cutoff, so a hand-preserved snapshot — naming an archived handoff
+  `handoff_2026-01-05_IMPORTANT.md` is a natural thing to do — was silently
+  removed once it fell outside the window, with no warning and no backup.
+  Retention now only ever considers files this tool generated: history matches
+  the exact emitted shape `handoff_<YYYY-MM-DD>_<HHMMSS>[_<N>].md`, and dumps
+  must carry the companion `.handoff_raw_<id>.cursor` this hook writes beside
+  every dump it creates (the filename alone can't prove ownership — a user's
+  `handoff_raw_my_own_archive.md` satisfies the same id charset a real session
+  does). Filtering happens *before* the keep-N cut, so foreign files no longer
+  consume retention slots. Safe-direction trade-off: one of our dumps whose
+  cursor was manually deleted now lingers instead of being removed.
+- **Replacing a pre-existing symlink left no durable record of its old target
+  (#45).** A regular file in an install path gets a `.bak.<ts>`; a symlink
+  pointing at the user's own wiring (a customized fork, a second clone, a
+  dotfiles manager) was removed with the old target echoed to stdout only —
+  lost the moment it scrolled past, or immediately when the installer ran with
+  output redirected. `install.sh` now appends a timestamped record to
+  `~/.claude/handoff-install.log` before replacing it. The log is append-only
+  by contract: an existing file is added to, never rewritten or truncated, and
+  a symlinked log is never written through. Same-target relinks (the ordinary
+  re-install) record nothing, and `--uninstall` leaves the log alone. The
+  user's own file was never destroyed in either case — this restores
+  recoverability of the *wiring*.
+
 ## [0.9.0] — 2026-07-18
 
 **settings.json changes — re-run `./install.sh` after `git pull`.** This

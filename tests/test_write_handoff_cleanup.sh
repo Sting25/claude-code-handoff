@@ -44,7 +44,18 @@ EOF
 check "crafted history name: write still succeeds (rc 0)" 0 "$rc"
 check "crafted history name: handoff doc written"         yes \
   "$([[ -f "$repo/.claude/handoff_current.md" ]] && grep -q 'auto-generated' "$repo/.claude/handoff_current.md" && echo yes || echo no)"
-check "crafted history name: oldest weird file pruned"    no  "$([[ -e "$weird" ]] && echo yes || echo no)"
+# This file's point is that a crafted name (space + quote) must not abort the
+# write — asserted by the rc/doc checks above, and still true.
+#
+# Since #46 the crafted file is also PRESERVED rather than pruned: prune only
+# considers the exact shape this tool emits, and `handoff_<ts> weird'name.md`
+# is not it. A file we did not generate is not ours to delete — the previous
+# expectation here (that it be pruned) was the same loose-glob behavior that
+# silently deleted users' own hand-preserved snapshots.
+check "crafted history name: preserved (not ours)"        yes "$([[ -e "$weird" ]] && echo yes || echo no)"
+# Retention still applies to the files we DID generate.
+check "crafted history name: our files pruned to KEEP=5"  5 \
+  "$(find "$hist" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | LC_ALL=C grep -cE "/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$" | tr -d ' ')"
 rm -rf "$repo"
 
 echo "write_handoff.sh — gitignore before write + .gitignore perms (tests#3 / perms#1)"
