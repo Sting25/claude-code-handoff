@@ -86,9 +86,9 @@ check "mid-build abort: nonzero exit"              nonzero "$([[ $rc -ne 0 ]] &&
 check "mid-build abort: handoff_current.md intact" yes \
   "$(grep -q 'PRIOR_SESSION_PROSE_MARKER' "$repo/.claude/handoff_current.md" 2>/dev/null && echo yes || echo no)"
 check "mid-build abort: nothing rotated to history" 0 \
-  "$(ls -1 "$repo/.claude/handoff_history"/handoff_*.md 2>/dev/null | wc -l | tr -d ' ')"
+  "$(find "$repo/.claude/handoff_history" -maxdepth 1 -name 'handoff_*.md' 2>/dev/null | wc -l | tr -d ' ')"
 check "mid-build abort: no stray tmp left behind"   0 \
-  "$(ls -1 "$repo/.claude"/.handoff_current.* 2>/dev/null | wc -l | tr -d ' ')"
+  "$(find "$repo/.claude" -maxdepth 1 -name '.handoff_current.*' 2>/dev/null | wc -l | tr -d ' ')"
 # Control: the same repo without the poisoned pin succeeds — the old doc is
 # rotated into history and a fresh one published.
 ( cd "$repo" && HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 bash "$WH" >/dev/null 2>&1 ); rc=$?
