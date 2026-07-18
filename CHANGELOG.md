@@ -36,6 +36,51 @@ recognized (`HANDOFF_CTX_1M_MODEL_REGEX`).
   even when detection got it wrong (never on the bytes/4 estimate, which
   overshoots). `HANDOFF_CTX_WINDOW_TOKENS` still overrides everything.
 
+Adversarially-verified audit (2026-07-17) — the high + medium findings landed
+as individual fixes:
+
+- **BSD portability (high):** `LC_ALL=C` on the SessionStart defang so an
+  invalid UTF-8 byte (e.g. a Latin-1 commit subject in the snapshot) no longer
+  makes BSD sed abort mid-emit and silently truncate the loaded context on
+  macOS; and the big-dirty-tree SIGPIPE in `snapshot_repo` (thousands of dirty
+  paths killed the whole write under pipefail) is guarded.
+- **A mid-write failure can no longer consume the previous handoff.**
+  `write_handoff.sh` now builds the replacement document fully before rotating
+  `handoff_current.md` into history; an abort in between used to leave NO
+  current handoff and the next session silently loaded nothing.
+- **Malformed `HANDOFF_CTX_THRESHOLD_PCT` / `HANDOFF_CTX_COOLDOWN_KB` no
+  longer silently disable the context nudge** — non-numeric or negative values
+  fall back to the defaults (40 / 100) instead of aborting the hook.
+- **Missing jq is now loud.** It is a runtime dependency of the Stop hook, the
+  ctx nudge, and the recover-tail rescue: `install.sh` refuses to install
+  without it, `--doctor` and the SessionStart self-check flag it, and
+  `handoff_recover_tail.sh` errors instead of emitting a plausible-but-empty
+  "recovered tail".
+- **An unwritable `.gitignore` no longer kills the hooks.** Both gitignore
+  bootstraps warn and continue (like the existing symlink skip) instead of
+  aborting the Stop hook / SessionEnd write on every fire.
+- **mkdir-lock hardening (macOS/no-flock):** the holder re-touches the lock
+  dir during long backlog appends and the stale-reclaim default rose from 60s
+  to 300s (`HANDOFF_LOCK_STALE_SECS`), so a live slow fire can't have its lock
+  stolen (which interleaved dump content and clobbered the cursor).
+- **Volatile-source detection canonicalizes paths.** `install.sh` now matches
+  the physical (`pwd -P`) form plus the macOS `/private/tmp`,
+  `/private/var/tmp`, and `/var/folders/*` spellings — so a canonical-path or
+  TMPDIR-unset install from a temp checkout auto-copies instead of leaving
+  issue-#21-style dangling symlinks.
+- **SessionStart defang covers tool-conversation spoofing.** Fabricated
+  `tool_result` / `tool_use` / `function_calls` / `function_results` /
+  `invoke` / `parameter` tags (attributed and `antml:`-namespaced forms
+  included) in a committed handoff are neutralized to guillemets like the
+  control tags.
+- **Docs de-drifted:** the nudge threshold default is documented as 40% (was
+  still 50% in three places); `HANDOFF_CTX_MAX_FLAGS` joined the env-var
+  reference and the reminder text no longer promises a re-fire the default
+  one-nudge cap suppresses; the stale "errors outside a git worktree"
+  limitation was replaced with the actual off-git contract;
+  `handoff_recover_tail.sh` was added to both repo maps and the manual-install
+  steps (five scripts, not four).
+
 ## [0.8.5] — 2026-06-14
 
 Docs-only release. Leads the README with a plain-language "In plain terms, it:"
