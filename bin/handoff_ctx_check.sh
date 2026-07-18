@@ -74,6 +74,14 @@ set -euo pipefail
 
 THRESHOLD_PCT="${HANDOFF_CTX_THRESHOLD_PCT:-40}"
 COOLDOWN_KB="${HANDOFF_CTX_COOLDOWN_KB:-100}"
+# Validate both numerically, mirroring the MAX_FLAGS guard below. A slightly-
+# wrong override ("40%", "100KB", a negative) previously reached the $((...))
+# arithmetic raw: bash errored, set -e killed the hook before the emit, and the
+# `2>/dev/null || true` hook wiring made the nudge silently disappear for every
+# session. Fall back to the defaults instead (a negative THRESHOLD_PCT would
+# otherwise also pass and make the threshold always-fire).
+[[ "$THRESHOLD_PCT" =~ ^[0-9]+$ ]] || THRESHOLD_PCT=40
+[[ "$COOLDOWN_KB"   =~ ^[0-9]+$ ]] || COOLDOWN_KB=100
 REMINDER_MODE="${HANDOFF_CTX_REMINDER_MODE:-suggest}"
 # Per-session flag cap. Default depends on mode: "suggest" nudges once and then
 # stays quiet (the common complaint is over-nagging on long/idle sessions);

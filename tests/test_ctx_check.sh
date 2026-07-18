@@ -146,6 +146,38 @@ out="$(run_cc "$repo" PCT HANDOFF_CTX_THRESHOLD_PCT=70)"
 check "threshold 70% -> 60% does not fire" "" "$out"
 rm -rf "$repo"
 
+# --- Malformed THRESHOLD_PCT / COOLDOWN_KB fall back to defaults -------------
+# (audit 2026-07-17) A '%'-suffixed threshold previously aborted the hook at
+# the $((...)) arithmetic under set -e — nudge silently disabled every session.
+# With the fallback to the default 40, 600/1000 = 60% must still fire.
+repo="$(mk_repo)"; seed "$repo" BADPCT 4000 600
+out="$(run_cc "$repo" BADPCT HANDOFF_CTX_THRESHOLD_PCT=40%)"
+check "THRESHOLD_PCT='40%' -> falls back to 40, fires" yes "$(has "$out" "<system-reminder>")"
+rm -rf "$repo"
+
+# A negative threshold previously passed straight through and made the gate
+# always-fire. It now falls back to 40: 100/1000 = 10% must NOT fire.
+repo="$(mk_repo)"; seed "$repo" NEGPCT 4000 100
+out="$(run_cc "$repo" NEGPCT HANDOFF_CTX_THRESHOLD_PCT=-40)"
+check "THRESHOLD_PCT=-40 -> falls back to 40, no fire" "" "$out"
+rm -rf "$repo"
+
+# Malformed COOLDOWN_KB ("100KB"): with a prior flag far in the past and the
+# cap lifted, the re-fire must go through the default 100KB cooldown — neither
+# aborting nor emitting a garbled "...100KBKB of growth" reminder.
+repo="$(mk_repo)"; seed "$repo" BADCD 200000 600 0
+out="$(run_cc "$repo" BADCD HANDOFF_CTX_MAX_FLAGS=0 HANDOFF_CTX_COOLDOWN_KB=100KB)"
+check "COOLDOWN_KB='100KB' -> falls back, fires"     yes "$(has "$out" "<system-reminder>")"
+check "COOLDOWN_KB='100KB' -> reminder not garbled"  no  "$(has "$out" "100KBKB")"
+rm -rf "$repo"
+
+# ...and the fallback cooldown still gates: flagged at the current byte size
+# means we are inside the default 100KB window -> suppressed.
+repo="$(mk_repo)"; seed "$repo" BADCD2 200000 600 200000
+out="$(run_cc "$repo" BADCD2 HANDOFF_CTX_MAX_FLAGS=0 HANDOFF_CTX_COOLDOWN_KB=100KB)"
+check "COOLDOWN_KB='100KB' -> default cooldown still gates" "" "$out"
+rm -rf "$repo"
+
 # --- WINDOW_TOKENS=0 must not divide-by-zero --------------------------------
 # A bogus HANDOFF_CTX_WINDOW_TOKENS=0 override would make the threshold/pct
 # arithmetic divide by zero, which aborts the script under `set -e` *before*
