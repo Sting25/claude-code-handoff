@@ -10,7 +10,7 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
-## [Unreleased]
+## [0.9.0] — 2026-07-18
 
 **settings.json changes — re-run `./install.sh` after `git pull`.** This
 release adds two new hook events (`PreCompact`, `PostCompact`), a
