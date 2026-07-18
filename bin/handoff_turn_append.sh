@@ -38,6 +38,17 @@ transcript_path="$(jq -r '.transcript_path // empty' <<<"$payload")"
 
 [[ -z "$session_id"        ]] && exit 0
 [[ -z "$transcript_path"   ]] && exit 0
+# DEFERRED(D2): the Stop payload also carries `last_assistant_message`, which
+# could in principle rescue a turn when the transcript is missing/unreadable
+# (today: silently lost at this guard). Deliberately NOT implemented: (a) it
+# can't replace the transcript read — it holds only the final assistant text,
+# not user text / tool calls / tool results / earlier assistant messages, and
+# the Stop payload carries no usage or model fields, so the transcript scan
+# below stays mandatory regardless; (b) appending a payload-derived block here
+# creates a dual-source duplication hazard — if the transcript reappears next
+# fire, the cursor (which never advanced) re-captures the same assistant text,
+# violating this script's core no-duplication guarantee, and deduping that
+# costs more machinery than the rarely-rescued content is worth.
 [[ ! -f "$transcript_path" ]] && exit 0
 
 # session_id is interpolated into filesystem paths (dump/cursor/lock/ctx files
@@ -406,6 +417,7 @@ while IFS= read -r old; do
   rm -f  -- "$backup_dir/.ctx_tokens_${id}"
   rm -f  -- "$backup_dir/.ctx_model_${id}"
   rm -f  -- "$backup_dir/.ctx_flagged_${id}"
+  rm -f  -- "$backup_dir/.ctx_sl_${id}"        # statusline cache sidecar
 done < <(ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | tail -n +4)
 
 exit 0

@@ -25,6 +25,11 @@ nothing gets lost across the restart boundary.
      SessionStart hook auto-includes the most recent history entry
      if the current handoff has no curated Notes; `/handoff-more` lets
      a future session pull more of the history into context on demand.
+   (Auto-compaction is also checkpointed: a `PreCompact` hook fires
+   the same `--if-curated` safety net, so an uncurated session gets a
+   mechanical snapshot before compaction destroys the conversation.
+   That snapshot is a placeholder — running `/handoff` to curate is
+   still the only path that captures intent.)
 2. **Replace the placeholder block with session-specific intent** — the script's snapshot is git-state-only; the conversation knows things git doesn't (decisions made, in-flight ASKs, open questions, "next session should start with X" notes). The auto-generated file contains a `## Notes from this session` section with a placeholder block bracketed by a `<!-- HANDOFF_PLACEHOLDER: ... -->` sentinel comment. **Replace the entire placeholder block (sentinel + italic prose) with curated Notes using Edit** — do not just append below the placeholder, because the SessionEnd safety-net detects "no curation happened" by the presence of that sentinel. Removing the sentinel is what tells the SessionEnd hook to stand down and preserve your work.
 3. **Confirm the raw-dump backup exists** — the `Stop` hook (`handoff_turn_append.sh`) has been appending turn-by-turn to `.claude/handoff_backups/handoff_raw_<session_id>.md` throughout the session, so by the time `/handoff` runs the backup is already there. Verify it: `ls -la .claude/handoff_backups/`. If the file is missing (hook not installed, or session started before the hook landed), fall back to writing a one-shot dump per the "Raw dump fallback" section below. The hook prunes to 3 newest automatically — you do not need to.
 4. **Print a loud, unmissable banner** — the ASK must be impossible to miss (the user specifically asked for this; do not soften).
@@ -222,11 +227,14 @@ yourself; the user has the meter, the user is the source of truth.
 
 ### Trigger 3: transcript-size system-reminder
 
-The `handoff_ctx_check.sh` `UserPromptSubmit` hook measures the Claude
-Code transcript JSONL each turn and emits a `<system-reminder>` past a
-threshold (default 40% of the auto-detected context window — 200k, or
-1M for 1M-native models; both configurable).
-This is a **real measurement**, not a fabricated %, so it's a
+The `handoff_ctx_check.sh` `UserPromptSubmit` hook measures context
+usage each turn and emits a `<system-reminder>` past a threshold
+(default 40% of the detected window — 200k, or 1M for 1M-native
+models; both configurable). When the handoff statusLine is wired, the
+numbers are Claude Code's own (window size and current usage, cached
+by `handoff_statusline.sh` — the same status line that shows
+`handoff: curated/auto/none` to the user). This is a **real
+measurement**, not a fabricated %, so it's a
 legitimate signal to act on.
 
 When the reminder lands, surface it to the user as a **passive

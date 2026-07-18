@@ -122,6 +122,22 @@ check "traversal session_id -> exit 0"   0  "$rc"
 check "traversal session_id -> no escape" no "$([[ -e "$repo/escape.md" || -e "$repo/.claude/escape.md" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- Prune removes the statusline cache sidecar of an evicted session -------
+# Three pre-existing sessions with .ctx_sl_ sidecars + one new fire = 4 dumps;
+# prune keeps the 3 newest, so OLD1 (oldest) is evicted WITH its sl sidecar.
+# OLD3 survives the prune, so its sidecar must too (negative control).
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; mkdir -p "$bd"; tx="$repo/tx.jsonl"
+printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
+for i in 1 2 3; do
+  must eval "echo d > '$bd/handoff_raw_OLD$i.md'; echo s > '$bd/.ctx_sl_OLD$i'"
+  must touch -t "20200101000$i" "$bd/handoff_raw_OLD$i.md"
+done
+run_turn "$repo" NEWSL "$tx"
+check "prune: oldest dump evicted"        no  "$([[ -f "$bd/handoff_raw_OLD1.md" ]] && echo yes || echo no)"
+check "prune: evicted .ctx_sl_ removed"   no  "$([[ -f "$bd/.ctx_sl_OLD1" ]] && echo yes || echo no)"
+check "prune: surviving .ctx_sl_ kept"    yes "$([[ -f "$bd/.ctx_sl_OLD3" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
 # Positive control: a real UUID-style id (hex + dashes) still produces a dump.
 repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; tx="$repo/tx.jsonl"
 sid="0a1b2c3d-4e5f-6789-abcd-ef0123456789"

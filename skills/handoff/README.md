@@ -39,7 +39,9 @@ manual copy-paste, no kickoff prompt to remember.
 │   ├── handoff_session_start.sh   # SessionStart hook body: cats current handoff + history-pointer
 │   ├── handoff_turn_append.sh     # Stop hook: per-turn raw dump + records transcript size
 │   ├── handoff_ctx_check.sh       # UserPromptSubmit hook: flags /handoff past threshold
-│   └── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
+│   ├── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
+│   ├── handoff_statusline.sh      # statusLine command: renders the line + caches CC's ctx numbers
+│   └── handoff_compact_reset.sh   # PostCompact hook: resets ctx sidecars after compaction
 ├── skills/
 │   ├── handoff/
 │   │   ├── SKILL.md               # invoked by /handoff
@@ -48,7 +50,7 @@ manual copy-paste, no kickoff prompt to remember.
 │   │   └── SKILL.md               # /handoff-more: load older handoffs from history/ into context
 │   └── handoff-recover/
 │       └── SKILL.md               # /handoff-recover: reconstruct a handoff when the prior session didn't run one
-├── settings.json                  # SessionStart + SessionEnd + Stop + UserPromptSubmit hooks
+├── settings.json                  # SessionStart/SessionEnd/PreCompact/PostCompact/Stop/UserPromptSubmit hooks + statusLine
 └── RULES.md                       # self-policing rule (optional)
 ```
 
@@ -56,15 +58,19 @@ manual copy-paste, no kickoff prompt to remember.
 
 Easiest: clone the [claude-code-handoff repo](https://github.com/Sting25/claude-code-handoff)
 and run `./install.sh` — it symlinks all the files into `~/.claude/`
-and patches `~/.claude/settings.json` to add the four hooks plus four
-permissions. Edits in the repo flow live without re-installing.
+and patches `~/.claude/settings.json` to add the six hooks plus six
+permissions, and wires the statusLine **only if you don't already
+have one** (an existing statusLine is never overwritten — the
+installer prints the manual step instead). Edits in the repo flow
+live without re-installing.
 
 Manual install:
 
 1. Drop `bin/write_handoff.sh`, `bin/handoff_turn_append.sh`,
-   `bin/handoff_ctx_check.sh`, `bin/handoff_session_start.sh`, and
-   `bin/handoff_recover_tail.sh` into `~/.claude/bin/` and `chmod +x`
-   all five. (Without `handoff_recover_tail.sh`, `/handoff-recover`
+   `bin/handoff_ctx_check.sh`, `bin/handoff_session_start.sh`,
+   `bin/handoff_recover_tail.sh`, `bin/handoff_statusline.sh`, and
+   `bin/handoff_compact_reset.sh` into `~/.claude/bin/` and `chmod +x`
+   all seven. (Without `handoff_recover_tail.sh`, `/handoff-recover`
    still runs but silently loses the crash-truncated final turn — the
    content the helper exists to rescue.)
 2. Drop `skills/handoff/SKILL.md`, `skills/handoff-more/SKILL.md`, and
@@ -87,6 +93,18 @@ Manual install:
            "command": "bash $HOME/.claude/bin/write_handoff.sh --if-curated >/dev/null 2>&1 || true"
          }]
        }],
+       "PreCompact": [{
+         "hooks": [{
+           "type": "command",
+           "command": "bash $HOME/.claude/bin/write_handoff.sh --if-curated >/dev/null 2>&1 || true"
+         }]
+       }],
+       "PostCompact": [{
+         "hooks": [{
+           "type": "command",
+           "command": "bash $HOME/.claude/bin/handoff_compact_reset.sh 2>/dev/null || true"
+         }]
+       }],
        "Stop": [{
          "hooks": [{
            "type": "command",
@@ -105,11 +123,23 @@ Manual install:
          "Bash(bash /home/<you>/.claude/bin/write_handoff.sh)",
          "Bash(bash /home/<you>/.claude/bin/handoff_turn_append.sh)",
          "Bash(bash /home/<you>/.claude/bin/handoff_ctx_check.sh)",
-         "Bash(bash /home/<you>/.claude/bin/handoff_session_start.sh)"
+         "Bash(bash /home/<you>/.claude/bin/handoff_session_start.sh)",
+         "Bash(bash /home/<you>/.claude/bin/handoff_statusline.sh)",
+         "Bash(bash /home/<you>/.claude/bin/handoff_compact_reset.sh)"
        ]
+     },
+     "statusLine": {
+       "type": "command",
+       "command": "bash $HOME/.claude/bin/handoff_statusline.sh 2>/dev/null"
      }
    }
    ```
+
+   **Only add the `statusLine` key if you don't already have one** —
+   it is a single slot, not a list like hooks, so pasting it replaces
+   any existing status line. To keep yours and still feed the ctx
+   cache, call `handoff_statusline.sh` from your existing statusline
+   command instead.
 
    Adjust the permission paths for your username. Hook roles:
    - **`SessionStart`** runs `handoff_session_start.sh`, which cats
@@ -136,7 +166,23 @@ Manual install:
      probing `~/.claude.json` when no model is recorded), injects a
      `<system-reminder>` telling the assistant to flag a `/handoff`
      moment passively. The signal is the actual token count, not an
-     estimate — same precision as `/context`.
+     estimate — same precision as `/context`. When the statusLine is
+     wired, the window and count come from Claude Code's own numbers
+     (the `.ctx_sl_*` cache) instead of the model-regex detection;
+     `HANDOFF_CTX_WINDOW_TOKENS` still overrides everything.
+   - **`PreCompact`** fires the same safety net as `SessionEnd`
+     before auto or manual compaction — compaction destroys the
+     conversation just like an ending, and `SessionEnd` doesn't
+     cover it.
+   - **`PostCompact`** runs `handoff_compact_reset.sh` to clear the
+     session's ctx sidecars, so the freed window starts fresh and the
+     once-per-session nudge can legitimately re-fire.
+   - **`statusLine`** (not a hook — its own settings key) runs
+     `handoff_statusline.sh`: renders
+     `model | ctx N% (usedk/windowk) | handoff: <state>` where state
+     is `curated`, `auto` (placeholder — worth running `/handoff` or
+     `/handoff-recover`), or `none`, and caches CC's context numbers
+     for the `UserPromptSubmit` hook.
 
 4. (Optional) Add the self-policing rule to `~/.claude/RULES.md` so
    the assistant offers `/handoff` proactively. Three real triggers,
@@ -294,6 +340,21 @@ export HANDOFF_CTX_MAX_FLAGS=1
 # current step and invokes /handoff itself without asking. Pairs well with
 # a lower HANDOFF_CTX_THRESHOLD_PCT (~30) so it has runway.
 export HANDOFF_CTX_REMINDER_MODE=suggest
+
+# Ignore the statusline cache (.ctx_sl_*) and restore the pre-statusline
+# window/token detection chain exactly. Debugging escape hatch.
+# Default: unset (cache honored when present and fresh).
+export HANDOFF_CTX_NO_STATUSLINE=1
+
+# --- SessionEnd/PreCompact safety net (write_handoff.sh --if-curated) ---
+
+# Hook payload `reason` values that make the SAFETY-NET write skip
+# (space/comma-separated). Default: "resume" — a /resume session-switch
+# is a pause, not an ending, and each fire would rotate placeholder churn
+# through history. Set to "" to always write. Genuine endings ("clear",
+# "logout", "prompt_input_exit", "other") always write by default.
+# Curated /handoff and manual runs never consult this list.
+export HANDOFF_SESSIONEND_SKIP_REASONS=resume
 ```
 
 ### Substrate pattern

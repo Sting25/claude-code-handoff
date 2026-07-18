@@ -35,6 +35,10 @@ run_install() {
 }
 all_cmds()   { jq -r '[.. | objects | .command? // empty] | .[]' "$HOME_DIR/settings.json" 2>/dev/null; }
 count_with() { all_cmds | grep -cF -- "$1"; }         # # of command strings containing substr
+# Same, scoped to one hook event. Needed for write_handoff.sh, which since the
+# PreCompact safety net legitimately appears under TWO events (SessionEnd +
+# PreCompact) — a global count can no longer prove "exactly one SE hook".
+count_in()   { jq -r --arg e "$1" '[.hooks[$e] // [] | .. | objects | .command? // empty] | .[]' "$HOME_DIR/settings.json" 2>/dev/null | grep -cF -- "$2"; }
 valid_json() { jq -e . "$HOME_DIR/settings.json" >/dev/null 2>&1 && echo yes || echo no; }
 stray_tmp()  { [[ -e "$HOME_DIR/settings.json.tmp" ]] && echo yes || echo no; }
 yn()         { [[ "$1" -gt 0 ]] && echo yes || echo no; }
@@ -92,7 +96,7 @@ read -r -d '' SE_LEGACY <<'JSON' || true
 JSON
 run_install "$SE_LEGACY"
 check "SE legacy: exit 0"                    0   "$RC"
-check "SE legacy: write_handoff hook once"   1   "$(count_with '.claude/bin/write_handoff.sh')"
+check "SE legacy: write_handoff hook once"   1   "$(count_in SessionEnd '.claude/bin/write_handoff.sh')"
 check "SE legacy: now carries --if-curated"  yes "$(yn "$(count_with '--if-curated')")"
 check "SE legacy: stale-by form removed"     yes "$([[ "$(count_with '--if-stale-by')" -eq 0 ]] && echo yes || echo no)"
 check "SE legacy: valid JSON"                yes "$(valid_json)"
@@ -107,7 +111,7 @@ read -r -d '' SE_CURRENT <<'JSON' || true
 } }
 JSON
 run_install "$SE_CURRENT"
-check "SE current: write_handoff hook once"  1   "$(count_with '.claude/bin/write_handoff.sh')"
+check "SE current: write_handoff hook once"  1   "$(count_in SessionEnd '.claude/bin/write_handoff.sh')"
 check "SE current: --if-curated retained"    yes "$(yn "$(count_with '--if-curated')")"
 rm -rf "$HOME_DIR"
 

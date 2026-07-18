@@ -11,6 +11,14 @@ safety-net snapshot, so `handoff_current.md` has git state but no
 curated Notes. The SessionStart hook detected this and printed an
 ACTION banner telling you to invoke this skill.
 
+Note: since the `PreCompact` hook joined the safety net, a
+placeholder can also be written MID-session (an uncurated session
+that hit auto or manual compaction), not only at session end — so
+this banner can appear even though the "previous session" is the
+same still-running conversation, freshly compacted. The recovery
+flow is identical: the raw dump covers the pre-compact turns that
+compaction summarized away.
+
 This skill reconstructs what the previous session would have written
 into Notes if `/handoff` had run, using the raw per-turn dump and the
 prior history snapshot. The reconstruction is best-effort — it will

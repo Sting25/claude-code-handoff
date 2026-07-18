@@ -8,7 +8,15 @@
 #                               turn's usage (input + cache_read + cache_creation)
 #   .ctx_model_<session_id>   — model id from that same assistant turn (the
 #                               session's OWN model — the most reliable window
-#                               signal we have)
+#                               signal the Stop hook alone can offer)
+# Additionally, when the handoff statusLine is wired, handoff_statusline.sh
+# caches Claude Code's OWN numbers to:
+#   .ctx_sl_<session_id>      — key=value lines: window= (CC's authoritative
+#                               context_window_size), tokens= (current_usage
+#                               sum), pct=, model=. Preferred over the files
+#                               above because it removes the model-id-regex
+#                               window guesswork that broke once already
+#                               (c0faf38: 5x over-report on 1M-native ids).
 # This script runs on the next user prompt and, if usage has crossed a
 # configurable threshold, emits a <system-reminder> instructing the assistant
 # to passively flag a /handoff moment.
@@ -63,6 +71,10 @@
 #                               context as it fills. Set 0 to restore the old
 #                               always-cooldown-gated behavior; set N>1 to allow
 #                               up to N nudges spaced by the cooldown.
+#   HANDOFF_CTX_NO_STATUSLINE   set to 1 to ignore the .ctx_sl_* statusline
+#                               cache entirely, restoring the pre-statusline
+#                               detection chain exactly. Debugging / regression
+#                               escape hatch; default unset (cache honored).
 #
 # Token count comes from the latest assistant turn's `usage` — the same
 # number Claude Code's /context shows. When that file is absent (first
@@ -122,8 +134,40 @@ size_file="$backup_dir/.ctx_${session_id}"
 tokens_file="$backup_dir/.ctx_tokens_${session_id}"
 model_file="$backup_dir/.ctx_model_${session_id}"
 flag_file="$backup_dir/.ctx_flagged_${session_id}"
+sl_file="$backup_dir/.ctx_sl_${session_id}"
+
+# --- Statusline cache (written by handoff_statusline.sh when the statusLine
+#     is wired). Pure-bash key=value parse — no jq dependency added to the
+#     read path. Each value is numeric-validated; anything malformed degrades
+#     to "not recorded" and the pre-statusline chain below takes over.
+sl_window=""
+sl_tokens=""
+if [[ "${HANDOFF_CTX_NO_STATUSLINE:-0}" != "1" && -f "$sl_file" ]]; then
+  while IFS='=' read -r sl_k sl_v; do
+    case "$sl_k" in
+      window) [[ "$sl_v" =~ ^[0-9]+$ ]] && sl_window="$sl_v" ;;
+      tokens) [[ "$sl_v" =~ ^[0-9]+$ ]] && sl_tokens="$sl_v" ;;
+    esac
+  done < "$sl_file" 2>/dev/null || true
+  # Freshness guard: adopt the statusline TOKEN count only while the sl cache
+  # is at least as new as the Stop hook's tokens file. Covers the user who
+  # unwires the statusLine mid-session — a stale cache would otherwise report
+  # a frozen count forever while the Stop hook keeps measuring. If the tokens
+  # file is absent, the sl cache wins outright. (Portable mtime: GNU stat -c
+  # with BSD stat -f fallback, same idiom as handoff_turn_append.sh.)
+  if [[ -n "$sl_tokens" && -f "$tokens_file" ]]; then
+    sl_mtime="$(stat -c %Y "$sl_file" 2>/dev/null || stat -f %m "$sl_file" 2>/dev/null || echo 0)"
+    tk_mtime="$(stat -c %Y "$tokens_file" 2>/dev/null || stat -f %m "$tokens_file" 2>/dev/null || echo 0)"
+    if [[ "$sl_mtime" =~ ^[0-9]+$ && "$tk_mtime" =~ ^[0-9]+$ ]] && (( sl_mtime < tk_mtime )); then
+      sl_tokens=""
+    fi
+  fi
+fi
 
 # Nothing recorded yet — first prompt of the session, before any Stop fire.
+# Deliberately still gated on the Stop hook's size file even when statusline
+# data exists: the cooldown ledger below is byte-denominated, so statusline
+# data alone (Stop hook broken/uninstalled) must not activate nudging.
 [[ -f "$size_file" ]] || exit 0
 
 current_bytes="$(cat "$size_file" 2>/dev/null || echo 0)"
@@ -162,52 +206,69 @@ window_source="env"
 if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
   window_source="auto"
   window_tokens=200000
-  # Step 2: the session's own recorded model. Charset-validated with the same
-  # guard the Stop hook applies before writing (ids can carry "[1m]"), so a
-  # tampered file degrades to "no model recorded" rather than being trusted.
-  session_model=""
-  model_charset_re='^[]A-Za-z0-9._[-]+$'
-  if [[ -f "$model_file" ]]; then
-    session_model="$(cat "$model_file" 2>/dev/null || true)"
-    [[ "$session_model" =~ $model_charset_re ]] || session_model=""
+  # Step 1.5: CC's OWN window from the statusline cache. This is authority,
+  # not inference — Claude Code reported context_window_size itself — so when
+  # present it wins over every probe below (which are all guesses from model
+  # ids) and the regex/jq steps are skipped entirely. The env pin above still
+  # beats it: the documented contract is that HANDOFF_CTX_WINDOW_TOKENS
+  # always wins (a user may pin a sub-1M budget on purpose).
+  if [[ -n "$sl_window" ]] && (( sl_window > 0 )); then
+    window_tokens="$sl_window"
+    window_source="statusline"
   fi
-  if [[ -n "$session_model" ]]; then
-    if [[ "$session_model" =~ $ONE_M_MODEL_RE ]]; then
-      window_tokens=1000000
+  if [[ "$window_source" != "statusline" ]]; then
+    # Step 2: the session's own recorded model. Charset-validated with the same
+    # guard the Stop hook applies before writing (ids can carry "[1m]"), so a
+    # tampered file degrades to "no model recorded" rather than being trusted.
+    session_model=""
+    model_charset_re='^[]A-Za-z0-9._[-]+$'
+    if [[ -f "$model_file" ]]; then
+      session_model="$(cat "$model_file" 2>/dev/null || true)"
+      [[ "$session_model" =~ $model_charset_re ]] || session_model=""
     fi
-  elif [[ -f "$HOME/.claude.json" ]]; then
-    # Step 3a: per-project has a 1M-regex match.
-    if jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
-          (.projects[$cwd].lastModelUsage // {})
-          | keys
-          | map(select(test($re)))
-          | length > 0
-        ' "$HOME/.claude.json" >/dev/null 2>&1; then
-      window_tokens=1000000
-    # Step 3b/3c: per-project missing or empty → fall back to global.
-    #          (jq returns true when lastModelUsage is null OR keys array is empty.)
-    elif jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
-          ((.projects[$cwd].lastModelUsage // {}) | keys | length) == 0
-          and
-          ([.projects[]?.lastModelUsage // {} | keys[]] | map(select(test($re))) | length > 0)
-        ' "$HOME/.claude.json" >/dev/null 2>&1; then
-      window_tokens=1000000
+    if [[ -n "$session_model" ]]; then
+      if [[ "$session_model" =~ $ONE_M_MODEL_RE ]]; then
+        window_tokens=1000000
+      fi
+    elif [[ -f "$HOME/.claude.json" ]]; then
+      # Step 3a: per-project has a 1M-regex match.
+      if jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
+            (.projects[$cwd].lastModelUsage // {})
+            | keys
+            | map(select(test($re)))
+            | length > 0
+          ' "$HOME/.claude.json" >/dev/null 2>&1; then
+        window_tokens=1000000
+      # Step 3b/3c: per-project missing or empty → fall back to global.
+      #          (jq returns true when lastModelUsage is null OR keys array is empty.)
+      elif jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
+            ((.projects[$cwd].lastModelUsage // {}) | keys | length) == 0
+            and
+            ([.projects[]?.lastModelUsage // {} | keys[]] | map(select(test($re))) | length > 0)
+          ' "$HOME/.claude.json" >/dev/null 2>&1; then
+        window_tokens=1000000
+      fi
     fi
   fi
 fi
 WINDOW_TOKENS="$window_tokens"
 
-# --- Tokens: prefer the real measurement; fall back to bytes/4. ---
+# --- Tokens: statusline cache first (CC's own current_usage — same sum, but
+#     fresher: it updates mid-turn while the Stop hook only fires at turn
+#     end), then the Stop hook's measurement, then bytes/4. ---
 # token_source records which path won so the emitted reminder can say so. A
 # bytes/4 estimate runs high — transcript bytes include tool results, thinking
 # blocks, and reminder injections that aren't in the real context window — so a
 # reader must not treat an estimated pct as ground truth (this is the "reports
-# ~40% when /context shows ~9%" surprise). When the Stop hook has recorded real
-# usage (.ctx_tokens_*), the source stays "measured" and the note is empty, so
-# normal reminders are byte-for-byte unchanged.
+# ~40% when /context shows ~9%" surprise). Both "statusline" and "measured"
+# are real measurements, so est_note stays empty for both and normal reminders
+# are byte-for-byte unchanged.
 est_tokens=0
 token_source="measured"
-if [[ -f "$tokens_file" ]]; then
+if [[ -n "$sl_tokens" ]] && (( sl_tokens > 0 )); then
+  est_tokens="$sl_tokens"
+  token_source="statusline"
+elif [[ -f "$tokens_file" ]]; then
   est_tokens="$(cat "$tokens_file" 2>/dev/null || echo 0)"
   [[ "$est_tokens" =~ ^[0-9]+$ ]] || est_tokens=0
 fi
@@ -223,7 +284,12 @@ fi
 #     second-guess an explicit HANDOFF_CTX_WINDOW_TOKENS — a user may pin a
 #     sub-1M budget on purpose (e.g. to rehearse 200k behavior on a 1M tier),
 #     and the documented contract is that the env override always wins.
-if [[ "$window_source" == "auto" && "$token_source" == "measured" ]] \
+#     A statusline-reported window is CC's own authority — never ratcheted
+#     (window_source "statusline" fails the "auto" check below); a statusline
+#     token count is a real measurement, so it MAY drive the ratchet when the
+#     window itself still came from auto-detection.
+if [[ "$window_source" == "auto" ]] \
+   && [[ "$token_source" == "measured" || "$token_source" == "statusline" ]] \
    && (( est_tokens > 200000 && WINDOW_TOKENS < 1000000 )); then
   WINDOW_TOKENS=1000000
 fi
