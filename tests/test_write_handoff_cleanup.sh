@@ -25,7 +25,7 @@ secret prose from a prior session
 EOF
 chmod 644 "$repo/.claude/handoff_current.md"
 ( cd "$repo" && HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 bash "$WH" >/dev/null 2>&1 )
-rotated="$(ls "$repo/.claude/handoff_history"/handoff_*.md 2>/dev/null | head -1)"
+rotated="$(find "$repo/.claude/handoff_history" -maxdepth 1 -name 'handoff_*.md' 2>/dev/null | sort | head -1)"
 check "rotated history snapshot exists" yes "$([[ -n "$rotated" ]] && echo yes || echo no)"
 check "rotated history snapshot is 0600 (was 0644)" 600 "$(file_mode "$rotated")"
 rm -rf "$repo"
@@ -40,7 +40,7 @@ cat > "$repo/.claude/handoff_current.md" <<'EOF'
 ## Notes from this session
 x
 EOF
-out="$( cd "$repo" && HANDOFF_HISTORY_KEEP=5 HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 bash "$WH" 2>/dev/null )"; rc=$?
+( cd "$repo" && HANDOFF_HISTORY_KEEP=5 HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 bash "$WH" >/dev/null 2>&1 ); rc=$?
 check "crafted history name: write still succeeds (rc 0)" 0 "$rc"
 check "crafted history name: handoff doc written"         yes \
   "$([[ -f "$repo/.claude/handoff_current.md" ]] && grep -q 'auto-generated' "$repo/.claude/handoff_current.md" && echo yes || echo no)"
@@ -53,7 +53,7 @@ repo="$(mk_repo)"   # mk_repo leaves no .gitignore
 check "tests#3: .gitignore lists the handoff doc" yes \
   "$(grep -qF '.claude/handoff_current.md' "$repo/.gitignore" 2>/dev/null && echo yes || echo no)"
 check "tests#3: handoff_current.md is git-ignored" yes \
-  "$(( cd "$repo" && git check-ignore -q '.claude/handoff_current.md' ) && echo yes || echo no)"
+  "$( ( cd "$repo" && git check-ignore -q '.claude/handoff_current.md' ) && echo yes || echo no)"
 check "perms#1: bootstrapped .gitignore is 0644"  644 "$(file_mode "$repo/.gitignore")"
 rm -rf "$repo"
 

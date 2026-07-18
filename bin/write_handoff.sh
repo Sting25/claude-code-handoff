@@ -305,7 +305,7 @@ prune_history() {
   # handoff write down with it. read -r preserves the line verbatim and `--`
   # stops a leading dash from being read as an rm option.
   local f
-  ls -1 "$history_dir"/handoff_*.md 2>/dev/null \
+  find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
     | sort -r \
     | tail -n +$((HISTORY_KEEP + 1)) \
     | while IFS= read -r f; do
@@ -318,6 +318,7 @@ prune_history() {
 # skipped) on first run or if the prior handoff had no parseable HEAD.
 prev_head=""
 if [[ -f "$handoff_path" ]]; then
+  # shellcheck disable=SC2016  # backticks are literal chars in the markdown HEAD line, not command substitution
   prev_head="$(grep -m1 '^\*\*HEAD:\*\*' "$handoff_path" 2>/dev/null \
     | sed -E 's/.*`([0-9a-fA-F]+)`.*/\1/' | grep -Ei '^[0-9a-f]+$' || true)"
 fi
@@ -365,7 +366,9 @@ snapshot_repo() {
   # already been rotated away, leaving no handoff_current.md at all. The branch
   # line is emitted before head exits, so `|| true` loses nothing.
   upstream="$(git -C "$root" status -sb 2>/dev/null | head -1 | sed 's/^## //' || true)"
+  # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
   printf '**HEAD:** `%s` — %s\n\n' "$(git_short "$root")" "$(git_subj "$root")"
+  # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
   printf '**Branch:** `%s` (%s)\n\n' "$(git_branch "$root")" "$upstream"
 
   printf '### Recent commits\n\n'
@@ -395,7 +398,7 @@ list_inflight_md() {
   # filter then dropped it entirely — spaced filenames silently vanished.
   local root="$1"
   local subdir="$2"
-  local xy path src
+  local xy path
   # "In-flight .md" is a git concept (untracked/modified). Off-git there's
   # nothing to list — and the git pipeline below would fail under `pipefail`
   # and could abort the caller's `found=$(...)` under `set -e`. Return empty.
@@ -405,9 +408,10 @@ list_inflight_md() {
         xy="${entry:0:2}"      # two-char status field
         path="${entry:3}"      # path begins after "XY " (status + one space)
         # Rename/copy entries are followed by a second NUL-terminated field
-        # (the source path); consume it so it isn't read as the next entry.
+        # (the source path); consume it into _ so it isn't read as the next
+        # entry — the value itself is deliberately unused.
         case "$xy" in
-          R*|C*) IFS= read -r -d '' src || true ;;
+          R*|C*) IFS= read -r -d '' _ || true ;;
         esac
         case "$xy" in
           '??'|' M'|'M '|'MM'|'AM') ;;   # untracked or modified (staged/unstaged)
@@ -447,6 +451,7 @@ EOF
   # session reads, before the git snapshot.
   if [[ -s "$pinned_file" ]]; then
     printf '## 📌 Pinned — carried forward every handoff\n\n'
+    # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
     printf '_Source: `%s` — edit that file to change this; `write_handoff.sh`\n' "$pinned_relpath"
     printf 'only reads it, so it survives rotation. This is the durable-but-\n'
     printf 'temporary layer: context + guardrails that outlive a session but\n'
@@ -467,6 +472,7 @@ EOF
   # In-flight markdown across configured paths in the main repo
   for d in $INFLIGHT_DIRS; do
     [[ -d "$repo_root/$d" ]] || continue
+    # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
     printf '## In-flight (untracked or modified .md under `%s/`)\n\n' "$d"
     found="$(list_inflight_md "$repo_root" "$d/")"
     if [[ -z "$found" ]]; then
@@ -484,6 +490,7 @@ EOF
   if [[ -n "$substrate_root" ]]; then
     for d in $SUBSTRATE_INFLIGHT_DIRS; do
       [[ -d "$substrate_root/$d" ]] || continue
+      # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
       printf '## In-flight (untracked or modified .md under `%s/%s/`)\n\n' "$SUBSTRATE_NAME" "$d"
       found="$(list_inflight_md "$substrate_root" "$d/")"
       if [[ -z "$found" ]]; then
@@ -528,9 +535,11 @@ EOF
       if [[ -z "$touched_log" && ( -n "$sys_paths" || -n "$sys_subj" ) ]]; then
         printf '## ⚠️ System-log nudge\n\n'
         printf 'This session has commits that look **system-level** (security, '
+        # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
         printf 'scaffold, topology, migration, roles) but `%s` was **not touched**.\n' "$systemlog_relpath"
         printf 'If any of these changed the system'\''s shape, add a What/Why/Fix/Where '
         printf 'entry before handing off:\n\n'
+        # shellcheck disable=SC2016  # backticks are a literal markdown code fence in the output
         printf '```\n%s\n```\n\n' "$range_commits"
       fi
     fi

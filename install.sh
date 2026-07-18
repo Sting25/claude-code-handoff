@@ -115,7 +115,7 @@ while [[ $# -gt 0 ]]; do
     --uninstall) mode=uninstall ;;
     --doctor)    mode=doctor ;;
     --copy)      link_mode=copy ;;
-    --link)      link_mode=link ;;
+    --link)      link_mode='link' ;;
     --help|-h)
       sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
@@ -127,10 +127,13 @@ done
 
 # Canonical hook commands and permissions. Edit these together with
 # CHANGELOG.md if you ever change the snippet shape.
-ss_cmd='bash $HOME/.claude/bin/handoff_session_start.sh 2>/dev/null || true'
-se_cmd='bash $HOME/.claude/bin/write_handoff.sh --if-curated >/dev/null 2>&1 || true'
-st_cmd='bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true'
-up_cmd='bash $HOME/.claude/bin/handoff_ctx_check.sh 2>/dev/null || true'
+# shellcheck disable=SC2016  # $HOME is intentionally literal: the string is stored verbatim in settings.json and expanded when the hook fires, not at install time
+{
+  ss_cmd='bash $HOME/.claude/bin/handoff_session_start.sh 2>/dev/null || true'
+  se_cmd='bash $HOME/.claude/bin/write_handoff.sh --if-curated >/dev/null 2>&1 || true'
+  st_cmd='bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true'
+  up_cmd='bash $HOME/.claude/bin/handoff_ctx_check.sh 2>/dev/null || true'
+}
 perm_write="Bash(bash $HOME/.claude/bin/write_handoff.sh)"
 perm_stop="Bash(bash $HOME/.claude/bin/handoff_turn_append.sh)"
 perm_ctx="Bash(bash $HOME/.claude/bin/handoff_ctx_check.sh)"
@@ -143,15 +146,18 @@ perm_ss="Bash(bash $HOME/.claude/bin/handoff_session_start.sh)"
 # (e.g. a wrapper called "my_handoff_turn_append.sh"). Every version of this
 # installer wrote the command with this path, so the match stays backward-
 # compatible. The permission entries already match by exact string.
-ss_marker='$HOME/.claude/bin/handoff_session_start.sh'
-# Legacy marker — pre-0.3.0 SessionStart was an inline bash one-liner that
-# cat'd handoff_current.md directly. We detect it (substring unique to the
-# inline form, not present in the new script-call form) and migrate it out
-# on re-install so users don't end up with both hooks firing.
-ss_legacy_marker='if [ -f "$f" ]; then echo'
-se_marker='$HOME/.claude/bin/write_handoff.sh'
-st_marker='$HOME/.claude/bin/handoff_turn_append.sh'
-up_marker='$HOME/.claude/bin/handoff_ctx_check.sh'
+# shellcheck disable=SC2016  # $HOME / $f are intentionally literal: markers must match the exact stored hook strings, no expansion wanted
+{
+  ss_marker='$HOME/.claude/bin/handoff_session_start.sh'
+  # Legacy marker — pre-0.3.0 SessionStart was an inline bash one-liner that
+  # cat'd handoff_current.md directly. We detect it (substring unique to the
+  # inline form, not present in the new script-call form) and migrate it out
+  # on re-install so users don't end up with both hooks firing.
+  ss_legacy_marker='if [ -f "$f" ]; then echo'
+  se_marker='$HOME/.claude/bin/write_handoff.sh'
+  st_marker='$HOME/.claude/bin/handoff_turn_append.sh'
+  up_marker='$HOME/.claude/bin/handoff_ctx_check.sh'
+}
 
 # -------------------------------------------------------------------- symlinks
 

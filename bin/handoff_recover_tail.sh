@@ -125,7 +125,9 @@ fi
 
 # --- Header ---
 printf '## Recovered tail — %d JSONL line(s) past the raw dump cursor\n\n' "$missing"
+# shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
 printf '_These turns were in the transcript JSONL (`%s`)\n' "$transcript"
+# shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
 printf 'but were never folded into `handoff_raw_%s.md`: the session ended\n' "$session_id"
 printf 'before its final Stop hook fired (crash / SIGKILL / OOM / closed terminal).\n'
 printf 'Fold anything load-bearing here into the recovered Notes._\n\n'

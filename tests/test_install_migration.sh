@@ -53,6 +53,7 @@ read -r -d '' SS_LEGACY_COEXIST <<'JSON' || true
 JSON
 run_install "$SS_LEGACY_COEXIST"
 check "SS legacy: exit 0"                  0   "$RC"
+# shellcheck disable=SC2016  # $f is part of the literal legacy-marker string being counted, not a variable to expand
 check "SS legacy: inline one-liner removed" yes "$([[ "$(count_with 'if [ -f "$f" ]; then echo')" -eq 0 ]] && echo yes || echo no)"
 check "SS legacy: user command preserved"   yes "$(yn "$(count_with 'USER_SS_OWN')")"
 check "SS legacy: current hook added once"   1  "$(count_with '.claude/bin/handoff_session_start.sh')"
@@ -72,6 +73,7 @@ read -r -d '' SS_CURRENT <<'JSON' || true
 JSON
 run_install "$SS_CURRENT"
 check "SS current: still present exactly once" 1   "$(count_with '.claude/bin/handoff_session_start.sh')"
+# shellcheck disable=SC2016  # $f is part of the literal legacy-marker string being counted, not a variable to expand
 check "SS current: no legacy marker introduced" 0  "$(count_with 'if [ -f "$f" ]; then echo')"
 rm -rf "$HOME_DIR"
 

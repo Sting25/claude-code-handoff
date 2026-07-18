@@ -105,6 +105,7 @@ must bash -c "cat > '$tx'" <<'EOF'
 EOF
 echo 1 > "$bd/.handoff_raw_SID.cursor"
 out="$(HANDOFF_BACKUP_DIR="$bd" HANDOFF_RECOVER_TRANSCRIPT="$tx" bash "$RT" SID 2>/dev/null)"
+# shellcheck disable=SC2016  # backticks are the literal markdown code span being asserted on, not command substitution
 check "tail tool call rendered" yes "$(has "$out" '`Bash`')"
 rm -rf "$work"
 

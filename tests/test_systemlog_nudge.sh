@@ -31,6 +31,7 @@ nudge_doc() {
   c1="$(git -C "$repo" rev-parse HEAD)"
   # Seed the prior handoff so write_handoff parses prev_head = c1 from its HEAD line.
   mkdir -p "$repo/.claude"
+  # shellcheck disable=SC2016  # backticks are literal markdown, matching write_handoff's HEAD-line format
   printf '**HEAD:** `%s` — prior session\n' "$c1" > "$repo/.claude/handoff_current.md"
   # The session's commit (prev_head..HEAD).
   echo change > "$repo/feature.txt"; git -C "$repo" add feature.txt

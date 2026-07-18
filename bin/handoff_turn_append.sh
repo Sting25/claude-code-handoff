@@ -197,6 +197,7 @@ fi
 
 # --- Initialize dump file on first append ---
 if [[ ! -f "$dump_file" ]]; then
+  # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
   {
     printf '# Raw session dump\n\n'
     printf '**Session ID:** `%s`\n' "$session_id"
@@ -358,6 +359,7 @@ fi
 # list with a while loop over a process substitution instead. The process-sub
 # exit status isn't checked, so a failing glob won't trip `set -e` (same safety
 # the mapfile form had).
+# shellcheck disable=SC2012  # ls -t is deliberate: prune needs mtime ordering and BSD find has no -printf; dump filenames are tool-generated session ids (no whitespace/newlines)
 while IFS= read -r old; do
   [[ -z "$old" ]] && continue
   rm -f  -- "$old"

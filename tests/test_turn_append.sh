@@ -111,7 +111,7 @@ repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; tx="$repo/tx.jsonl"
 printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
 run_turn "$repo" 'EVIL\nINJECT' "$tx"; rc=$?
 check "newline session_id -> exit 0"     0  "$rc"
-check "newline session_id -> no dumps"   0  "$(ls "$bd"/handoff_raw_*.md 2>/dev/null | wc -l | tr -d ' ')"
+check "newline session_id -> no dumps"   0  "$(find "$bd" -maxdepth 1 -name 'handoff_raw_*.md' 2>/dev/null | wc -l | tr -d ' ')"
 rm -rf "$repo"
 
 # Path-traversal: a slash / ".." must not write outside the backup dir.

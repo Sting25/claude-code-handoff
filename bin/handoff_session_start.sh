@@ -134,7 +134,7 @@ fi
 prev=""
 if [ "$is_placeholder" = "1" ] \
    && [ "${HANDOFF_SS_DISABLE_FALLBACK:-0}" != "1" ]; then
-  prev="$(ls -1 "$history_dir"/handoff_*.md 2>/dev/null | sort -r | head -1 || true)"
+  prev="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | sort -r | head -1 || true)"
   if [ -n "$prev" ] && [ -f "$prev" ]; then
     echo
     echo "---"
@@ -183,10 +183,11 @@ fi
 # Pointer to the history dir so the assistant knows older snapshots
 # exist and can run /handoff-more to pull them in deliberately.
 if [ -d "$history_dir" ]; then
-  # `|| true`: under `pipefail`, a non-matching glob makes `ls` fail and the
-  # whole pipeline non-zero, which `set -e` would treat as fatal. The count is
-  # defaulted to 0 below, so swallowing the status here is safe.
-  count="$(ls -1 "$history_dir"/handoff_*.md 2>/dev/null | wc -l | tr -d ' ' || true)"
+  # `|| true`: under `pipefail`, `find` failing (e.g. the dir vanishing between
+  # the -d check and here) would make the whole pipeline non-zero, which
+  # `set -e` would treat as fatal. The count is defaulted to 0 below, so
+  # swallowing the status here is safe.
+  count="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | wc -l | tr -d ' ' || true)"
   if [ "${count:-0}" -gt 0 ]; then
     echo
     echo "---"
