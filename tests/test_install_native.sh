@@ -7,8 +7,11 @@
 #   D. uninstall removes ours (incl. statusLine when ours), preserves a user's
 #      own statusLine and co-located PreCompact hook commands
 #   E. --doctor covers both new scripts + reports the statusLine state
-#   F. jq-missing manual snippet documents PreCompact/PostCompact/statusLine
-#      with the only-if-unset note
+#   F. the manual snippet (printed when settings.json is invalid JSON)
+#      documents PreCompact/PostCompact/statusLine with the only-if-unset
+#      note; a jq-less plain install REFUSES up front (0.9.0 behavior —
+#      jq is a hard runtime dependency, so installing would ship a
+#      silently-dead system)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 echo "install.sh native-integration wiring (PreCompact/PostCompact/statusLine)"
@@ -114,9 +117,26 @@ check "doctor: unset sl reported"           yes "$(has "$dout" "statusLine unset
 check "doctor: unset sl not broken"         0   "$drc"
 rm -rf "$HOME_DIR" "$src4"
 
-# --- F. jq-missing manual snippet documents the new surface ------------------
-nojq="$(mktemp -d)"   # shim dir whose jq is a failing stub is NOT enough:
-# install.sh checks `command -v jq`, so build a PATH that simply lacks jq.
+# --- F. manual snippet documents the new surface -----------------------------
+# Since 0.9.0 a jq-less plain install refuses up front (jq is a hard runtime
+# dependency), so the snippet's reachable path is the invalid-settings.json
+# one: patch_settings refuses to auto-patch un-parseable JSON and prints the
+# manual snippet instead. Exercise that path (jq present) and assert the
+# snippet documents the full 0.9.0 surface.
+src5="$(mktemp -d)"; HOME_DIR="$(mktemp -d)"
+cp "$REPO_ROOT/install.sh" "$src5/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src5/"
+printf 'not json\n' > "$HOME_DIR/settings.json"
+snip="$(CLAUDE_HOME="$HOME_DIR" bash "$src5/install.sh" 2>&1 || true)"
+check "snippet: PreCompact line"        yes "$(has "$snip" '"PreCompact"')"
+check "snippet: PostCompact line"       yes "$(has "$snip" '"PostCompact"')"
+check "snippet: statusLine block"       yes "$(has "$snip" '"statusLine"')"
+check "snippet: only-if-unset NOTE"     yes "$(has "$snip" "only add the \"statusLine\" key if you don't already have")"
+rm -rf "$src5" "$HOME_DIR"
+
+# jq-less plain install refuses up front (mediums fix, f3dde70) — the refusal
+# must survive alongside the new wiring. Build a PATH that simply lacks jq
+# (a failing jq stub is not enough: install.sh checks `command -v jq`).
+nojq="$(mktemp -d)"
 for d in ${PATH//:/ }; do
   [[ -d "$d" ]] || continue
   for f in "$d"/*; do
@@ -125,13 +145,11 @@ for d in ${PATH//:/ }; do
     [[ -e "$nojq/$b" ]] || ln -s "$f" "$nojq/$b" 2>/dev/null || true
   done
 done
-src5="$(mktemp -d)"; HOME_DIR="$(mktemp -d)"
-cp "$REPO_ROOT/install.sh" "$src5/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src5/"
-snip="$(PATH="$nojq" CLAUDE_HOME="$HOME_DIR" bash "$src5/install.sh" 2>&1)"
-check "snippet: PreCompact line"        yes "$(has "$snip" '"PreCompact"')"
-check "snippet: PostCompact line"       yes "$(has "$snip" '"PostCompact"')"
-check "snippet: statusLine block"       yes "$(has "$snip" '"statusLine"')"
-check "snippet: only-if-unset NOTE"     yes "$(has "$snip" "only add the \"statusLine\" key if you don't already have")"
-rm -rf "$src5" "$HOME_DIR" "$nojq"
+src6="$(mktemp -d)"; HOME_DIR6="$(mktemp -d)"
+cp "$REPO_ROOT/install.sh" "$src6/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src6/"
+out="$(PATH="$nojq" CLAUDE_HOME="$HOME_DIR6" bash "$src6/install.sh" 2>&1)" && rc=0 || rc=$?
+check "no-jq: plain install refuses (rc!=0)" yes "$([ "$rc" -ne 0 ] && echo yes || echo no)"
+check "no-jq: names jq as the reason"        yes "$(has "$out" 'jq not found')"
+rm -rf "$src6" "$HOME_DIR6" "$nojq"
 
 finish
