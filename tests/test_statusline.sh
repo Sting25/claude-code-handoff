@@ -142,6 +142,24 @@ check "symlink: cache has real content" yes "$(has "$(cat "$bd/.ctx_sl_LNK")" "w
 check "symlink: target untouched"       "PRISTINE" "$(cat "$victim")"
 rm -rf "$repo"
 
+# --- Stale-cache janitor: a successful cache write reaps sibling .ctx_sl_*
+#     files >7 days old. Sessions that render a statusline but never complete
+#     a turn get no handoff_raw_ dump, so the Stop-hook prune never names
+#     them — without this, their caches would accumulate forever. -------------
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"
+must mkdir -p "$bd"
+: > "$bd/.ctx_sl_STALE"          # orphaned cache from a long-dead session
+: > "$bd/.ctx_sl_GONE.a1b2c3"    # orphaned mktemp temp (killed mid-write)
+must touch -t 202001010000 "$bd/.ctx_sl_STALE" "$bd/.ctx_sl_GONE.a1b2c3"
+: > "$bd/.ctx_sl_FRESH"          # recent sibling (another live session)
+run_sl "$repo" "$(full_payload PRUNE)" >/dev/null; rc=$?
+check "prune: exit 0"                     0   "$rc"
+check "prune: new cache written"          yes "$([[ -f "$bd/.ctx_sl_PRUNE" ]] && echo yes || echo no)"
+check "prune: stale orphan removed"       no  "$([[ -e "$bd/.ctx_sl_STALE" ]] && echo yes || echo no)"
+check "prune: stale tmp litter removed"   no  "$([[ -e "$bd/.ctx_sl_GONE.a1b2c3" ]] && echo yes || echo no)"
+check "prune: fresh sibling kept (ctrl)"  yes "$([[ -f "$bd/.ctx_sl_FRESH" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
 # --- Handoff state segment: none / auto / curated ----------------------------
 repo="$(mk_repo)"; must mkdir -p "$repo/.claude"
 payload='{"session_id":"HS","context_window":{"context_window_size":200000,"used_percentage":10}}'

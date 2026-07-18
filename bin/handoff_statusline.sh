@@ -159,8 +159,27 @@ write_cache() {
   mkdir -p "$bd" 2>/dev/null || return 0
   local tmp
   tmp="$(mktemp "${sl_file}.XXXXXX" 2>/dev/null)" || return 0
-  printf '%s' "$content" > "$tmp"
-  mv -f "$tmp" "$sl_file"
+  # The `|| true` at the call site disables errexit inside this function, so
+  # the write must be checked explicitly: a partial write (ENOSPC) would
+  # otherwise be mv'd into place, and truncated numerics (window=1000000 ->
+  # window=10) still pass ctx-check's ^[0-9]+$ validation and get trusted as
+  # CC-authoritative. Better no cache (regex fallback + ESTIMATED caveat) than
+  # a confidently-wrong one — never install the tmp unless printf succeeded.
+  if ! printf '%s' "$content" > "$tmp" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  mv -f "$tmp" "$sl_file" 2>/dev/null || { rm -f -- "$tmp"; return 0; }
+  # Reap stale sibling caches. The Stop-hook prune (handoff_turn_append.sh)
+  # only evicts .ctx_sl_<id> for ids whose handoff_raw_<id>.md dump gets
+  # rotated out — a session that renders a statusline but never completes a
+  # turn (open-and-quit, broken Stop hook) never gets a dump, so its cache
+  # would accumulate forever. This script is the only producer of these files,
+  # so it also janitors them: anything (including orphaned mktemp temps) not
+  # touched in 7 days is long past ctx-check's staleness horizon and dead
+  # weight. -type f skips symlinks; the current session's file was written
+  # just above, so its fresh mtime keeps it out of the prune set.
+  find "$bd" -maxdepth 1 -name '.ctx_sl_*' -type f -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true
 }
 # `|| true`: display already succeeded; a cache failure must never surface as
 # a nonzero exit (which would blank the status line on some CC versions).
