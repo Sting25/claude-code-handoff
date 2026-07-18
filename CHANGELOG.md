@@ -10,6 +10,32 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [Unreleased]
+
+**No settings.json changes** — hook commands and permissions are unchanged, and
+there are no new installed scripts. Symlinked installs pick the fix up with a
+`git pull`; copy-mode installs re-run `./install.sh`. One new env var is
+recognized (`HANDOFF_CTX_1M_MODEL_REGEX`).
+
+### Fixed
+- **Context reminders no longer over-report 5x on 1M-native models (Claude 5
+  family).** Window auto-detection assumed 1M models always carry a `[1m]`
+  suffix in their id; Claude 5 family ids (e.g. `claude-fable-5`) run a 1M
+  window with no suffix, so detection resolved 200k and a session at ~9% of
+  context was told it had used ~45%. Three-part fix: (1) the Stop hook now
+  records the session's model id (from the same last main-chain, usage-bearing
+  assistant line the token count comes from) into
+  `.claude/handoff_backups/.ctx_model_<session_id>`, and ctx-check sizes the
+  window from the session's OWN model rather than guessing from
+  `~/.claude.json` lastModelUsage (which remains the fallback when no model is
+  recorded yet); (2) the 1M signal is a configurable regex,
+  `HANDOFF_CTX_1M_MODEL_REGEX` (default `\[1m\]|claude-(fable|mythos)-`), used
+  by both the model-file check and the lastModelUsage fallback, so users can
+  extend it when new 1M models ship; (3) a safety ratchet: a MEASURED token
+  count above 200k provably cannot fit a 200k window, so ctx-check widens to 1M
+  even when detection got it wrong (never on the bytes/4 estimate, which
+  overshoots). `HANDOFF_CTX_WINDOW_TOKENS` still overrides everything.
+
 ## [0.8.5] — 2026-06-14
 
 Docs-only release. Leads the README with a plain-language "In plain terms, it:"

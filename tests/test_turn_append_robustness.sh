@@ -72,6 +72,11 @@ run_turn "$repo" C1 "$tx"; rc=$?
 check "array-user-last: hook exits 0"            0   "$rc"
 check "array-user-last: cursor advanced to 2"    2   "$(cat "$bd/.handoff_raw_C1.cursor" 2>/dev/null)"
 check "array-user-last: user text captured"      yes "$(grep -q 'ARRAY_USER_NO_TOOLRESULT_marker' "$bd/handoff_raw_C1.md" 2>/dev/null && echo yes || echo no)"
+# The usage line above carries no .message.model: tokens must still be
+# recorded, but the model sidecar must be skipped (empty fails the charset
+# guard), not written with junk.
+check "array-user-last: tokens recorded (10)"    10  "$(cat "$bd/.ctx_tokens_C1" 2>/dev/null)"
+check "no model in usage line -> no .ctx_model_" no  "$([[ -e "$bd/.ctx_model_C1" ]] && echo yes || echo no)"
 
 # Fire again with no new lines: must NOT duplicate the turn block.
 run_turn "$repo" C1 "$tx"

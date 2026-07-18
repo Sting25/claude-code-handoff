@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Behavioral coverage for handoff_ctx_check.sh (the UserPromptSubmit hook that
 # flags a /handoff moment once context crosses a threshold). This script had no
-# tests. We pin the window via HANDOFF_CTX_WINDOW_TOKENS so the ~/.claude.json
-# auto-detect path never participates, then drive the threshold / fallback /
-# mode / cooldown branches directly.
+# tests. We pin the window via HANDOFF_CTX_WINDOW_TOKENS so the auto-detect
+# path never participates, then drive the threshold / fallback / mode /
+# cooldown branches directly. A final section un-pins the window (empty
+# override + HOME jailed to the fixture repo) to drive the model-file /
+# regex / ratchet window-detection branches hermetically.
 #
 # Observable: stdout (a <system-reminder> or nothing) + the .ctx_flagged_* file
 # the cooldown is recorded in.
@@ -180,6 +182,90 @@ rm -rf "$repo"
 repo="$(mk_repo)"; seed "$repo" GOODSID 4000 600
 check "bad session_id (..) -> no reminder"    "" "$(run_cc "$repo" "../escape")"
 check "valid session_id still flags"          yes "$(has "$(run_cc "$repo" GOODSID)" "<system-reminder>")"
+rm -rf "$repo"
+
+# --- Window auto-detect from the session's recorded model (.ctx_model_) ------
+# run_cc pins the window; these tests need auto-detection, so pass an EMPTY
+# override (the non-positive-integer guard treats it as unset -> auto-detect)
+# and pin HOME to the repo (which has no .claude.json) so the host's real
+# ~/.claude.json can never leak into the lastModelUsage fallback.
+run_cc_auto() {  # <repo> <sid> [ENV=VAL ...]
+  local repo="$1" sid="$2"; shift 2
+  ( cd "$repo" && env HANDOFF_CTX_WINDOW_TOKENS= HOME="$repo" "$@" \
+      bash "$CC" <<<"{\"session_id\":\"$sid\"}" 2>/dev/null )
+}
+# Seed the model sidecar the Stop hook writes. Args: <repo> <sid> <model>
+seed_model() { printf '%s\n' "$3" > "$1/.claude/handoff_backups/.ctx_model_$2"; }
+
+# 1M-native Claude 5 id (no [1m] suffix) -> 1M window. Tokens are kept BELOW
+# 200k (with a lowered threshold) so the measured-tokens ratchet can't mask a
+# broken model-file path: matched -> "15% of 1000000", broken -> "75% of 200000".
+repo="$(mk_repo)"; seed "$repo" M1M 4000 150000; seed_model "$repo" M1M claude-fable-5
+out="$(run_cc_auto "$repo" M1M HANDOFF_CTX_THRESHOLD_PCT=10)"
+check "1M-native model file -> 1000000-token window" yes "$(has "$out" "1000000-token window")"
+check "1M-native model file -> pct against 1M (15%)" yes "$(has "$out" "15%")"
+rm -rf "$repo"
+
+# Non-1M model recorded -> 200k window (explicit non-1M signal respected).
+repo="$(mk_repo)"; seed "$repo" M200K 4000 100000
+seed_model "$repo" M200K claude-haiku-4-5-20251001
+out="$(run_cc_auto "$repo" M200K)"
+check "non-1M model file -> 200000-token window" yes "$(has "$out" "200000-token window")"
+rm -rf "$repo"
+
+# Ratchet: a MEASURED 250k count cannot fit the 200k window the non-1M model
+# detected -> forced up to 1M (25%, needs the lowered threshold to fire).
+repo="$(mk_repo)"; seed "$repo" RAT 4000 250000
+seed_model "$repo" RAT claude-haiku-4-5-20251001
+out="$(run_cc_auto "$repo" RAT HANDOFF_CTX_THRESHOLD_PCT=20)"
+check "measured 250k vs 200k window -> ratchets to 1M" yes "$(has "$out" "1000000-token window")"
+check "ratchet pct against 1M (25%)"                   yes "$(has "$out" "25%")"
+rm -rf "$repo"
+
+# Negative control: the bytes/4 ESTIMATE never ratchets (it routinely
+# overshoots) — 4MB/4 = 1M est tokens still reports against the 200k window.
+repo="$(mk_repo)"; seed "$repo" NORAT 4000000
+seed_model "$repo" NORAT claude-haiku-4-5-20251001
+out="$(run_cc_auto "$repo" NORAT)"
+check "estimated tokens never ratchet -> 200000 window" yes "$(has "$out" "200000-token window")"
+rm -rf "$repo"
+
+# Second negative control: an EXPLICIT env override is never ratcheted either —
+# the documented contract is that HANDOFF_CTX_WINDOW_TOKENS always wins (a user
+# may pin a sub-1M budget on purpose), so a measured 250k against a pinned 500k
+# window reports 50% of 500000, not 25% of 1M. (Trailing env wins over the
+# empty override run_cc_auto sets, so the auto-detect guard sees 500000.)
+repo="$(mk_repo)"; seed "$repo" ENVRAT 4000 250000
+out="$(run_cc_auto "$repo" ENVRAT HANDOFF_CTX_WINDOW_TOKENS=500000)"
+check "explicit env window never ratchets -> 500000 window" yes "$(has "$out" "500000-token window")"
+check "explicit env window pct against 500k (50%)"          yes "$(has "$out" "50%")"
+rm -rf "$repo"
+
+# HANDOFF_CTX_1M_MODEL_REGEX override: a custom id matches the user's regex ->
+# 1M; the same id without the override misses the default regex -> 200k.
+repo="$(mk_repo)"; seed "$repo" REOVR 4000 150000
+seed_model "$repo" REOVR my-custom-1m-model
+out="$(run_cc_auto "$repo" REOVR HANDOFF_CTX_THRESHOLD_PCT=10 HANDOFF_CTX_1M_MODEL_REGEX=custom-1m)"
+check "regex override matches custom id -> 1M window" yes "$(has "$out" "1000000-token window")"
+seed "$repo" REDEF 4000 150000; seed_model "$repo" REDEF my-custom-1m-model
+out="$(run_cc_auto "$repo" REDEF HANDOFF_CTX_THRESHOLD_PCT=10)"
+check "custom id w/o override -> default regex misses -> 200k" yes "$(has "$out" "200000-token window")"
+rm -rf "$repo"
+
+# A model file failing the charset guard is ignored (treated as unrecorded):
+# no .claude.json under the pinned HOME -> 200k.
+repo="$(mk_repo)"; seed "$repo" BADMODEL 4000 150000
+seed_model "$repo" BADMODEL 'evil;model/../id'
+out="$(run_cc_auto "$repo" BADMODEL HANDOFF_CTX_THRESHOLD_PCT=10)"
+check "invalid model file ignored -> 200000 window" yes "$(has "$out" "200000-token window")"
+rm -rf "$repo"
+
+# No model file -> lastModelUsage fallback, now regex-driven: a suffix-less
+# Claude 5 id in ~/.claude.json (any project -> global step) means 1M.
+repo="$(mk_repo)"; seed "$repo" JQ1M 4000 150000
+printf '{"projects":{"/elsewhere":{"lastModelUsage":{"claude-fable-5":{"count":1}}}}}' > "$repo/.claude.json"
+out="$(run_cc_auto "$repo" JQ1M HANDOFF_CTX_THRESHOLD_PCT=10)"
+check "no model file, Claude-5 id in .claude.json -> 1M" yes "$(has "$out" "1000000-token window")"
 rm -rf "$repo"
 
 finish

@@ -294,7 +294,11 @@ mv -f "$tmp_cursor" "$cursor_file"
 #     Byte size is the legacy/fallback signal. Token count (sum of input +
 #     cache_read + cache_creation from the latest assistant turn's usage)
 #     is the real measurement Claude Code's /context uses, and is far more
-#     accurate than the 4-bytes-per-token estimate.
+#     accurate than the 4-bytes-per-token estimate. The model id from the
+#     same line goes to .ctx_model_<session_id> so ctx-check can size the
+#     context window from the session's OWN model rather than guessing from
+#     ~/.claude.json (whose lastModelUsage can be stale or from another
+#     session — the source of a 5x over-report on 1M-native models).
 #
 #     We scan for the LAST assistant line that (a) is on the main chain
 #     (not an isSidechain sub-agent turn) and (b) actually carries a usage
@@ -311,24 +315,42 @@ tmp_ctx="$(mktemp "${ctx_file}.XXXXXX")"
 wc -c < "$transcript_path" | tr -d ' ' > "$tmp_ctx"
 mv -f "$tmp_ctx" "$ctx_file"
 
-last_tokens="$(
+# One jq pass yields "tokens<TAB>model" per candidate line; the grep keeps
+# only well-formed rows (numeric tokens + tab) so a malformed line can't
+# poison the tail -n 1 selection, mirroring the old numeric-only filter.
+last_usage="$(
   grep '"type":"assistant"' "$transcript_path" 2>/dev/null \
     | jq -r '
         select(.isSidechain != true)
         | select(.message.usage != null)
-        | (.message.usage.input_tokens // 0)
-        + (.message.usage.cache_read_input_tokens // 0)
-        + (.message.usage.cache_creation_input_tokens // 0)
+        | [ ( (.message.usage.input_tokens // 0)
+              + (.message.usage.cache_read_input_tokens // 0)
+              + (.message.usage.cache_creation_input_tokens // 0) ),
+            (.message.model // "") ]
+        | @tsv
       ' 2>/dev/null \
-    | grep -E '^[0-9]+$' \
+    | grep -E $'^[0-9]+\t' \
     | tail -n 1 \
     || true
 )"
+last_tokens="${last_usage%%$'\t'*}"
+last_model="${last_usage#*$'\t'}"
 if [[ "$last_tokens" =~ ^[0-9]+$ ]] && (( last_tokens > 0 )); then
   tokens_file="$backup_dir/.ctx_tokens_${session_id}"
   tmp_tokens="$(mktemp "${tokens_file}.XXXXXX")"
   echo "$last_tokens" > "$tmp_tokens"
   mv -f "$tmp_tokens" "$tokens_file"
+fi
+# Model id charset guard: real ids are like "claude-fable-5" or
+# "claude-opus-4-7[1m]" — letters, digits, dot, underscore, dash, brackets.
+# Anything else (or empty) is skipped rather than written, since ctx-check
+# interpolates nothing from this file but must never trust junk content.
+model_re='^[]A-Za-z0-9._[-]+$'
+if [[ -n "$last_model" ]] && [[ "$last_model" =~ $model_re ]]; then
+  model_file="$backup_dir/.ctx_model_${session_id}"
+  tmp_model="$(mktemp "${model_file}.XXXXXX")"
+  printf '%s\n' "$last_model" > "$tmp_model"
+  mv -f "$tmp_model" "$model_file"
 fi
 
 # --- Prune to 3 newest dump files (plus their cursor / ctx / flag files) ---
@@ -346,6 +368,7 @@ while IFS= read -r old; do
   rm -rf -- "$backup_dir/.handoff_raw_${id}.lock.d"   # mkdir-lock fallback dir
   rm -f  -- "$backup_dir/.ctx_${id}"
   rm -f  -- "$backup_dir/.ctx_tokens_${id}"
+  rm -f  -- "$backup_dir/.ctx_model_${id}"
   rm -f  -- "$backup_dir/.ctx_flagged_${id}"
 done < <(ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | tail -n +4)
 

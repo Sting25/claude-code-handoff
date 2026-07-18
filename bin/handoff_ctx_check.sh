@@ -6,16 +6,31 @@
 #   .ctx_<session_id>         — transcript byte size (legacy/fallback)
 #   .ctx_tokens_<session_id>  — actual token count from the latest assistant
 #                               turn's usage (input + cache_read + cache_creation)
+#   .ctx_model_<session_id>   — model id from that same assistant turn (the
+#                               session's OWN model — the most reliable window
+#                               signal we have)
 # This script runs on the next user prompt and, if usage has crossed a
 # configurable threshold, emits a <system-reminder> instructing the assistant
 # to passively flag a /handoff moment.
 #
 # Configurable via env (set in ~/.bashrc or ~/.zshrc):
 #   HANDOFF_CTX_WINDOW_TOKENS   total context budget in tokens. When unset,
-#                               auto-detected from ~/.claude.json — if this
-#                               project's lastModelUsage records a model
-#                               with a `[1m]` suffix, defaults to 1000000;
-#                               otherwise 200000.
+#                               auto-detected: if the session's recorded model
+#                               (.ctx_model_*) matches the 1M-model regex
+#                               below, defaults to 1000000; a recorded
+#                               non-matching model means 200000; with no
+#                               recorded model, falls back to probing
+#                               ~/.claude.json lastModelUsage against the
+#                               same regex.
+#   HANDOFF_CTX_1M_MODEL_REGEX  POSIX ERE matching model ids known to run a
+#                               1M-token context window. Default:
+#                                 \[1m\]|claude-(fable|mythos)-
+#                               i.e. the `[1m]` beta suffix, plus Claude 5
+#                               family ids which are 1M-native WITHOUT any
+#                               suffix (the pre-regex detection assumed
+#                               [1m]-or-200k and over-reported usage 5x on
+#                               those models). Extend it when new 1M models
+#                               ship.
 #   HANDOFF_CTX_THRESHOLD_PCT   percent of window that triggers (default: 40).
 #                               Lower (e.g. 30) is recommended for projects
 #                               that opt into REMINDER_MODE=act below — the
@@ -79,7 +94,7 @@ payload="$(cat 2>/dev/null || true)"
 
 session_id="$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)"
 [[ -z "$session_id" ]] && exit 0
-# session_id is interpolated into the .ctx_/.ctx_tokens_/.ctx_flagged_ paths
+# session_id is interpolated into the .ctx_/.ctx_tokens_/.ctx_model_/.ctx_flagged_ paths
 # below, so a value carrying a slash, newline, or ".." could escape backup_dir.
 # Mirror handoff_turn_append.sh's guard (its comment, and the CHANGELOG, describe
 # this validation — but it had only ever been applied to the Stop hook, not to
@@ -97,6 +112,7 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 backup_dir="$repo_root/.claude/handoff_backups"
 size_file="$backup_dir/.ctx_${session_id}"
 tokens_file="$backup_dir/.ctx_tokens_${session_id}"
+model_file="$backup_dir/.ctx_model_${session_id}"
 flag_file="$backup_dir/.ctx_flagged_${session_id}"
 
 # Nothing recorded yet — first prompt of the session, before any Stop fire.
@@ -105,42 +121,67 @@ flag_file="$backup_dir/.ctx_flagged_${session_id}"
 current_bytes="$(cat "$size_file" 2>/dev/null || echo 0)"
 [[ "$current_bytes" =~ ^[0-9]+$ ]] || exit 0
 
-# --- Window: explicit env wins; otherwise auto-detect from ~/.claude.json.
-#     Claude Code stamps the active model (e.g. "claude-opus-4-7[1m]") into
-#     .projects[<cwd>].lastModelUsage; presence of the [1m] suffix is our
-#     1M-context signal.
+# --- Window: explicit env wins; otherwise auto-detect.
 #
 #     Detection order:
-#       1. This project's lastModelUsage has any [1m] entry → 1M
-#       2. This project's lastModelUsage exists but no [1m]  → 200k
-#          (explicit signal that this project does NOT use 1M)
-#       3. This project's lastModelUsage missing/empty       → check globally:
-#          if ANY project has [1m] usage, treat the user as a 1M user → 1M;
-#          else → 200k. Handles renames (cwd changed, no usage yet) and
-#          fresh projects where the user is a 1M user but hasn't typed
-#          here yet.
+#       1. HANDOFF_CTX_WINDOW_TOKENS override (positive integer)   → as given
+#       2. .ctx_model_<session_id> recorded by the Stop hook — the session's
+#          OWN model, strictly better evidence than lastModelUsage:
+#          matches the 1M regex → 1M; valid but no match → 200k (still
+#          subject to the measured-tokens ratchet below).
+#       3. No model file (first prompt, or a stale Stop hook) — probe
+#          ~/.claude.json, where Claude Code stamps the active model
+#          (e.g. "claude-opus-4-7[1m]") into .projects[<cwd>].lastModelUsage:
+#          a. This project's lastModelUsage has a 1M-regex match → 1M
+#          b. This project's lastModelUsage exists but no match  → 200k
+#             (explicit signal that this project does NOT use 1M)
+#          c. This project's lastModelUsage missing/empty        → check
+#             globally: if ANY project has a matching model, treat the user
+#             as a 1M user → 1M; else → 200k. Handles renames (cwd changed,
+#             no usage yet) and fresh projects where the user is a 1M user
+#             but hasn't typed here yet.
+#
+# The regex is a POSIX ERE, used both with bash `=~` and jq `test()`; the
+# bash-escaped default passes through --arg with single backslashes, which is
+# exactly the ERE jq expects. See the header for what the default matches.
+ONE_M_MODEL_RE="${HANDOFF_CTX_1M_MODEL_REGEX:-\[1m\]|claude-(fable|mythos)-}"
 window_tokens="${HANDOFF_CTX_WINDOW_TOKENS:-}"
+window_source="env"
 # A non-positive-integer override (0, negative, or garbage) would make the
 # threshold/pct arithmetic below divide by zero — fatal under `set -e`. Treat
 # any such value as unset and fall through to auto-detection. The regex test
 # short-circuits the `(( ))` so a non-numeric value never reaches arithmetic.
 if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
+  window_source="auto"
   window_tokens=200000
-  if [[ -f "$HOME/.claude.json" ]]; then
-    # Step 1: per-project has [1m].
-    if jq -e --arg cwd "$repo_root" '
+  # Step 2: the session's own recorded model. Charset-validated with the same
+  # guard the Stop hook applies before writing (ids can carry "[1m]"), so a
+  # tampered file degrades to "no model recorded" rather than being trusted.
+  session_model=""
+  model_charset_re='^[]A-Za-z0-9._[-]+$'
+  if [[ -f "$model_file" ]]; then
+    session_model="$(cat "$model_file" 2>/dev/null || true)"
+    [[ "$session_model" =~ $model_charset_re ]] || session_model=""
+  fi
+  if [[ -n "$session_model" ]]; then
+    if [[ "$session_model" =~ $ONE_M_MODEL_RE ]]; then
+      window_tokens=1000000
+    fi
+  elif [[ -f "$HOME/.claude.json" ]]; then
+    # Step 3a: per-project has a 1M-regex match.
+    if jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
           (.projects[$cwd].lastModelUsage // {})
           | keys
-          | map(select(test("\\[1m\\]")))
+          | map(select(test($re)))
           | length > 0
         ' "$HOME/.claude.json" >/dev/null 2>&1; then
       window_tokens=1000000
-    # Step 2/3: per-project missing or empty → fall back to global.
+    # Step 3b/3c: per-project missing or empty → fall back to global.
     #          (jq returns true when lastModelUsage is null OR keys array is empty.)
-    elif jq -e --arg cwd "$repo_root" '
+    elif jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
           ((.projects[$cwd].lastModelUsage // {}) | keys | length) == 0
           and
-          ([.projects[]?.lastModelUsage // {} | keys[]] | map(select(test("\\[1m\\]"))) | length > 0)
+          ([.projects[]?.lastModelUsage // {} | keys[]] | map(select(test($re))) | length > 0)
         ' "$HOME/.claude.json" >/dev/null 2>&1; then
       window_tokens=1000000
     fi
@@ -165,6 +206,18 @@ fi
 if (( est_tokens == 0 )); then
   est_tokens=$((current_bytes / 4))
   token_source="estimated"
+fi
+
+# --- Ratchet: a MEASURED count above 200k tokens cannot fit a 200k window, so
+#     a smaller AUTO-DETECTED window is provably wrong (e.g. a 1M-native model
+#     the regex doesn't know yet). Widen to 1M; never narrow, never ratchet on
+#     the bytes/4 estimate (it routinely overshoots the real count), and never
+#     second-guess an explicit HANDOFF_CTX_WINDOW_TOKENS — a user may pin a
+#     sub-1M budget on purpose (e.g. to rehearse 200k behavior on a 1M tier),
+#     and the documented contract is that the env override always wins.
+if [[ "$window_source" == "auto" && "$token_source" == "measured" ]] \
+   && (( est_tokens > 200000 && WINDOW_TOKENS < 1000000 )); then
+  WINDOW_TOKENS=1000000
 fi
 
 # --- Threshold check ---

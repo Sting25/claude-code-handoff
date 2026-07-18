@@ -39,13 +39,14 @@ repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"
 tx="$repo/tx.jsonl"
 cat > "$tx" <<'JSONL'
 {"type":"user","message":{"content":"hello there"}}
-{"type":"assistant","message":{"content":[{"type":"text","text":"first reply"}],"usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
-{"type":"assistant","message":{"content":[{"type":"text","text":"second reply"}],"usage":{"input_tokens":200,"cache_read_input_tokens":50,"cache_creation_input_tokens":25}}}
+{"type":"assistant","message":{"model":"claude-old-model","content":[{"type":"text","text":"first reply"}],"usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"assistant","message":{"model":"claude-fable-5","content":[{"type":"text","text":"second reply"}],"usage":{"input_tokens":200,"cache_read_input_tokens":50,"cache_creation_input_tokens":25}}}
 JSONL
 run_turn "$repo" S1 "$tx"
 dump="$bd/handoff_raw_S1.md"
 check "turn block appended"            yes "$([[ -f "$dump" ]] && grep -q 'first reply' "$dump" && echo yes || echo no)"
 check "last-assistant tokens (275)"    275 "$(cat "$bd/.ctx_tokens_S1" 2>/dev/null)"
+check "model from same last usage line" claude-fable-5 "$(cat "$bd/.ctx_model_S1" 2>/dev/null)"
 rm -rf "$repo"
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,7 @@ repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; mkdir -p "$bd"
 for i in 1 2 3 4 5; do
   echo x > "$bd/handoff_raw_OLD$i.md"
   echo 1 > "$bd/.handoff_raw_OLD$i.cursor"; echo 1 > "$bd/.ctx_OLD$i"
+  echo m > "$bd/.ctx_model_OLD$i"
   touch -d "2026-01-0$i 00:00" "$bd/handoff_raw_OLD$i.md"
 done
 tx="$repo/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
@@ -65,6 +67,7 @@ check "kept: OLD4"            yes "$(present handoff_raw_OLD4.md)"
 check "pruned: OLD3"          no  "$(present handoff_raw_OLD3.md)"
 check "pruned: OLD1"          no  "$(present handoff_raw_OLD1.md)"
 check "pruned sidecar .ctx_OLD1" no "$(present .ctx_OLD1)"
+check "pruned sidecar .ctx_model_OLD1" no "$(present .ctx_model_OLD1)"
 rm -rf "$repo"
 
 # ---------------------------------------------------------------------------

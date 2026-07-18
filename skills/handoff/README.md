@@ -117,15 +117,19 @@ Manual install:
    - **`Stop`** makes the raw-dump backup incremental — fires after
      every assistant turn, appends to
      `.claude/handoff_backups/handoff_raw_<session_id>.md`, prunes to
-     the 3 newest. Also records two context-usage measurements: the
+     the 3 newest. Also records three context-usage measurements: the
      real token count from the latest assistant turn's `usage` block
      into `.ctx_tokens_<session_id>` (sum of input + cache_read +
-     cache_creation, same number `/context` reports), and the
+     cache_creation, same number `/context` reports), that turn's
+     model id into `.ctx_model_<session_id>` (so the window can be
+     sized from the session's own model), and the
      transcript JSONL byte size into `.ctx_<session_id>` as a fallback.
    - **`UserPromptSubmit`** reads those files on the next prompt and,
      past a configurable threshold (default 50% of the context
-     window — auto-detected as 1M tokens if `~/.claude.json` shows a
-     `[1m]` model active for this project, else 200k), injects a
+     window — auto-detected as 1M tokens if the session's recorded
+     model matches the 1M-model regex (`[1m]` suffix or 1M-native
+     Claude 5 family id; see `HANDOFF_CTX_1M_MODEL_REGEX`), else 200k,
+     probing `~/.claude.json` when no model is recorded), injects a
      `<system-reminder>` telling the assistant to flag a `/handoff`
      moment passively. The signal is the actual token count, not an
      estimate — same precision as `/context`.
@@ -240,12 +244,22 @@ export HANDOFF_SS_DISABLE_RECOVER=1
 # --- Context-usage system-reminder hook (handoff_ctx_check.sh) ---
 
 # Total context budget the threshold is calculated against (tokens).
-# Default: auto-detected from ~/.claude.json — if this project's
-# lastModelUsage records a model with a `[1m]` suffix, defaults to
-# 1000000; otherwise 200000. Set explicitly to override the auto-
-# detection (e.g. to force 1M even before the project has been used
-# with a [1m] model, or to force 200k while testing on a 1M tier).
+# Default: auto-detected — if the session's recorded model
+# (.ctx_model_<session_id>, written by the Stop hook) matches the
+# 1M-model regex below, defaults to 1000000; a recorded non-matching
+# model means 200000; with no recorded model yet, ~/.claude.json's
+# lastModelUsage is probed against the same regex. Set explicitly to
+# override the auto-detection (e.g. to force 1M before any model has
+# been recorded, or to force 200k while testing on a 1M tier).
 export HANDOFF_CTX_WINDOW_TOKENS=200000
+
+# POSIX ERE matching model ids known to run a 1M-token context window.
+# Default: '\[1m\]|claude-(fable|mythos)-' — the `[1m]` beta suffix,
+# plus Claude 5 family ids which are 1M-native without any suffix.
+# Extend when new 1M models ship. (A measured token count above 200k
+# also ratchets the window to 1M regardless, since a 200k window
+# provably can't hold it.)
+export HANDOFF_CTX_1M_MODEL_REGEX='\[1m\]|claude-(fable|mythos)-'
 
 # Percent of the window at which the reminder fires.
 # Default: 50 — fire at 50% used. Drop to 30 for a more conservative
