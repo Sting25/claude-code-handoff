@@ -311,7 +311,8 @@ settings.json (backup first). The repo itself is untouched.
 │   ├── write_handoff.sh           # snapshot script (used by skill + SessionEnd hook); also rotates history
 │   ├── handoff_session_start.sh   # SessionStart hook: cats current + previous-as-fallback + history pointer
 │   ├── handoff_turn_append.sh     # Stop hook: per-turn dump + records transcript size
-│   └── handoff_ctx_check.sh       # UserPromptSubmit hook: flags /handoff past threshold
+│   ├── handoff_ctx_check.sh       # UserPromptSubmit hook: flags /handoff past threshold
+│   └── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
 ├── skills/
 │   ├── handoff/
 │   │   ├── SKILL.md               # /handoff slash command spec

@@ -38,7 +38,8 @@ manual copy-paste, no kickoff prompt to remember.
 │   ├── write_handoff.sh           # the snapshot script (no Claude required); rotates history
 │   ├── handoff_session_start.sh   # SessionStart hook body: cats current handoff + history-pointer
 │   ├── handoff_turn_append.sh     # Stop hook: per-turn raw dump + records transcript size
-│   └── handoff_ctx_check.sh       # UserPromptSubmit hook: flags /handoff past threshold
+│   ├── handoff_ctx_check.sh       # UserPromptSubmit hook: flags /handoff past threshold
+│   └── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
 ├── skills/
 │   ├── handoff/
 │   │   ├── SKILL.md               # invoked by /handoff
@@ -61,8 +62,11 @@ permissions. Edits in the repo flow live without re-installing.
 Manual install:
 
 1. Drop `bin/write_handoff.sh`, `bin/handoff_turn_append.sh`,
-   `bin/handoff_ctx_check.sh`, and `bin/handoff_session_start.sh` into
-   `~/.claude/bin/` and `chmod +x` all four.
+   `bin/handoff_ctx_check.sh`, `bin/handoff_session_start.sh`, and
+   `bin/handoff_recover_tail.sh` into `~/.claude/bin/` and `chmod +x`
+   all five. (Without `handoff_recover_tail.sh`, `/handoff-recover`
+   still runs but silently loses the crash-truncated final turn — the
+   content the helper exists to rescue.)
 2. Drop `skills/handoff/SKILL.md`, `skills/handoff-more/SKILL.md`, and
    `skills/handoff-recover/SKILL.md` into the matching
    `~/.claude/skills/<name>/` directories.
