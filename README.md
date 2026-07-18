@@ -81,7 +81,7 @@ A third hook (`Stop`) does two jobs each assistant turn:
    turn's model id into `.ctx_model_<session_id>`, and the transcript
    JSONL byte size into `.ctx_<session_id>` as a fallback.
    A fourth hook (`UserPromptSubmit`) reads those on the next prompt
-   and, if usage has crossed ~50% of the configured context window
+   and, if usage has crossed ~40% of the configured context window
    (auto-detected as 1,000,000 tokens if the session's recorded model
    matches the 1M-model regex — the `[1m]` beta suffix or a 1M-native
    Claude 5 family id, extendable via `HANDOFF_CTX_1M_MODEL_REGEX` —

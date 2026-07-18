@@ -224,7 +224,8 @@ yourself; the user has the meter, the user is the source of truth.
 
 The `handoff_ctx_check.sh` `UserPromptSubmit` hook measures the Claude
 Code transcript JSONL each turn and emits a `<system-reminder>` past a
-threshold (default 50% of a 200000-token window; both configurable).
+threshold (default 40% of the auto-detected context window — 200k, or
+1M for 1M-native models; both configurable).
 This is a **real measurement**, not a fabricated %, so it's a
 legitimate signal to act on.
 
@@ -232,7 +233,7 @@ When the reminder lands, surface it to the user as a **passive
 mention** — not a choice, not a question. One line, no question mark,
 no "want me to?". Example:
 
-> Flagging: ~50% of context used — natural /handoff moment if you want
+> Flagging: ~40% of context used — natural /handoff moment if you want
 > to lock in the prose while I'm still sharp.
 
 Then continue answering the user's actual prompt. The hook applies its

@@ -125,7 +125,7 @@ Manual install:
      sized from the session's own model), and the
      transcript JSONL byte size into `.ctx_<session_id>` as a fallback.
    - **`UserPromptSubmit`** reads those files on the next prompt and,
-     past a configurable threshold (default 50% of the context
+     past a configurable threshold (default 40% of the context
      window — auto-detected as 1M tokens if the session's recorded
      model matches the 1M-model regex (`[1m]` suffix or 1M-native
      Claude 5 family id; see `HANDOFF_CTX_1M_MODEL_REGEX`), else 200k,
@@ -262,9 +262,9 @@ export HANDOFF_CTX_WINDOW_TOKENS=200000
 export HANDOFF_CTX_1M_MODEL_REGEX='\[1m\]|claude-(fable|mythos)-'
 
 # Percent of the window at which the reminder fires.
-# Default: 50 — fire at 50% used. Drop to 30 for a more conservative
-# nudge, raise to 70 if 50% feels too eager.
-export HANDOFF_CTX_THRESHOLD_PCT=50
+# Default: 40 — fire at 40% used (lowered from 50 in 0.8.4). Drop to 30
+# for a more conservative nudge, raise (e.g. 60) if 40% feels too eager.
+export HANDOFF_CTX_THRESHOLD_PCT=40
 
 # Transcript growth (in KB) required between consecutive reminders.
 # Default: 100 — once the hook has flagged, it won't flag again until
@@ -337,7 +337,7 @@ hook command in `settings.json` to drop the `echo` lines.
   shows. The byte-size estimate is kept only as a fallback for the
   first prompt of a fresh session before any Stop hook has fired,
   or for older installs that haven't pulled the updated turn-append
-  script. Tune `HANDOFF_CTX_THRESHOLD_PCT` if 50% fires too eagerly
+  script. Tune `HANDOFF_CTX_THRESHOLD_PCT` if 40% fires too eagerly
   or too late for your workloads.
 - **`SessionEnd` hook fires on session exit, not on `/clear`.** If
   you `/clear` to recycle context within the same session, no handoff
