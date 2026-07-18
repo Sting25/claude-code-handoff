@@ -94,14 +94,27 @@ if (( in_git )) \
   # in `git status` rather than leaking.
   if [[ ! -L "$gi" ]]; then
     existed=1; [[ -e "$gi" ]] || existed=0
-    if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
-      printf '\n' >> "$gi"
+    # Best-effort append. An UNWRITABLE .gitignore (root-owned, chmod a-w, a
+    # shared checkout) used to abort the whole hook right here under set -e —
+    # before the lock, the dump write, and the ctx sidecars — on EVERY Stop
+    # fire, silently ('2>/dev/null || true' wiring). The bootstrap is a
+    # nicety, not a dependency of the dump: on failure warn and continue,
+    # accepting the same degraded outcome as the symlink skip above (the
+    # backup dir shows in `git status`). Commands in an `if` condition are
+    # exempt from set -e, so the group can fail without killing the script.
+    if {
+         if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
+           printf '\n' >> "$gi"
+         fi
+         echo ".claude/handoff_backups/" >> "$gi"
+       } 2>/dev/null; then
+      # A .gitignore is not secret; don't let the script-wide `umask 077` leave a
+      # freshly-created one 0600 (see write_handoff.sh). Only normalize a file WE
+      # just created; never touch one the user already had.
+      (( existed )) || chmod 644 "$gi" 2>/dev/null || true
+    else
+      echo "handoff_turn_append.sh: cannot append to $gi; skipping .gitignore bootstrap (the backup dir may show in git status)." >&2
     fi
-    echo ".claude/handoff_backups/" >> "$gi"
-    # A .gitignore is not secret; don't let the script-wide `umask 077` leave a
-    # freshly-created one 0600 (see write_handoff.sh). Only normalize a file WE
-    # just created; never touch one the user already had.
-    (( existed )) || chmod 644 "$gi" 2>/dev/null || true
   fi
 fi
 

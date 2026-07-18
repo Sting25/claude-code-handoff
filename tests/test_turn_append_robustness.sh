@@ -84,4 +84,40 @@ check "array-user-last: exactly one turn block (no dup)" 1 \
   "$(grep -c '## Turn at' "$bd/handoff_raw_C1.md" 2>/dev/null)"
 rm -rf "$repo"
 
+# ===========================================================================
+echo "handoff_turn_append.sh — unwritable .gitignore must not abort the hook (audit 2026-07-17)"
+# The unguarded bootstrap appends used to die under set -e BEFORE the lock and
+# the dump write — every layer of the safety net lost, on every Stop fire,
+# silently. Now: warn to stderr, continue, dump still written. (Both hooks'
+# writes go through as root regardless of file modes, so skip there.)
+if [[ "$(id -u)" == "0" ]]; then
+  skip "running as root — chmod a-w cannot make .gitignore unwritable"
+else
+  repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; tx="$repo/tx.jsonl"
+  printf '{"type":"user","message":{"content":"ROGI_marker"}}\n' > "$tx"
+  must cat > "$repo/.gitignore" <<'EOF'
+node_modules
+EOF
+  must chmod a-w "$repo/.gitignore"
+  err="$( cd "$repo" && printf '{"session_id":"ROGI","transcript_path":"%s"}' "$tx" \
+      | bash "$TA" 2>&1 >/dev/null )"; rc=$?
+  check "ro .gitignore: hook exits 0"          0   "$rc"
+  check "ro .gitignore: dump still written"    yes \
+    "$(grep -q 'ROGI_marker' "$bd/handoff_raw_ROGI.md" 2>/dev/null && echo yes || echo no)"
+  check "ro .gitignore: cursor advanced"       yes "$([[ -f "$bd/.handoff_raw_ROGI.cursor" ]] && echo yes || echo no)"
+  check "ro .gitignore: warns on stderr"       yes "$(printf '%s' "$err" | grep -q 'cannot append' && echo yes || echo no)"
+  check "ro .gitignore: target file untouched" yes \
+    "$([[ "$(cat "$repo/.gitignore")" == "node_modules" ]] && echo yes || echo no)"
+
+  # Same failure mode in write_handoff.sh's bootstrap: the SessionEnd write
+  # must survive and still publish the handoff doc.
+  WH="$REPO_ROOT/bin/write_handoff.sh"
+  ( cd "$repo" && bash "$WH" >/dev/null 2>&1 ); rc=$?
+  check "ro .gitignore: write_handoff exits 0"     0   "$rc"
+  check "ro .gitignore: handoff doc still written" yes \
+    "$(grep -q 'auto-generated' "$repo/.claude/handoff_current.md" 2>/dev/null && echo yes || echo no)"
+  chmod u+w "$repo/.gitignore" 2>/dev/null
+  rm -rf "$repo"
+fi
+
 finish

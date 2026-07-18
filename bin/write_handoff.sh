@@ -227,10 +227,21 @@ bootstrap_gitignore() {
     return
   fi
   local existed=1; [[ -e "$gi" ]] || existed=0
-  if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
-    printf '\n' >> "$gi"
+  # Best-effort append. An UNWRITABLE .gitignore used to abort the entire
+  # handoff write here under set -e (the SessionEnd safety net died silently
+  # on every fire, '>/dev/null 2>&1 || true' wiring). Warn and continue
+  # instead, mirroring the symlink skip above — the doc write itself does not
+  # depend on the bootstrap. Commands in an `if` condition are exempt from
+  # set -e, so the group can fail without killing the script.
+  if ! {
+       if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
+         printf '\n' >> "$gi"
+       fi
+       echo "$entry" >> "$gi"
+     } 2>/dev/null; then
+    echo "write_handoff.sh: cannot append to $gi; skipping .gitignore bootstrap for '$entry'." >&2
+    return 0
   fi
-  echo "$entry" >> "$gi"
   # A .gitignore is not secret and is normally world-readable + committed; the
   # script-wide `umask 077` (which protects the handoff docs/dumps) would
   # otherwise leave a freshly-created one 0600 — surprising for a shared project
