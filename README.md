@@ -1,9 +1,14 @@
 # claude-code-handoff
 
-Claude Code sessions hit a context limit. When they do, the next
-session starts blind — you re-explain the project, the in-flight work,
-the decisions you made twenty minutes ago, all from memory. This skill
-makes the next session not blind.
+**Compaction is not curation.** When a Claude Code session runs long,
+auto-compaction summarizes the conversation into a digest you don't
+control, can't audit, and never read. Native memory carries durable
+facts across sessions — but facts aren't the narrative: what's in
+flight, what you decided an hour ago and why, what the next step is
+and what it's waiting on. That part deserves to be written down
+deliberately, by the model, while it's still sharp — in a short,
+human-readable file you can read, edit, and trust. This skill makes
+the handoff that deliberate act instead of a lossy automatic one.
 
 **In plain terms, it:**
 
