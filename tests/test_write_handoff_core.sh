@@ -93,6 +93,30 @@ check "rotated current survives (newest)"    yes "$([[ -f "$hist/handoff_2020-06
 check "oldest history pruned"                no  "$([[ -f "$hist/handoff_2020-01-01_000000.md" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- Placeholder churn guard: an outgoing UNEDITED placeholder is deleted,
+#     not archived. The PreCompact safety net can now produce several
+#     placeholder writes per session; archiving each one would evict curated
+#     snapshots from a keep-N history. -----------------------------------
+repo="$(mk_repo_gitignored)"
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 )     # writes a placeholder
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 )     # rotates the placeholder out
+count="$(find "$repo/.claude/handoff_history" -maxdepth 1 -name 'handoff_*.md' 2>/dev/null | wc -l | tr -d ' ')"
+check "placeholder rotation -> deleted, not archived" 0 "$count"
+# Negative control: a CURATED outgoing doc is still archived normally.
+must cat > "$repo/.claude/handoff_current.md" <<'EOF'
+# h
+
+## Notes from this session
+
+curated notes MARKER_ROTCUR
+EOF
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 )
+count="$(find "$repo/.claude/handoff_history" -maxdepth 1 -name 'handoff_*.md' 2>/dev/null | wc -l | tr -d ' ')"
+check "curated rotation -> archived (1 entry)" 1 "$count"
+check "curated rotation -> prose preserved in history" yes \
+  "$(grep -rq 'MARKER_ROTCUR' "$repo/.claude/handoff_history" && echo yes || echo no)"
+rm -rf "$repo"
+
 # --- Invalid HANDOFF_HISTORY_KEEP falls back to 5 (no history wipe) ----------
 # Regression: KEEP=-1 made prune run `tail -n +0`, which on GNU deletes EVERY
 # history file (silent data loss). A negative/garbage value must clamp to the

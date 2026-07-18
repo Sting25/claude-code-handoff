@@ -287,6 +287,19 @@ file_mtime_stamp() {
 
 rotate_existing_handoff() {
   [[ -f "$handoff_path" ]] || return 0
+  # An outgoing UNEDITED placeholder is deleted, not archived: it carries no
+  # curated prose (only mechanical git state the incoming write regenerates),
+  # and with the PreCompact safety net a session can now produce several
+  # placeholder writes — archiving each one would churn a keep-N history and
+  # evict the curated snapshots that are the whole point of retention. Not
+  # archiving placeholders also means handoff_session_start's history
+  # fallback lands on CURATED files more often. Detection reuses the same
+  # position-scoped check as --if-curated, so a curated file that merely
+  # quotes the sentinel is still archived normally.
+  if handoff_is_unedited_placeholder "$handoff_path"; then
+    rm -f "$handoff_path"
+    return 0
+  fi
   [[ "$HISTORY_KEEP" -gt 0 ]] || return 0
   mkdir -p "$history_dir"
   local ts archived

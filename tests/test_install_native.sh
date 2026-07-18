@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# install.sh wiring for the native-integration surface:
+#   A. fresh install adds PreCompact + PostCompact hooks and the statusLine
+#   B. idempotent re-run (no duplicate entries, no-change backup removed)
+#   C. an EXISTING user statusLine is never overwritten (skip msg emitted) —
+#      the mandated negative control
+#   D. uninstall removes ours (incl. statusLine when ours), preserves a user's
+#      own statusLine and co-located PreCompact hook commands
+#   E. --doctor covers both new scripts + reports the statusLine state
+#   F. jq-missing manual snippet documents PreCompact/PostCompact/statusLine
+#      with the only-if-unset note
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+echo "install.sh native-integration wiring (PreCompact/PostCompact/statusLine)"
+
+if ! command -v jq >/dev/null 2>&1; then
+  skip "jq not installed — install.sh settings patching is a no-op without it"
+  finish
+  exit
+fi
+
+HOME_DIR=""
+# run_install <init|__ABSENT__> [install args...] ; sets RC, OUT, HOME_DIR.
+run_install() {
+  local init="$1"; shift
+  local src; src="$(mktemp -d)"; HOME_DIR="$(mktemp -d)"
+  cp "$REPO_ROOT/install.sh" "$src/"
+  cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src/"
+  [[ "$init" != "__ABSENT__" ]] && printf '%s' "$init" > "$HOME_DIR/settings.json"
+  OUT="$(CLAUDE_HOME="$HOME_DIR" bash "$src/install.sh" "$@" 2>&1)"
+  RC=$?
+  rm -rf "$src"
+}
+sj()  { jq -r "$1" "$HOME_DIR/settings.json" 2>/dev/null; }
+has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
+
+# --- A. fresh install wires the new surface ----------------------------------
+run_install __ABSENT__
+check "fresh: exit 0"                    0   "$RC"
+check "fresh: PreCompact present"        yes "$(has "$(sj '.hooks.PreCompact[0].hooks[0].command')" 'write_handoff.sh --if-curated')"
+check "fresh: PreCompact has no matcher" null "$(sj '.hooks.PreCompact[0].matcher // "null"')"
+check "fresh: PostCompact present"       yes "$(has "$(sj '.hooks.PostCompact[0].hooks[0].command')" 'handoff_compact_reset.sh')"
+check "fresh: statusLine wired"          yes "$(has "$(sj '.statusLine.command')" 'handoff_statusline.sh')"
+check "fresh: statusLine type command"   command "$(sj '.statusLine.type')"
+check "fresh: reset perm added"          yes "$(sj '.permissions.allow | join(" ")' | grep -q handoff_compact_reset && echo yes || echo no)"
+check "fresh: statusline perm added"     yes "$(sj '.permissions.allow | join(" ")' | grep -q handoff_statusline && echo yes || echo no)"
+
+# --- B. idempotent re-run ----------------------------------------------------
+before="$(cat "$HOME_DIR/settings.json")"
+src2="$(mktemp -d)"; cp "$REPO_ROOT/install.sh" "$src2/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src2/"
+out2="$(CLAUDE_HOME="$HOME_DIR" bash "$src2/install.sh" 2>&1)"
+after="$(cat "$HOME_DIR/settings.json")"
+check "re-run: settings unchanged"       same "$([[ "$before" == "$after" ]] && echo same || echo changed)"
+check "re-run: single PreCompact entry"  1    "$(sj '.hooks.PreCompact | length')"
+check "re-run: single PostCompact entry" 1    "$(sj '.hooks.PostCompact | length')"
+check "re-run: no-change backup removed" yes  "$(has "$out2" "no settings.json changes")"
+check "re-run: statusLine reported ours" yes  "$(has "$out2" "statusLine (already ours)")"
+rm -rf "$HOME_DIR" "$src2"
+
+# --- C. existing user statusLine is NEVER overwritten (negative control) -----
+run_install '{"statusLine":{"type":"command","command":"my-own-statusline.sh"}}'
+check "user sl: exit 0"                  0   "$RC"
+check "user sl: value untouched"         "my-own-statusline.sh" "$(sj '.statusLine.command')"
+check "user sl: skip message emitted"    yes "$(has "$OUT" "skip    statusLine")"
+check "user sl: manual recipe in msg"    yes "$(has "$OUT" "call our script from your existing")"
+check "user sl: hooks still installed"   yes "$(has "$(sj '.hooks.PreCompact[0].hooks[0].command')" 'write_handoff.sh')"
+rm -rf "$HOME_DIR"
+
+# --- D. uninstall: removes ours; preserves user's statusLine + co-located ----
+# D1: our own full install, then uninstall -> statusLine + new hooks gone.
+run_install __ABSENT__
+src3="$(mktemp -d)"; cp "$REPO_ROOT/install.sh" "$src3/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src3/"
+CLAUDE_HOME="$HOME_DIR" bash "$src3/install.sh" --uninstall >/dev/null 2>&1
+check "uninstall: statusLine (ours) removed" null "$(sj '.statusLine // "null"')"
+check "uninstall: PreCompact removed"        null "$(sj '.hooks.PreCompact // "null"')"
+check "uninstall: PostCompact removed"       null "$(sj '.hooks.PostCompact // "null"')"
+check "uninstall: reset perm removed"        ""   "$(sj '.permissions.allow // [] | .[]' | grep handoff_compact_reset)"
+rm -rf "$HOME_DIR" "$src3"
+
+# D2: a user's own statusLine + a co-located PreCompact user command survive.
+read -r -d '' USERMIX <<'JSON' || true
+{ "statusLine": {"type":"command","command":"my-own-statusline.sh"},
+  "hooks": {
+    "PreCompact": [ { "hooks": [
+      { "type": "command", "command": "bash $HOME/.claude/bin/write_handoff.sh --if-curated >/dev/null 2>&1 || true" },
+      { "type": "command", "command": "echo USER_PRECOMPACT" }
+    ] } ]
+  } }
+JSON
+run_install "$USERMIX" --uninstall
+check "uninstall: user statusLine kept"      "my-own-statusline.sh" "$(sj '.statusLine.command')"
+check "uninstall: user sl 'not ours' msg"    yes "$(has "$OUT" "statusLine (not ours; leaving alone)")"
+check "uninstall: co-located user cmd kept"  yes "$(has "$(sj '.hooks.PreCompact[0].hooks[0].command')" 'USER_PRECOMPACT')"
+check "uninstall: our PreCompact cmd gone"   no  "$(has "$(sj '[.. | objects | .command? // empty] | join(" ")')" 'write_handoff.sh')"
+rm -rf "$HOME_DIR"
+
+# --- E. --doctor covers the new scripts + statusLine state -------------------
+run_install __ABSENT__
+src4="$(mktemp -d)"; cp "$REPO_ROOT/install.sh" "$src4/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src4/"
+dout="$(CLAUDE_HOME="$HOME_DIR" bash "$src4/install.sh" --doctor 2>&1)"; drc=$?
+check "doctor: exit 0 (healthy)"            0   "$drc"
+check "doctor: checks handoff_statusline"   yes "$(has "$dout" "bin/handoff_statusline.sh")"
+check "doctor: checks handoff_compact_reset" yes "$(has "$dout" "bin/handoff_compact_reset.sh")"
+check "doctor: statusLine wired (ours)"     yes "$(has "$dout" "statusLine wired (ours)")"
+# user's-own state
+printf '%s' '{"statusLine":{"type":"command","command":"my-own.sh"}}' > "$HOME_DIR/settings.json"
+dout="$(CLAUDE_HOME="$HOME_DIR" bash "$src4/install.sh" --doctor 2>&1)"; drc=$?
+check "doctor: user's own sl reported"      yes "$(has "$dout" "user's own")"
+check "doctor: user's own sl not broken"    0   "$drc"
+# unset state
+printf '%s' '{}' > "$HOME_DIR/settings.json"
+dout="$(CLAUDE_HOME="$HOME_DIR" bash "$src4/install.sh" --doctor 2>&1)"; drc=$?
+check "doctor: unset sl reported"           yes "$(has "$dout" "statusLine unset")"
+check "doctor: unset sl not broken"         0   "$drc"
+rm -rf "$HOME_DIR" "$src4"
+
+# --- F. jq-missing manual snippet documents the new surface ------------------
+nojq="$(mktemp -d)"   # shim dir whose jq is a failing stub is NOT enough:
+# install.sh checks `command -v jq`, so build a PATH that simply lacks jq.
+for d in ${PATH//:/ }; do
+  [[ -d "$d" ]] || continue
+  for f in "$d"/*; do
+    b="$(basename "$f")"
+    [[ "$b" == "jq" ]] && continue
+    [[ -e "$nojq/$b" ]] || ln -s "$f" "$nojq/$b" 2>/dev/null || true
+  done
+done
+src5="$(mktemp -d)"; HOME_DIR="$(mktemp -d)"
+cp "$REPO_ROOT/install.sh" "$src5/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src5/"
+snip="$(PATH="$nojq" CLAUDE_HOME="$HOME_DIR" bash "$src5/install.sh" 2>&1)"
+check "snippet: PreCompact line"        yes "$(has "$snip" '"PreCompact"')"
+check "snippet: PostCompact line"       yes "$(has "$snip" '"PostCompact"')"
+check "snippet: statusLine block"       yes "$(has "$snip" '"statusLine"')"
+check "snippet: only-if-unset NOTE"     yes "$(has "$snip" "only add the \"statusLine\" key if you don't already have")"
+rm -rf "$src5" "$HOME_DIR" "$nojq"
+
+finish
