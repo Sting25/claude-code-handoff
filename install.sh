@@ -5,8 +5,10 @@
 #   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
 #      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
 #   2. Patches ~/.claude/settings.json to add four hooks
-#      (SessionStart / SessionEnd / Stop / UserPromptSubmit) and four
-#      permission entries.
+#      (SessionStart / SessionEnd / Stop / UserPromptSubmit), five
+#      permission entries, and — only when you don't already have one —
+#      a statusLine command (never overwrites an existing statusLine;
+#      prints the manual step instead).
 #      Requires jq; falls back to printing the snippet if jq is missing.
 #
 # Idempotent. Existing files at symlink targets are backed up to
@@ -133,11 +135,18 @@ done
   se_cmd='bash $HOME/.claude/bin/write_handoff.sh --if-curated >/dev/null 2>&1 || true'
   st_cmd='bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true'
   up_cmd='bash $HOME/.claude/bin/handoff_ctx_check.sh 2>/dev/null || true'
+  # statusLine command. No `|| true` here, unlike the hooks: stdout IS the
+  # product (the rendered line), and a nonzero exit just blanks the line — there
+  # is no hook pipeline to poison.
+  sl_cmd='bash $HOME/.claude/bin/handoff_statusline.sh 2>/dev/null'
 }
 perm_write="Bash(bash $HOME/.claude/bin/write_handoff.sh)"
 perm_stop="Bash(bash $HOME/.claude/bin/handoff_turn_append.sh)"
 perm_ctx="Bash(bash $HOME/.claude/bin/handoff_ctx_check.sh)"
 perm_ss="Bash(bash $HOME/.claude/bin/handoff_session_start.sh)"
+# Consistency with the four above (handoff_session_start already set the
+# precedent of allowlisting a hook-only script): harmless if never used.
+perm_sl="Bash(bash $HOME/.claude/bin/handoff_statusline.sh)"
 
 # Marker substrings used to detect prior installs (and to remove on uninstall).
 # These are the full installed command path (literal $HOME, exactly as stored in
@@ -157,6 +166,7 @@ perm_ss="Bash(bash $HOME/.claude/bin/handoff_session_start.sh)"
   se_marker='$HOME/.claude/bin/write_handoff.sh'
   st_marker='$HOME/.claude/bin/handoff_turn_append.sh'
   up_marker='$HOME/.claude/bin/handoff_ctx_check.sh'
+  sl_marker='$HOME/.claude/bin/handoff_statusline.sh'
 }
 
 # -------------------------------------------------------------------- symlinks
@@ -300,6 +310,7 @@ install_symlinks() {
   link "$repo_root/bin/handoff_ctx_check.sh"      "$claude_home/bin/handoff_ctx_check.sh"
   link "$repo_root/bin/handoff_session_start.sh"  "$claude_home/bin/handoff_session_start.sh"
   link "$repo_root/bin/handoff_recover_tail.sh"   "$claude_home/bin/handoff_recover_tail.sh"
+  link "$repo_root/bin/handoff_statusline.sh"     "$claude_home/bin/handoff_statusline.sh"
   link "$repo_root/skills/handoff/SKILL.md"          "$claude_home/skills/handoff/SKILL.md"
   link "$repo_root/skills/handoff/README.md"         "$claude_home/skills/handoff/README.md"
   link "$repo_root/skills/handoff-more/SKILL.md"     "$claude_home/skills/handoff-more/SKILL.md"
@@ -313,7 +324,8 @@ install_symlinks() {
            "$repo_root/bin/handoff_turn_append.sh" \
            "$repo_root/bin/handoff_ctx_check.sh" \
            "$repo_root/bin/handoff_session_start.sh" \
-           "$repo_root/bin/handoff_recover_tail.sh" 2>/dev/null || true
+           "$repo_root/bin/handoff_recover_tail.sh" \
+           "$repo_root/bin/handoff_statusline.sh" 2>/dev/null || true
 }
 
 uninstall_symlinks() {
@@ -322,6 +334,7 @@ uninstall_symlinks() {
   unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"      "$repo_root/bin/handoff_ctx_check.sh"
   unlink_if_ours "$claude_home/bin/handoff_session_start.sh"  "$repo_root/bin/handoff_session_start.sh"
   unlink_if_ours "$claude_home/bin/handoff_recover_tail.sh"   "$repo_root/bin/handoff_recover_tail.sh"
+  unlink_if_ours "$claude_home/bin/handoff_statusline.sh"     "$repo_root/bin/handoff_statusline.sh"
   unlink_if_ours "$claude_home/skills/handoff/SKILL.md"          "$repo_root/skills/handoff/SKILL.md"
   unlink_if_ours "$claude_home/skills/handoff/README.md"         "$repo_root/skills/handoff/README.md"
   unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$repo_root/skills/handoff-more/SKILL.md"
@@ -347,10 +360,17 @@ Paste this into $settings under "hooks" and "permissions":
       "$perm_write",
       "$perm_stop",
       "$perm_ctx",
-      "$perm_ss"
+      "$perm_ss",
+      "$perm_sl"
     ]
-  }
+  },
+  "statusLine": { "type": "command", "command": "$sl_cmd" }
 }
+
+NOTE: only add the "statusLine" key if you don't already have a statusLine
+set — it is a single slot (not a list like hooks), so pasting it would
+replace your existing status line. To keep yours AND get handoff's context
+numbers, call our script from your existing statusline command instead.
 EOF
 }
 
@@ -383,6 +403,42 @@ maybe_install_perm() {
   ' "$settings" > "$settings.tmp"
   mv "$settings.tmp" "$settings"
   echo "  add     permission: $perm"
+}
+
+# statusLine is a single settings.json slot (unlike hooks, which are lists we
+# can append to), so wiring it must never clobber a user's own setting:
+#   - absent/null           -> set ours
+#   - present and ours      -> ok (idempotent re-run)
+#   - present and NOT ours  -> untouched; print the documented manual step.
+maybe_install_statusline() {
+  if jq -e '(.statusLine // null) == null' "$settings" >/dev/null 2>&1; then
+    jq --arg c "$sl_cmd" '.statusLine = {"type": "command", "command": $c}' \
+      "$settings" > "$settings.tmp"
+    mv "$settings.tmp" "$settings"
+    echo "  add     statusLine"
+    return
+  fi
+  if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
+       "$settings" >/dev/null 2>&1; then
+    echo "  ok      statusLine (already ours)"
+    return
+  fi
+  echo "  skip    statusLine (you already have one — to use handoff's instead, set"
+  echo "          \"statusLine\": {\"type\": \"command\", \"command\": \"$sl_cmd\"}"
+  echo "          yourself, or call our script from your existing statusline command)"
+}
+
+maybe_uninstall_statusline() {
+  if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
+       "$settings" >/dev/null 2>&1; then
+    jq 'del(.statusLine)' "$settings" > "$settings.tmp"
+    mv "$settings.tmp" "$settings"
+    echo "  remove  statusLine"
+  elif jq -e '(.statusLine // null) != null' "$settings" >/dev/null 2>&1; then
+    echo "  ok      statusLine (not ours; leaving alone)"
+  else
+    echo "  ok      statusLine (not present)"
+  fi
 }
 
 maybe_uninstall_hook() {
@@ -529,10 +585,12 @@ patch_settings() {
   maybe_install_hook SessionEnd       "$se_marker" "$se_cmd"
   maybe_install_hook Stop             "$st_marker" "$st_cmd"
   maybe_install_hook UserPromptSubmit "$up_marker" "$up_cmd"
+  maybe_install_statusline
   maybe_install_perm "$perm_write"
   maybe_install_perm "$perm_stop"
   maybe_install_perm "$perm_ctx"
   maybe_install_perm "$perm_ss"
+  maybe_install_perm "$perm_sl"
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   # If no change vs backup, drop the redundant backup.
   if cmp -s "$settings" "$settings.bak.$ts"; then
@@ -550,10 +608,13 @@ unpatch_settings() {
     echo "  - $se_marker"
     echo "  - $st_marker"
     echo "  - $up_marker"
+    echo "the \"statusLine\" entry if its command contains:"
+    echo "  - $sl_marker"
     echo "and the permission entries:"
     echo "  - $perm_write"
     echo "  - $perm_stop"
     echo "  - $perm_ctx"
+    echo "  - $perm_sl"
     return
   fi
   if [[ ! -f "$settings" ]]; then
@@ -577,10 +638,12 @@ unpatch_settings() {
   maybe_uninstall_hook SessionEnd       "$se_marker"
   maybe_uninstall_hook Stop             "$st_marker"
   maybe_uninstall_hook UserPromptSubmit "$up_marker"
+  maybe_uninstall_statusline
   maybe_uninstall_perm "$perm_write"
   maybe_uninstall_perm "$perm_stop"
   maybe_uninstall_perm "$perm_ctx"
   maybe_uninstall_perm "$perm_ss"
+  maybe_uninstall_perm "$perm_sl"
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   if cmp -s "$settings" "$settings.bak.$ts"; then
     rm "$settings.bak.$ts"
@@ -603,7 +666,7 @@ doctor() {
     echo "  BROKEN  jq not found on PATH (Stop hook, ctx nudge, and /handoff-recover tail rescue are silently disabled)"
     broken=$((broken + 1))
   fi
-  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start; do
+  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_statusline; do
     dst="$claude_home/bin/$name.sh"
     if [[ -e "$dst" ]]; then
       if [[ -L "$dst" ]]; then
@@ -621,6 +684,21 @@ doctor() {
     fi
   done
   echo
+  # statusLine wiring report — informational only, never counts toward
+  # `broken`: an unwired or user-owned statusLine is a legitimate state (we
+  # never overwrite a user's own setting), not a fault. Only a dangling
+  # SCRIPT (reported by the loop above) is real breakage.
+  if command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
+    if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
+         "$settings" >/dev/null 2>&1; then
+      echo "  ok      statusLine wired (ours)"
+    elif jq -e '(.statusLine // null) != null' "$settings" >/dev/null 2>&1; then
+      echo "  info    statusLine present (user's own — manual wiring documented in README)"
+    else
+      echo "  info    statusLine unset (re-run ./install.sh to wire it)"
+    fi
+    echo
+  fi
   if (( broken )); then
     echo "doctor: $broken hook(s) broken or missing." >&2
     echo "        Re-run ./install.sh from a persistent clone (not a /tmp checkout)." >&2
