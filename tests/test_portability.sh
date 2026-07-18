@@ -56,7 +56,7 @@ for i in 1 2 3 4 5; do
   echo x > "$bd/handoff_raw_OLD$i.md"
   echo 1 > "$bd/.handoff_raw_OLD$i.cursor"; echo 1 > "$bd/.ctx_OLD$i"
   echo m > "$bd/.ctx_model_OLD$i"
-  touch -d "2026-01-0$i 00:00" "$bd/handoff_raw_OLD$i.md"
+  touch -d "2026-01-0${i}T00:00:00Z" "$bd/handoff_raw_OLD$i.md"
 done
 tx="$repo/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
 run_turn "$repo" NEW "$tx"   # creates handoff_raw_NEW.md (newest) then prunes
@@ -91,7 +91,8 @@ check "fresh lock blocks append" no "$([[ -f "$bd2/handoff_raw_HELD.md" ]] && ec
 # 1s window and backdate the dir so it qualifies without a real wait.
 repo3="$(mk_repo)"; bd3="$repo3/.claude/handoff_backups"; mkdir -p "$bd3"
 mkdir "$bd3/.handoff_raw_STALE.lock.d"
-touch -d "1 hour ago" "$bd3/.handoff_raw_STALE.lock.d"
+# POSIX `touch -t` (GNU + BSD); any mtime older than the forced 1s window works.
+touch -t 202001010000 "$bd3/.handoff_raw_STALE.lock.d"
 tx3="$repo3/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx3"
 ( cd "$repo3" && PATH="$noflock" HANDOFF_LOCK_STALE_SECS=1 \
     printf '{"session_id":"STALE","transcript_path":"%s"}' "$tx3" \
@@ -106,21 +107,26 @@ rotate_stamp() {  # <PATH override> -> echoes the rotated history filename
   local pathov="$1" repo
   repo="$(mk_repo)"; mkdir -p "$repo/.claude"
   echo "old handoff" > "$repo/.claude/handoff_current.md"
-  touch -d "2020-03-04 05:06:07 UTC" "$repo/.claude/handoff_current.md"
+  touch -d "2020-03-04T05:06:07Z" "$repo/.claude/handoff_current.md"
   ( cd "$repo" && PATH="$pathov" HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 bash "$WH" >/dev/null 2>&1 )
-  ls "$repo/.claude/handoff_history/" 2>/dev/null | head -1
+  find "$repo/.claude/handoff_history" -mindepth 1 -maxdepth 1 2>/dev/null | sed 's|.*/||' | sort | head -n 1
   rm -rf "$repo"
 }
 check "GNU: stamp reflects mtime" "handoff_2020-03-04_050607.md" "$(rotate_stamp "$PATH")"
 
-# BSD shims: stat supports only -f %m, date supports only -r EPOCH.
+# BSD shims: stat supports only -f %m, date supports only -r EPOCH. They reject
+# the GNU spellings, then delegate to the real tool in whichever dialect it
+# speaks (GNU translation first, BSD pass-through fallback) so the sim works on
+# both GNU and BSD hosts.
 bsd="$(path_without stat)"; bsd="$(PATH="$bsd" path_without date)"  # drop both real tools
 REAL_STAT="$(command -v stat)"; REAL_DATE="$(command -v date)"
 cat > "$bsd/stat" <<EOF
 #!/usr/bin/env bash
 case " \$* " in
   *" -c "*) exit 1 ;;                                   # GNU form: unsupported
-  *" -f "*) [[ "\$2" == "%m" ]] && exec "$REAL_STAT" -c %Y "\$3"; exit 1 ;;
+  *" -f "*) [[ "\$2" == "%m" ]] || exit 1
+            "$REAL_STAT" -c %Y "\$3" 2>/dev/null && exit 0
+            exec "$REAL_STAT" -f %m "\$3" ;;
 esac
 exit 1
 EOF
@@ -135,7 +141,12 @@ for ((; i<=\$#; i++)); do
     *)  new+=("\$a") ;;
   esac
 done
-if (( have_r )); then exec "\$real" -d "@\$epoch" "\${new[@]}"; else exec "\$real" "\${new[@]}"; fi
+if (( have_r )); then
+  "\$real" -d "@\$epoch" "\${new[@]}" 2>/dev/null && exit 0   # GNU real tool
+  exec "\$real" -r "\$epoch" "\${new[@]}"                     # BSD real tool
+else
+  exec "\$real" "\${new[@]}"
+fi
 EOF
 chmod +x "$bsd/stat" "$bsd/date"
 check "BSD-sim: stat -c rejected"  rejected "$(PATH="$bsd" stat -c %Y "$WH" >/dev/null 2>&1 && echo ok || echo rejected)"

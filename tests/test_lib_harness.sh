@@ -17,7 +17,7 @@ check "must <ok> -> rc 0" 0 "$rc"
 # pollute THIS file's tally or terminal output.
 out="$(must false 2>&1)"
 check "must <fail> -> prints FAIL diagnostic" yes \
-  "$(case "$out" in *'setup command failed'*) echo yes ;; *) echo no ;; esac)"
+  "$(case "$out" in (*'setup command failed'*) echo yes ;; (*) echo no ;; esac)"
 ( must false >/dev/null 2>&1 ); rc=$?
 check "must <fail> -> returns failing rc" 1 "$rc"
 
@@ -28,9 +28,11 @@ check "mk_repo -> repo has .git" yes "$([[ -d "$repo/.git" ]] && echo yes || ech
 [[ -n "$repo" ]] && rm -rf "$repo"
 
 # mk_repo fails LOUDLY (non-zero, nothing echoed) when its fixture can't be built
-# — simulated with a TMPDIR pointing at a non-creatable path so `mktemp -d` fails.
-# Unpatched mk_repo swallowed this and returned 0 with an empty path.
-out="$( TMPDIR=/no/such/dir/handoff_$$ mk_repo 2>/dev/null )"; rc=$?
+# — simulated with a shell-function shim that makes `mktemp` itself fail (a bad
+# TMPDIR is not portable: Darwin mktemp ignores TMPDIR entirely). Unpatched
+# mk_repo swallowed this and returned 0 with an empty path.
+# shellcheck disable=SC2329  # false positive: the shim IS invoked — indirectly, by mk_repo's `mktemp -d`
+out="$( mktemp() { return 1; }; mk_repo 2>/dev/null )"; rc=$?
 check "mk_repo broken fixture -> non-zero rc"    yes "$([[ $rc -ne 0 ]] && echo yes || echo no)"
 check "mk_repo broken fixture -> no path echoed" ""  "$out"
 

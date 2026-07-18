@@ -4,8 +4,7 @@
 #     it captures verbatim session prose that can include secrets;
 #   - a configured-but-missing substrate is now surfaced on stderr instead of
 #     being silently skipped (which hid HANDOFF_SUBSTRATE_NAME typos).
-# Uses GNU `stat -c %a` for the mode check (the suite already assumes a GNU host
-# via `touch -d` elsewhere).
+# Uses lib.sh's portable file_mode (GNU stat -c / BSD stat -f) for mode checks.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 WH="$REPO_ROOT/bin/write_handoff.sh"
@@ -23,7 +22,7 @@ echo "write_handoff.sh — hardening (owner-only doc + substrate surfacing)"
 # --- Handoff doc is created 0600 --------------------------------------------
 repo="$(mk_repo_gitignored)"
 path="$( cd "$repo" && HANDOFF_HISTORY_KEEP=0 bash "$WH" 2>/dev/null )"
-mode="$(stat -c %a "$path" 2>/dev/null)"
+mode="$(file_mode "$path")"
 check "handoff_current.md mode is 600" 600 "$mode"
 rm -rf "$repo"
 
@@ -34,7 +33,7 @@ mkdir -p "$repo/.claude"
 echo "stale" > "$repo/.claude/handoff_current.md"
 chmod 644 "$repo/.claude/handoff_current.md"
 ( cd "$repo" && HANDOFF_HISTORY_KEEP=0 bash "$WH" >/dev/null 2>&1 )
-mode="$(stat -c %a "$repo/.claude/handoff_current.md" 2>/dev/null)"
+mode="$(file_mode "$repo/.claude/handoff_current.md")"
 check "rewritten doc tightened to 600" 600 "$mode"
 rm -rf "$repo"
 

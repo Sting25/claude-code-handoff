@@ -1,0 +1,7 @@
+# Follow source'd files instead of emitting SC1091 "Not following" — the
+# test files all source tests/lib.sh, and following it lets shellcheck
+# analyze each test against the real helper definitions instead of skipping.
+external-sources=true
+# Resolve relative source paths against the sourcing script's own directory,
+# so `source .../lib.sh` works no matter which directory shellcheck runs from.
+source-path=SCRIPTDIR

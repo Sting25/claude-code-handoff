@@ -28,7 +28,7 @@ out="$( CLAUDE_HOME="$home" bash "$src/install.sh" 2>/dev/null )"; rc=$?
 check "non-object: nonzero exit"             yes "$([[ $rc -ne 0 ]] && echo yes || echo no)"
 check "non-object: file left untouched ([])" "[]" "$(cat "$home/settings.json")"
 check "non-object: error names 'not a JSON object'" yes \
-  "$(case "$out" in *'not a JSON object'*) echo yes ;; *) echo no ;; esac)"
+  "$(case "$out" in (*'not a JSON object'*) echo yes ;; (*) echo no ;; esac)"
 check "non-object: no stray .tmp"            no  "$([[ -e "$home/settings.json.tmp" ]] && echo yes || echo no)"
 rm -rf "$src" "$home"
 
@@ -54,18 +54,18 @@ out="$( CLAUDE_HOME="$home" bash "$src/install.sh" --uninstall 2>&1 )"; rc=$?
 check "uninstall dangling: exit 0"             0 "$rc"
 check "uninstall dangling: symlink removed"    yes "$([[ ! -L "$home/bin/write_handoff.sh" ]] && echo yes || echo no)"
 check "uninstall dangling: reported as stale"  yes \
-  "$(case "$out" in *'stale dangling link'*) echo yes ;; *) echo no ;; esac)"
+  "$(case "$out" in (*'stale dangling link'*) echo yes ;; (*) echo no ;; esac)"
 rm -rf "$src" "$home"
 
 # --- install#3: backup name carries a PID component ----------------------------
 src="$(prep_src)"; home="$(mktemp -d)"
 printf '%s' '{"userKey":1}' > "$home/settings.json"
 CLAUDE_HOME="$home" bash "$src/install.sh" >/dev/null 2>&1
-bak="$(ls "$home"/settings.json.bak.* 2>/dev/null | head -1)"
+bak="$(find "$home" -maxdepth 1 -name 'settings.json.bak.*' 2>/dev/null | sort | head -n 1)"
 check "install#3: a pre-patch backup was kept"        yes "$([[ -n "$bak" ]] && echo yes || echo no)"
 # ts is YYYYMMDD_HHMMSS_PID -> three digit groups, i.e. two underscores.
 check "install#3: backup ts carries a pid component"  yes \
-  "$(case "$(basename "${bak:-x}")" in *.bak.[0-9]*_[0-9]*_[0-9]*) echo yes ;; *) echo no ;; esac)"
+  "$(case "$(basename "${bak:-x}")" in (*.bak.[0-9]*_[0-9]*_[0-9]*) echo yes ;; (*) echo no ;; esac)"
 check "install#3: user key preserved through patch"   1 "$(jq -r '.userKey' "$home/settings.json" 2>/dev/null)"
 rm -rf "$src" "$home"
 

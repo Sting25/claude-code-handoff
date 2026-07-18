@@ -45,7 +45,7 @@ for f in write_handoff.sh handoff_turn_append.sh handoff_ctx_check.sh \
 done
 check "all five bin scripts copied" 5 "$copied"
 # The installer must surface the "copies don't auto-update" warning (COPIED_ANY).
-check "warns about copy mode" yes "$(case "$out" in *"COPIED"*|*"copy"*) echo yes ;; *) echo no ;; esac)"
+check "warns about copy mode" yes "$(case "$out" in (*"COPIED"*|*"copy"*) echo yes ;; (*) echo no ;; esac)"
 # settings.json still patched (fallback must not abort the run).
 check "settings.json patched" present "$(jq -e '.hooks.SessionStart' "$home/settings.json" >/dev/null 2>&1 && echo present || echo absent)"
 

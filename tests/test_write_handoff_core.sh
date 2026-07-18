@@ -82,12 +82,12 @@ rm -rf "$repo"
 repo="$(mk_repo_gitignored)"
 hist="$repo/.claude/handoff_history"; mkdir -p "$hist"
 echo cur > "$repo/.claude/handoff_current.md"
-touch -d "2020-06-06 00:00:00 UTC" "$repo/.claude/handoff_current.md"   # newest after rotation
+touch -d "2020-06-06T00:00:00Z" "$repo/.claude/handoff_current.md"   # newest after rotation (ISO T/Z form: GNU + BSD)
 for ts in 2020-01-01_000000 2020-01-02_000000 2020-01-03_000000; do
   echo old > "$hist/handoff_$ts.md"
 done
 ( cd "$repo" && HANDOFF_HISTORY_KEEP=2 bash "$WH" >/dev/null 2>&1 )
-kept="$(ls -1 "$hist"/handoff_*.md 2>/dev/null | wc -l | tr -d ' ')"
+kept="$(find "$hist" -maxdepth 1 -name 'handoff_*.md' 2>/dev/null | wc -l | tr -d ' ')"
 check "prune keeps exactly KEEP(2)"          2   "$kept"
 check "rotated current survives (newest)"    yes "$([[ -f "$hist/handoff_2020-06-06_000000.md" ]] && echo yes || echo no)"
 check "oldest history pruned"                no  "$([[ -f "$hist/handoff_2020-01-01_000000.md" ]] && echo yes || echo no)"
@@ -105,7 +105,7 @@ for bad in -1 abc; do
     echo old > "$hist/handoff_$ts.md"
   done
   err="$( cd "$repo" && HANDOFF_HISTORY_KEEP="$bad" bash "$WH" 2>&1 >/dev/null )"; rc=$?
-  kept="$(ls -1 "$hist"/handoff_*.md 2>/dev/null | wc -l | tr -d ' ')"
+  kept="$(find "$hist" -maxdepth 1 -name 'handoff_*.md' 2>/dev/null | wc -l | tr -d ' ')"
   check "KEEP=$bad -> exit 0"               0   "$rc"
   check "KEEP=$bad -> warns + clamps"       yes "$(has "$err" "not a non-negative integer")"
   check "KEEP=$bad -> history NOT wiped"    yes "$([[ "$kept" -ge 3 ]] && echo yes || echo no)"

@@ -10,9 +10,11 @@
 # silent, which can make a later assertion pass VACUOUSLY — e.g. "secret not in
 # file" is trivially true if the file was never written. Guard fixture setup with
 # `must` (below) so such failures surface loudly instead.
+# shellcheck shell=bash
 set -uo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC2034  # not used here; consumed by the sourcing test files ("$REPO_ROOT/bin/...")
 REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 
 _pass=0
@@ -30,6 +32,9 @@ check() {
 }
 
 skip() { printf '  SKIP  %s\n' "$1"; }
+
+# Portable "octal mode of a path" (GNU stat -c first, BSD stat -f fallback).
+file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 
 # must <cmd...> — run a SETUP command that is expected to succeed. On failure,
 # record a failure + print a loud diagnostic, so a broken fixture can't make a
@@ -63,12 +68,18 @@ finish() {
 mk_repo() {
   local d
   d="$(mktemp -d)" || { echo "mk_repo: mktemp -d failed" >&2; return 1; }
-  git -C "$d" init -q \
-    && git -C "$d" config user.email t@t \
-    && git -C "$d" config user.name t \
-    && echo seed > "$d/seed.txt" \
-    && git -C "$d" add seed.txt \
-    && git -C "$d" commit -qm "seed commit" \
-    || { echo "mk_repo: failed to build repo in $d" >&2; return 1; }
+  # Canonicalize (pwd -P): macOS mktemp returns /var/..., a symlink to
+  # /private/var/..., while git rev-parse --show-toplevel reports the physical
+  # path; exact-path assertions need the two to match. No-op on GNU/ubuntu.
+  d="$(cd "$d" && pwd -P)" || { echo "mk_repo: cannot canonicalize $d" >&2; return 1; }
+  if ! { git -C "$d" init -q \
+      && git -C "$d" config user.email t@t \
+      && git -C "$d" config user.name t \
+      && echo seed > "$d/seed.txt" \
+      && git -C "$d" add seed.txt \
+      && git -C "$d" commit -qm "seed commit"; }; then
+    echo "mk_repo: failed to build repo in $d" >&2
+    return 1
+  fi
   printf '%s\n' "$d"
 }
