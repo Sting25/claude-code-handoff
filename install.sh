@@ -573,6 +573,13 @@ unpatch_settings() {
 doctor() {
   local broken=0 dst tgt name
   echo "doctor: checking installed handoff hooks under $claude_home/bin"
+  # jq is a RUNTIME dependency of the Stop hook (payload parsing), the ctx
+  # nudge, and the /handoff-recover tail rescue — a resolving script link is
+  # not enough if the tool it needs is missing (they all no-op silently).
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "  BROKEN  jq not found on PATH (Stop hook, ctx nudge, and /handoff-recover tail rescue are silently disabled)"
+    broken=$((broken + 1))
+  fi
   for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start; do
     dst="$claude_home/bin/$name.sh"
     if [[ -e "$dst" ]]; then
@@ -604,6 +611,21 @@ doctor() {
 if [[ "$mode" == doctor ]]; then
   doctor
 elif [[ "$mode" == install ]]; then
+  # jq is a hard RUNTIME dependency, not just an install-time convenience:
+  # without it the Stop hook exits before writing anything (no raw dumps, no
+  # ctx measurements), the ctx nudge never fires, and /handoff-recover's tail
+  # rescue can't parse the transcript — all silently, because the hooks are
+  # wired '... || true'. Installing anyway would print "done" and ship a
+  # system that never runs. Refuse up front instead. (--uninstall and --doctor
+  # still work without jq.)
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "ERROR: jq not found on PATH — refusing to install." >&2
+    echo "  jq is required at runtime by the Stop hook (raw per-turn dumps)," >&2
+    echo "  the context nudge, and /handoff-recover; without it they all no-op" >&2
+    echo "  silently. Install jq (e.g. 'apt install jq' / 'brew install jq')" >&2
+    echo "  and re-run ./install.sh." >&2
+    exit 1
+  fi
   echo "installing handoff skill from $repo_root into $claude_home"
   echo
   echo "symlinks:"

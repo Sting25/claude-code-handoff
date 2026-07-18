@@ -48,6 +48,16 @@ if [[ ! "$session_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
   exit 2
 fi
 
+# jq parses every transcript line below, and each per-line call is
+# individually guarded with '|| true' — so with jq absent this script used to
+# print the "Recovered tail — N JSONL line(s)..." header followed by an EMPTY
+# body: a plausible-looking but false recovery, at exactly the moment the
+# safety net is being relied on. Fail loudly instead. (audit 2026-07-17)
+if ! command -v jq >/dev/null 2>&1; then
+  echo "handoff_recover_tail.sh: jq not found on PATH — cannot parse the transcript JSONL; refusing to emit an empty 'recovered tail'." >&2
+  exit 3
+fi
+
 # --- Locate the backup dir (for the cursor file) ---
 if [[ -n "${HANDOFF_BACKUP_DIR:-}" ]]; then
   backup_dir="$HANDOFF_BACKUP_DIR"

@@ -89,6 +89,19 @@ if [ -n "$self_dir" ]; then
   fi
 fi
 
+# Companion runtime check: the Stop hook parses its payload with jq and exits
+# before writing anything when jq is missing — no raw dumps, no ctx
+# measurements, no /handoff-recover material — all hidden by the hooks'
+# `|| true` wiring. This script needs no jq itself and SessionStart output is
+# the one place the user reliably sees, so surface it here. (audit 2026-07-17)
+if ! command -v jq >/dev/null 2>&1; then
+  echo "⚠️  handoff: jq not found on PATH."
+  echo "    The Stop hook (raw per-turn dumps), the context nudge, and the"
+  echo "    /handoff-recover tail rescue are silently disabled until jq is"
+  echo "    installed."
+  echo
+fi
+
 [ -f "$current" ] || exit 0
 
 echo "## Auto-loaded handoff from previous session"
