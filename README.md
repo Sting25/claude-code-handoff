@@ -432,6 +432,20 @@ still resolves (handy after moving or re-cloning the repo).
 Removes the symlinks and strips the patched hooks + permissions from
 settings.json (backup first). The repo itself is untouched.
 
+It also deletes the per-machine HMAC secret at `~/.claude/handoff_secret`,
+so no key material is left behind by a tool you just removed. Existing
+signed handoffs then load as reference data instead of binding rules —
+nothing breaks; re-installing and running `/handoff` re-signs them with a
+fresh secret. That deletion is deliberately narrow: it only touches the
+default path, only a regular file (never a symlink, never a directory),
+and only when the content is exactly the 64-hex digest this tool
+generates. A file of yours that happens to sit at that name, or a custom
+`HANDOFF_SECRET_FILE` location, is reported and left alone.
+
+Everything else in your `settings.json` — your own hooks (including ones
+co-located in the same event), permissions, `statusLine`, `env`, theme —
+is preserved; uninstall only removes entries it can prove are its own.
+
 ## What's in the repo
 
 ```

@@ -41,10 +41,19 @@ installs re-run `./install.sh` as usual. New env vars: `HANDOFF_SECRET_FILE`,
   compaction (it branches on the hook payload's `source` field; older
   Claude Code versions without the field keep the normal full load).
   `install.sh --doctor` checks the new lib and notes a missing `openssl` as
-  an advisory. 80 new tests cover the gate, the negative controls
+  an advisory. 105 new tests cover the gate, the negative controls
   (including a clone-delivered pin that embeds its own BIND markers, an
   unbalanced-marker doc, and a relative tracked-pin path), and the
   re-injection cooldown.
+- **`--uninstall` now removes the per-machine HMAC secret**, so it stays a
+  true inverse and leaves no key material behind. Narrowly scoped: only the
+  default `~/.claude/handoff_secret` path, only a regular file (never a
+  symlink or directory), and only when the content is exactly the 64-hex
+  digest this tool generates — a foreign file at that name, or a custom
+  `HANDOFF_SECRET_FILE` location, is reported and left untouched. The
+  secret's value is never printed. Existing signed handoffs degrade to
+  reference-data framing after removal (nothing breaks; `/handoff` re-signs
+  on the next install).
 
 ## [0.9.0] — 2026-07-18
 

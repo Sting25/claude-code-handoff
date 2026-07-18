@@ -364,6 +364,53 @@ uninstall_symlinks() {
   unlink_if_ours "$claude_home/skills/handoff-recover/SKILL.md"  "$repo_root/skills/handoff-recover/SKILL.md"
 }
 
+# Remove the per-machine HMAC secret that write_handoff.sh generates on first
+# signed write (issue #42), so --uninstall is a true inverse and no key
+# material is left behind by a tool the user believes they removed.
+#
+# Deliberately conservative — this is the ONE path where uninstall deletes a
+# file the installer never created itself, so it must prove the file is ours
+# before touching it. Any doubt => leave it and say so:
+#   - only the DEFAULT path under $claude_home. A HANDOFF_SECRET_FILE override
+#     may point at a shared/managed location that is not ours to delete.
+#   - never a symlink (don't follow it, don't remove it — the target could be
+#     anything the user cares about).
+#   - only a regular file whose entire content is the exact 64-hex digest we
+#     generate. Anything else is someone else's file that happens to sit at
+#     that name, and it survives untouched.
+# The content is shape-checked, never printed (it is secret material).
+remove_secret_if_ours() {
+  local secret="$claude_home/handoff_secret" body
+  if [[ -n "${HANDOFF_SECRET_FILE:-}" ]]; then
+    echo "  skip    handoff secret (HANDOFF_SECRET_FILE override set; leaving '$HANDOFF_SECRET_FILE' alone)"
+    return 0
+  fi
+  if [[ -L "$secret" ]]; then
+    echo "  skip    $secret (symlink — not ours to remove; leaving it and its target alone)"
+    return 0
+  fi
+  if [[ ! -e "$secret" ]]; then
+    echo "  ok      $secret (already absent)"
+    return 0
+  fi
+  if [[ ! -f "$secret" ]]; then
+    echo "  skip    $secret (not a regular file; leaving alone)"
+    return 0
+  fi
+  # Shape check only — 64 lowercase hex, optional trailing newline. Read with
+  # tr -d to tolerate the newline our two generators differ on.
+  body="$(tr -d '[:space:]' < "$secret" 2>/dev/null || true)"
+  if [[ ! "$body" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "  skip    $secret (not the shape this tool generates; leaving alone)"
+    return 0
+  fi
+  rm -f "$secret"
+  echo "  remove  $secret (per-machine HMAC secret)"
+  echo "          Any existing signed handoffs now load as reference data"
+  echo "          instead of binding rules — nothing breaks; re-installing"
+  echo "          and running /handoff re-signs them with a fresh secret."
+}
+
 # ------------------------------------------------------------------ settings.json
 
 print_manual_snippet() {
@@ -797,6 +844,9 @@ else
   echo
   echo "settings.json:"
   unpatch_settings
+  echo
+  echo "local state:"
+  remove_secret_if_ours
   echo
   echo "done. the repo at $repo_root is untouched."
 fi
