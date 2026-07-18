@@ -3,3 +3,4 @@
 .claude/settings.local.json
 *.bak.*
 .claude/handoff_history/
+.claude/handoff_pinned.md
