@@ -236,10 +236,14 @@ no "want me to?". Example:
 > Flagging: ~40% of context used — natural /handoff moment if you want
 > to lock in the prose while I'm still sharp.
 
-Then continue answering the user's actual prompt. The hook applies its
-own cooldown (won't re-fire for ~100KB of further transcript growth),
-so if a fresh reminder lands later, surface it again — don't ration
-yourself.
+Then continue answering the user's actual prompt. By default the hook
+nudges ONCE per session (`HANDOFF_CTX_MAX_FLAGS=1` in suggest mode) —
+if the user lets it pass, no second reminder is coming, so don't
+assume the hook will catch it again later. When the user has raised or
+removed the cap (`HANDOFF_CTX_MAX_FLAGS=0` or `N>1`), re-flags are
+spaced by a ~100KB-growth cooldown; if a fresh reminder lands later,
+surface it again — don't ration yourself. The reminder itself states
+which case applies.
 
 ### What NOT to trigger on
 

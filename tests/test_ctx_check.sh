@@ -139,6 +139,26 @@ out="$(run_cc "$repo" FIRST)"
 check "first crossing -> fires despite tiny bytes" yes "$(has "$out" "<system-reminder>")"
 rm -rf "$repo"
 
+# --- Re-fire wording matches the cap (audit 2026-07-17) ----------------------
+# Default suggest mode (MAX_FLAGS=1): the first nudge is also the last, so it
+# must say so — not promise a cooldown repeat that will never come.
+repo="$(mk_repo)"; seed "$repo" WORD1 4000 600
+out="$(run_cc "$repo" WORD1)"
+check "capped final nudge says it won't re-fire"   yes "$(has "$out" "will not re-fire this session")"
+check "capped final nudge drops cooldown promise"  no  "$(has "$out" "KB of transcript growth")"
+rm -rf "$repo"
+# Uncapped (MAX_FLAGS=0): the cooldown promise is real and must be stated.
+repo="$(mk_repo)"; seed "$repo" WORD0 4000 600
+out="$(run_cc "$repo" WORD0 HANDOFF_CTX_MAX_FLAGS=0)"
+check "uncapped nudge keeps cooldown promise"      yes "$(has "$out" "another 100KB of transcript growth")"
+check "uncapped nudge has no cap-reached text"     no  "$(has "$out" "will not re-fire this session")"
+rm -rf "$repo"
+# MAX_FLAGS=2, one prior flag: this (second) nudge reaches the cap -> final.
+repo="$(mk_repo)"; seed "$repo" WORD2 200000 600 0
+out="$(run_cc "$repo" WORD2 HANDOFF_CTX_MAX_FLAGS=2)"
+check "last-of-N nudge announces the cap"          yes "$(has "$out" "will not re-fire this session")"
+rm -rf "$repo"
+
 # --- THRESHOLD_PCT override changes the gate --------------------------------
 # 600 tokens / 1000 window = 60%. With threshold 70% it should NOT fire.
 repo="$(mk_repo)"; seed "$repo" PCT 4000 600

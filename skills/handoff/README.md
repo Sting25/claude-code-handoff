@@ -269,9 +269,20 @@ export HANDOFF_CTX_THRESHOLD_PCT=40
 # Transcript growth (in KB) required between consecutive reminders.
 # Default: 100 — once the hook has flagged, it won't flag again until
 # the transcript JSONL has grown another 100KB. Prevents nagging on
-# every turn after the threshold trips. Only applies to re-flags;
-# the first crossing always fires.
+# every turn after the threshold trips. The first crossing always
+# fires; the cooldown only spaces RE-flags, and re-flags only exist at
+# all when HANDOFF_CTX_MAX_FLAGS (below) allows them — with the default
+# suggest-mode cap of 1 there is nothing for the cooldown to gate.
 export HANDOFF_CTX_COOLDOWN_KB=100
+
+# Hard cap on how many times a single session flags, regardless of
+# growth. Default: 1 in "suggest" mode (one nudge per session, then
+# silence — a long or idle session won't keep nagging; added in 0.8.4),
+# 0 (= unlimited, gated only by the cooldown) in "act" mode, where the
+# assistant is expected to keep refreshing its own context. Set 0 to
+# restore the pre-0.8.4 cooldown-spaced repeating behavior; set N>1 to
+# allow up to N cooldown-spaced nudges.
+export HANDOFF_CTX_MAX_FLAGS=1
 
 # Reminder behavior when the threshold trips. "suggest" (default) emits a
 # passive system-reminder for the assistant to flag a /handoff moment to

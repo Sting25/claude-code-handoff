@@ -239,6 +239,7 @@ fi
 #     how many times we've flagged, its last line is the byte size at the most
 #     recent flag. The first crossing always fires (no prior flag); subsequent
 #     ones are gated by (a) the MAX_FLAGS cap and (b) the cooldown growth.
+flag_count=0
 if [[ -f "$flag_file" ]]; then
   flag_count="$(grep -c '' "$flag_file" 2>/dev/null || echo 0)"
   [[ "$flag_count" =~ ^[0-9]+$ ]] || flag_count=0
@@ -257,6 +258,17 @@ fi
 # --- Compose and emit the system-reminder ---
 pct=$((est_tokens * 100 / WINDOW_TOKENS))
 
+# The re-fire wording must match what will actually happen. With a finite cap
+# about to be reached — and the default suggest-mode MAX_FLAGS=1 means the
+# very FIRST nudge is also the last — promising a cooldown-spaced repeat would
+# be false: the docs used to make that promise and a user who ignored the
+# single nudge waited for a second warning that never came. (audit 2026-07-17)
+if (( MAX_FLAGS > 0 && flag_count + 1 >= MAX_FLAGS )); then
+  repeat_note="Automatic-nudge cap reached (HANDOFF_CTX_MAX_FLAGS=${MAX_FLAGS}): this reminder will not re-fire this session."
+else
+  repeat_note="This reminder will not re-fire for at least another ${COOLDOWN_KB}KB of transcript growth."
+fi
+
 # On the bytes/4 fallback, mark the figure as an estimate so a reader (and the
 # model acting on this reminder) knows the pct is a rough upper bound, not the
 # measured /context value. Empty in the measured path -> reminders unchanged.
@@ -270,14 +282,14 @@ case "$REMINDER_MODE" in
   act)
     cat <<EOF
 <system-reminder>
-Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window).${est_note} This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself — do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. Cooldown: this reminder will not re-fire for ~${COOLDOWN_KB}KB of further transcript growth.
+Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window).${est_note} This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself — do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. ${repeat_note}
 </system-reminder>
 EOF
     ;;
   *)
     cat <<EOF
 <system-reminder>
-Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window).${est_note} This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than at 5%. Flag to the user as a passive mention — no question mark, no "want me to?". One line, e.g. "Flagging: ~${pct}% of context used — natural /handoff moment if you want to lock in the prose while I'm still sharp." Don't repeat for at least another ${COOLDOWN_KB}KB of growth.
+Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window).${est_note} This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than at 5%. Flag to the user as a passive mention — no question mark, no "want me to?". One line, e.g. "Flagging: ~${pct}% of context used — natural /handoff moment if you want to lock in the prose while I'm still sharp." ${repeat_note}
 </system-reminder>
 EOF
     ;;
