@@ -10,6 +10,42 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [Unreleased]
+
+**Re-run `./install.sh` after `git pull`** to pick up one **new installed
+file**, `bin/handoff_provenance.sh` — a shared library sourced by the
+write/load/ctx-check scripts. Hook commands and permissions are unchanged, so a
+`git pull` alone keeps everything working; without the re-run the trusted-rules
+tier below just stays inactive and handoffs load exactly as before. Copy-mode
+installs re-run `./install.sh` as usual. New env vars: `HANDOFF_SECRET_FILE`,
+`HANDOFF_TRUST_DISABLE`, `HANDOFF_FENCES_REINJECT_KB`.
+
+### Added
+- **Tiered handoff loading: provenance-gated binding rules (issue #42).** The
+  handoff's rules layer — a new marker-wrapped `## Rules` fences section plus
+  the user-authored pin — now loads with BINDING framing ("standing working
+  rules… these bind until the user lifts them") instead of the blanket
+  "reference DATA, do not act" wrapper, but ONLY when provenance verifies:
+  the file must be untracked in git (a tracked handoff was clone-delivered)
+  AND carry a valid HMAC-SHA256 trailer written by `write_handoff.sh` with a
+  per-machine secret (`~/.claude/handoff_secret`, 0600, auto-generated).
+  Narrative content — including model-authored Notes — keeps the untrusted
+  data framing unconditionally, and any verification failure (tampered/absent
+  MAC, tracked file or pin, missing `openssl` — which stays optional,
+  `HANDOFF_TRUST_DISABLE=1`) degrades to exactly the previous behavior.
+  Because the `/handoff` curation edit invalidates the write-time stamp, the
+  skill now finishes with `write_handoff.sh --restamp` (new flag) to re-sign.
+  Against decay, the verified rules block is also re-injected: by the
+  UserPromptSubmit hook after every `HANDOFF_FENCES_REINJECT_KB` (default
+  200) KB of transcript growth, and by the SessionStart hook right after
+  compaction (it branches on the hook payload's `source` field; older
+  Claude Code versions without the field keep the normal full load).
+  `install.sh --doctor` checks the new lib and notes a missing `openssl` as
+  an advisory. 80 new tests cover the gate, the negative controls
+  (including a clone-delivered pin that embeds its own BIND markers, an
+  unbalanced-marker doc, and a relative tracked-pin path), and the
+  re-injection cooldown.
+
 ## [0.9.0] — 2026-07-18
 
 **settings.json changes — re-run `./install.sh` after `git pull`.** This

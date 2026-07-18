@@ -154,22 +154,34 @@ into the current session's context and persists it back into
    retroactive Notes. Removing the sentinel is what tells the
    SessionEnd safety-net that this file now has real content.
 
-7. **Surface the recovered Notes in chat.** Print the composed Notes
+7. **Re-sign the edited handoff.** Your Edit invalidated the HMAC
+   trailer `write_handoff.sh` wrote on the file, which would silently
+   demote the pinned/rules blocks from binding to reference data for
+   every subsequent session. Re-stamp it:
+   ```bash
+   bash ~/.claude/bin/write_handoff.sh --restamp
+   ```
+   Best-effort — if it warns (no openssl, older install), continue; the
+   handoff still works, the rules just load as data. Re-run it after any
+   later re-edit (step 9).
+
+8. **Surface the recovered Notes in chat.** Print the composed Notes
    directly so the current session has it in working memory, not
    just on disk. One short header line ("Recovered Notes from
    session <id>:"), then the Notes content. Keep it readable —
    the user should be able to scan it.
 
-8. **Pause and confirm with the user.** Before doing new work, ask:
+9. **Pause and confirm with the user.** Before doing new work, ask:
 
    > Recovered Notes above. Does this match your recollection of
    > what the previous session did, or should I adjust before we
    > continue?
 
    Wait for the user. If they correct or add, update the in-chat
-   summary AND re-edit `handoff_current.md` with the corrections.
+   summary AND re-edit `handoff_current.md` with the corrections
+   (then re-run `write_handoff.sh --restamp`, per step 7).
 
-9. **Reconcile the working tree before resuming — don't redo done
+10. **Reconcile the working tree before resuming — don't redo done
    work.** A crashed session's in-progress edits are usually still in
    the working tree, uncommitted; `git status` and `git diff` are the
    ground truth for what it already applied. Before resuming:
@@ -192,7 +204,7 @@ into the current session's context and persists it back into
      assuming; environmental red must not scare you off good work,
      and must not mask a real one.
 
-10. **Then continue with the session's actual work.** With the
+11. **Then continue with the session's actual work.** With the
     retroactive Notes in context and the tree reconciled, you have a
     working baseline.
 
@@ -245,7 +257,7 @@ gap is better than a silent gap.
 - **Do not re-apply work the crashed session already did.** Its
   uncommitted edits live in the working tree; `git diff` is the
   source of truth for what's done. Blindly redoing a step from the
-  recovered Notes duplicates edits or corrupts files (see step 9).
+  recovered Notes duplicates edits or corrupts files (see step 10).
 - **Do not modify `handoff_history/` files.** Those are historical
   snapshots from prior sessions; treat them as read-only.
 - **Do not skip the user confirmation step.** Retroactive composition

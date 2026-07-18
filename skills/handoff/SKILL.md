@@ -30,7 +30,7 @@ nothing gets lost across the restart boundary.
    mechanical snapshot before compaction destroys the conversation.
    That snapshot is a placeholder — running `/handoff` to curate is
    still the only path that captures intent.)
-2. **Replace the placeholder block with session-specific intent** — the script's snapshot is git-state-only; the conversation knows things git doesn't (decisions made, in-flight ASKs, open questions, "next session should start with X" notes). The auto-generated file contains a `## Notes from this session` section with a placeholder block bracketed by a `<!-- HANDOFF_PLACEHOLDER: ... -->` sentinel comment. **Replace the entire placeholder block (sentinel + italic prose) with curated Notes using Edit** — do not just append below the placeholder, because the SessionEnd safety-net detects "no curation happened" by the presence of that sentinel. Removing the sentinel is what tells the SessionEnd hook to stand down and preserve your work.
+2. **Replace the placeholder block with session-specific intent** — the script's snapshot is git-state-only; the conversation knows things git doesn't (decisions made, in-flight ASKs, open questions, "next session should start with X" notes). The auto-generated file contains a `## Notes from this session` section with a placeholder block bracketed by a `<!-- HANDOFF_PLACEHOLDER: ... -->` sentinel comment. **Replace the entire placeholder block (sentinel + italic prose) with curated Notes using Edit** — do not just append below the placeholder, because the SessionEnd safety-net detects "no curation happened" by the presence of that sentinel. Removing the sentinel is what tells the SessionEnd hook to stand down and preserve your work. Explicit fences for the next session go in the marker-wrapped `## Rules` section, NOT in Notes (see Steps). After editing, re-sign with `write_handoff.sh --restamp` so the rules load as binding, not data.
 3. **Confirm the raw-dump backup exists** — the `Stop` hook (`handoff_turn_append.sh`) has been appending turn-by-turn to `.claude/handoff_backups/handoff_raw_<session_id>.md` throughout the session, so by the time `/handoff` runs the backup is already there. Verify it: `ls -la .claude/handoff_backups/`. If the file is missing (hook not installed, or session started before the hook landed), fall back to writing a one-shot dump per the "Raw dump fallback" section below. The hook prunes to 3 newest automatically — you do not need to.
 4. **Print a loud, unmissable banner** — the ASK must be impossible to miss (the user specifically asked for this; do not soften).
 5. **Stop**. Do not start new work after the banner. The session is over.
@@ -90,6 +90,19 @@ nothing gets lost across the restart boundary.
    so and why — silent monotonic growth is the signal the loop has
    stopped maintaining itself.
 
+   **Fences go in the `## Rules` block, not in Notes.** The doc contains
+   a `## Rules (fences — carried into the next session)` section wrapped
+   in `<!-- HANDOFF_BIND_BEGIN/END -->` markers, above the Notes section.
+   Scope fences the next session must honor ("do NOT begin X without a
+   fresh decision", "never force-push to main") belong INSIDE those
+   markers — replace the `HANDOFF_RULES_PLACEHOLDER` comment with them,
+   or leave it in place if there are none. Only marker-wrapped content
+   ever loads with binding framing in the next session (and only when
+   the doc's provenance verifies); anything you write in Notes loads as
+   reference data, so a fence left in Notes is just a suggestion. Do not
+   move the markers, and do not put narrative inside them — every line
+   there will be treated as a standing rule.
+
    **Write state claims as checks, not verdicts.** When a Note asserts
    something the next session will rely on ("the migration is done", "X
    is wired up"), phrase it as the check that *proves* it, not the
@@ -99,14 +112,25 @@ nothing gets lost across the restart boundary.
    already proves (HEAD, branch, pushed commits) lives in the snapshot
    above — don't restate it as a verdict here.
 
-3. **Verify the raw dump.** The `Stop` hook has been appending to
+3. **Re-sign the edited doc.** Your Edit invalidated the HMAC stamp
+   `write_handoff.sh` put on the file at write time (the trailer line
+   `<!-- HANDOFF_HMAC: … -->` — leave it alone; it gets replaced). Run:
+   ```bash
+   bash ~/.claude/bin/write_handoff.sh --restamp
+   ```
+   This re-signs `handoff_current.md` in place with the per-machine
+   secret so the next session loads the Rules/pinned blocks as binding.
+   Best-effort: if it warns (no openssl, older install), continue — the
+   handoff still works, the rules just load as reference data.
+
+4. **Verify the raw dump.** The `Stop` hook has been appending to
    `<repo-root>/.claude/handoff_backups/handoff_raw_<session_id>.md`
    throughout the session. Run `ls -la <repo-root>/.claude/handoff_backups/`
    and confirm the current session's file is there. The hook also handles
    pruning (3 newest) — no action needed from you in the normal path.
    If the file is **missing**, fall through to "Raw dump fallback" below.
 
-4. Print the banner verbatim. Do NOT skip, soften, or shrink this. Use
+5. Print the banner verbatim. Do NOT skip, soften, or shrink this. Use
    the exact format below — the borders are deliberate width:
 
    ```
@@ -126,7 +150,7 @@ nothing gets lost across the restart boundary.
    -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-
    ```
 
-5. Stop. Do NOT continue working after printing the banner. No "while
+6. Stop. Do NOT continue working after printing the banner. No "while
    we're here" cleanup, no "one more thing." The whole point of the
    handoff is to land at a clean boundary so the next session starts
    from a known state.
