@@ -23,6 +23,19 @@
 #                          is ignored; this is now treated as an alias for
 #                          --if-curated. Slated for removal in a future
 #                          release (the original v0.6.0 target slipped).
+#
+# Reason-aware safety net (hook invocations only): when invoked as a hook,
+# stdin carries a JSON payload that MAY include a `reason` field (e.g.
+# SessionEnd fires with reason "resume" on every /resume session-switch since
+# CC 2.1.79). Under --if-curated ONLY, a reason listed in
+# HANDOFF_SESSIONEND_SKIP_REASONS (space/comma-separated; default "resume")
+# skips the write entirely — a /resume switch is a pause, not an ending, and
+# each safety-net fire on an uncurated session would otherwise rotate churn
+# into history. The field name is a best guess with an asymmetric-safe
+# fallback: if the field is absent, named differently, or jq is missing, the
+# parse yields empty and the write fires exactly as before — the guess can
+# only ever ADD the skip, never subtract the safety net. Curated /handoff and
+# manual runs never consult the skip list.
 
 set -euo pipefail
 
@@ -34,6 +47,22 @@ set -euo pipefail
 # chmod after the final write also tightens a doc left readable by a pre-0.8.2
 # version on upgrade.
 umask 077
+
+# --- Hook payload (optional). The `-t 0` tty guard prevents a hang when the
+# script is run by hand in a terminal (stdin open, nothing coming); hook
+# invocations pipe JSON, and /handoff-skill Bash invocations see /dev/null ->
+# instant empty read. Everything about this payload is optional: no payload,
+# no jq, or no parseable reason all degrade to today's always-write behavior.
+hook_payload=""
+[[ -t 0 ]] || hook_payload="$(cat 2>/dev/null || true)"
+session_end_reason=""
+if [[ -n "$hook_payload" ]] && command -v jq >/dev/null 2>&1; then
+  session_end_reason="$(jq -r '.reason // empty' <<<"$hook_payload" 2>/dev/null || true)"
+  # Charset guard: known reasons are lowercase words ("clear", "logout",
+  # "prompt_input_exit", "resume", "other"); anything else is treated as
+  # unrecognized -> empty -> the write proceeds.
+  [[ "$session_end_reason" =~ ^[a-z_]+$ ]] || session_end_reason=""
+fi
 
 IF_CURATED=0
 while [[ $# -gt 0 ]]; do
@@ -120,6 +149,10 @@ handoff_is_unedited_placeholder() {
 # HANDOFF_SYSTEMLOG_FILE — path to a system log the handoff-time nudge
 #   watches; flags system-level sessions that didn't touch it. Default:
 #   SYSTEM_LOG.md at repo root. Inert when the file is absent.
+# HANDOFF_SESSIONEND_SKIP_REASONS — space/comma-separated hook payload
+#   `reason` values that make an --if-curated (safety-net) run skip the
+#   write. Default: "resume". Set to "" to always write; see the
+#   reason-aware note in the header.
 #
 # Example for someone with a `_shared/` sibling that holds RFCs + ASKs:
 #   export HANDOFF_INFLIGHT_DIRS="docs design"
@@ -199,8 +232,23 @@ fi
 # presence) rather than by mtime, so post-/handoff work in the same
 # session doesn't trigger a false skip: any session that didn't replace
 # the placeholder is still considered "no curated content to preserve."
-if (( IF_CURATED )) && [[ -f "$handoff_path" ]]; then
-  if ! handoff_is_unedited_placeholder "$handoff_path"; then
+if (( IF_CURATED )); then
+  # Reason-aware skip (safety net only — never on curated /handoff or manual
+  # runs, which don't pass --if-curated). A reason in the skip list means
+  # "this isn't really an ending" (default: "resume" — /resume switches fire
+  # SessionEnd per switch, and each one would rotate churn through history).
+  # Same exit shape as the curated skip below: no rotation, no write.
+  # ${VAR-default} (not :-) so an explicitly-empty override disables the list.
+  skip_reasons="${HANDOFF_SESSIONEND_SKIP_REASONS-resume}"
+  if [[ -n "$session_end_reason" && -n "$skip_reasons" ]]; then
+    for skip_r in $(printf '%s' "$skip_reasons" | tr ',' ' '); do
+      if [[ "$skip_r" == "$session_end_reason" ]]; then
+        echo "$handoff_path"
+        exit 0
+      fi
+    done
+  fi
+  if [[ -f "$handoff_path" ]] && ! handoff_is_unedited_placeholder "$handoff_path"; then
     # The placeholder is gone → /handoff (or a human) replaced it with curated
     # Notes (or the file is otherwise non-placeholder). Preserve it.
     echo "$handoff_path"
