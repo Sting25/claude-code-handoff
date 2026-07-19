@@ -4,3 +4,6 @@
 *.bak.*
 .claude/handoff_history/
 .claude/handoff_pinned.md
+# test fixture base for test_install_ephemeral.sh part D — trap-cleaned, this
+# is belt-and-suspenders for a SIGKILL'd run
+tests/.handoff_test_persist.*

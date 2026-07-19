@@ -835,7 +835,7 @@ doctor() {
     echo "          HMAC-signed, so the rules/pinned layer loads as reference"
     echo "          data instead of binding rules. Install openssl to enable."
   fi
-  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_statusline handoff_compact_reset handoff_provenance; do
+  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
     dst="$claude_home/bin/$name.sh"
     if [[ -e "$dst" ]]; then
       if [[ -L "$dst" ]]; then

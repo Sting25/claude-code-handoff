@@ -53,8 +53,22 @@ check "volatile + FORCE_SYMLINK: symlink" yes "$(is_symlink "$home/bin/$SS")"
 rm -rf "$src" "$home"
 
 # --- D. Persistent source -> symlinks, no volatile warning (no false-positive)
-# A source path that is neither under /tmp nor named like an mktemp dir.
-persist="$(mktemp -d "$HOME/.handoff_test_persist.XXXXXX")"
+# A source path that is neither under /tmp nor named like an mktemp dir. The
+# repo checkout itself is the natural persistent base (a mktemp dir is by
+# definition volatile, and using $HOME here was the suite's one remaining
+# write into the developer's real home — issue #49's sibling). A contributor
+# CAN legitimately run the suite from a /tmp clone, where REPO_ROOT is
+# volatile too — fall back to the old $HOME base there so this case still
+# tests what it claims to. Trap-cleaned so a mid-test crash can't strand the
+# fixture in either location.
+eval "$(sed -n '/^is_volatile_path()/,/^}/p' "$REPO_ROOT/install.sh")"
+if is_volatile_path "$REPO_ROOT"; then
+  persist_base="$HOME"
+else
+  persist_base="$REPO_ROOT/tests"
+fi
+persist="$(mktemp -d "$persist_base/.handoff_test_persist.XXXXXX")"
+trap 'rm -rf "$persist"' EXIT
 cp "$REPO_ROOT/install.sh" "$persist/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$persist/"
 home="$(mktemp -d)"
 out="$(CLAUDE_HOME="$home" bash "$persist/install.sh" 2>&1)"
@@ -70,6 +84,9 @@ CLAUDE_HOME="$home" bash "$src/install.sh" --copy >/dev/null 2>&1   # copies all
 out="$(CLAUDE_HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; rc=$?
 check "doctor healthy: exit 0"          0   "$rc"
 check "doctor healthy: all resolve"     yes "$(has "$out" "all hooks resolve")"
+# Every script the installer places must be in doctor's checklist —
+# recover_tail was installed-but-unchecked until this check existed.
+check "doctor healthy: lists recover_tail" yes "$(has "$out" "handoff_recover_tail.sh")"
 
 # Break one hook: point it at a target that never existed (dangling). The
 # install.sh under $src stays in place so --doctor can still run.
