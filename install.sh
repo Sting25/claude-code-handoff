@@ -484,12 +484,55 @@ numbers, call our script from your existing statusline command instead.
 EOF
 }
 
+# Install-or-reconcile one hook. Three cases per event:
+#   - marker absent            -> append the canonical command (fresh install)
+#   - marker present, current  -> ok (idempotent re-run)
+#   - marker present, STALE    -> rewrite it in place to the canonical command,
+#     printing the old form loudly. The marker matches any release's variant of
+#     our command (it is just the script path), so when a release changes the
+#     arguments/redirects around that path, the old wiring would otherwise pass
+#     the "already present" check forever. Rewriting here makes the install
+#     self-healing — no bespoke migrate_* function per argument change (this
+#     subsumed the former migrate_legacy_se_hook; migrate_legacy_ss_hook must
+#     stay because the pre-0.3.0 inline form does not contain the script path).
+#     Never a silent skip and never a silent clobber: the old form is printed
+#     and lives in the settings.json backup made at the top of patch_settings.
+#     Comparison is against THIS event's canonical $cmd — events may share a
+#     marker (SessionEnd/PreCompact both use write_handoff.sh) but each call
+#     reconciles only its own event's list against its own command.
 maybe_install_hook() {
   local event="$1" marker="$2" cmd="$3"
   if jq -e --arg e "$event" --arg m "$marker" \
        '(.hooks[$e] // []) | any(.. | .command? // "" | contains($m))' \
        "$settings" >/dev/null 2>&1; then
-    echo "  ok      hook $event (already present)"
+    local stale
+    stale="$(jq -r --arg e "$event" --arg m "$marker" --arg c "$cmd" \
+      '(.hooks[$e] // []) | [.. | .command? // "" | select(contains($m) and . != $c)] | .[]' \
+      "$settings" 2>/dev/null)"
+    if [[ -z "$stale" ]]; then
+      echo "  ok      hook $event (already present)"
+      return
+    fi
+    # Rewrite every stale marker-match to the canonical command, then drop
+    # exact duplicates of the canonical beyond the first (covers a config that
+    # somehow held both a stale AND a current entry — rewriting alone would
+    # leave two identical hooks firing twice). Groups that empty out are
+    # removed; a user's own co-located command in the same group is untouched.
+    jq --arg e "$event" --arg m "$marker" --arg c "$cmd" '
+      .hooks[$e] |= (
+          map(.hooks |= ((. // []) | map(
+            if ((.command // "") | contains($m)) then .command = $c else . end)))
+        | delpaths([paths(objects and ((.command? // "") == $c))][1:])
+        | map(select((.hooks // []) | length > 0))
+      )
+    ' "$settings" > "$settings.tmp"
+    mv "$settings.tmp" "$settings"
+    echo "  UPDATE  hook $event — stale command from an older install rewritten:"
+    while IFS= read -r _old; do
+      echo "          old: $_old"
+    done <<< "$stale"
+    echo "          new: $cmd"
+    echo "          (old form also preserved in the settings.json backup above)"
     return
   fi
   jq --arg e "$event" --arg c "$cmd" '
@@ -517,9 +560,14 @@ maybe_install_perm() {
 
 # statusLine is a single settings.json slot (unlike hooks, which are lists we
 # can append to), so wiring it must never clobber a user's own setting:
-#   - absent/null           -> set ours
-#   - present and ours      -> ok (idempotent re-run)
-#   - present and NOT ours  -> untouched; print the documented manual step.
+#   - absent/null            -> set ours
+#   - present, ours, current -> ok (idempotent re-run)
+#   - present, ours, STALE   -> rewrite the command to canonical, printing the
+#     old form (same self-healing rule as maybe_install_hook: the marker only
+#     proves it is our script, not that the args/redirects are this release's).
+#     Only .command is replaced so any sibling keys the user added (e.g.
+#     "padding") survive.
+#   - present and NOT ours   -> untouched; print the documented manual step.
 maybe_install_statusline() {
   if jq -e '(.statusLine // null) == null' "$settings" >/dev/null 2>&1; then
     jq --arg c "$sl_cmd" '.statusLine = {"type": "command", "command": $c}' \
@@ -530,7 +578,18 @@ maybe_install_statusline() {
   fi
   if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
        "$settings" >/dev/null 2>&1; then
-    echo "  ok      statusLine (already ours)"
+    local cur_sl
+    cur_sl="$(jq -r '.statusLine.command // ""' "$settings" 2>/dev/null)"
+    if [[ "$cur_sl" == "$sl_cmd" ]]; then
+      echo "  ok      statusLine (already ours)"
+      return
+    fi
+    jq --arg c "$sl_cmd" '.statusLine.command = $c' "$settings" > "$settings.tmp"
+    mv "$settings.tmp" "$settings"
+    echo "  UPDATE  statusLine — stale command from an older install rewritten:"
+    echo "          old: $cur_sl"
+    echo "          new: $sl_cmd"
+    echo "          (old form also preserved in the settings.json backup above)"
     return
   fi
   echo "  skip    statusLine (you already have one — to use handoff's instead, set"
@@ -611,30 +670,11 @@ migrate_legacy_ss_hook() {
   echo "  migrate legacy SessionStart inline command removed (pre-0.3.0)"
 }
 
-# Pre-0.5.0 the SessionEnd hook called write_handoff.sh with either no
-# guard (pre-0.4.1) or with --if-stale-by N (0.4.1 through 0.4.2). Both
-# forms are legacy: the new content-check guard is --if-curated. Detect
-# any write_handoff.sh hook missing --if-curated and remove it so the
-# subsequent maybe_install_hook adds the current command. This single
-# detector covers both pre-0.4.1 and pre-0.5.0 forms.
-migrate_legacy_se_hook() {
-  if ! jq -e \
-         '(.hooks.SessionEnd // []) | any(.. | .command? // "" |
-            (contains("write_handoff.sh") and (contains("--if-curated") | not)))' \
-         "$settings" >/dev/null 2>&1; then
-    return
-  fi
-  jq '
-    .hooks.SessionEnd |= (
-        map(.hooks |= ((. // []) | map(select(((.command // "") |
-            (contains("write_handoff.sh") and (contains("--if-curated") | not))) | not))))
-      | map(select((.hooks // []) | length > 0))
-    )
-    | if ((.hooks.SessionEnd // []) | length) == 0 then del(.hooks.SessionEnd) else . end
-  ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
-  echo "  migrate legacy SessionEnd command without --if-curated removed (pre-0.5.0)"
-}
+# (The former migrate_legacy_se_hook — pre-0.5.0 SessionEnd forms missing
+# --if-curated — is gone: those commands contain the script-path marker, so
+# maybe_install_hook's stale-command reconcile now rewrites them generically.
+# migrate_legacy_ss_hook above must stay: the pre-0.3.0 inline form has no
+# script path in it, so the marker can't find it.)
 
 # Make settings.json safe to patch. Absent or empty -> seed `{}` (jq on empty
 # input silently emits nothing, which would blank the file with a false-success
@@ -690,7 +730,6 @@ patch_settings() {
   settings_backup="$settings.bak.$ts"
   patch_in_progress=1
   migrate_legacy_ss_hook
-  migrate_legacy_se_hook
   maybe_install_hook SessionStart     "$ss_marker" "$ss_cmd"
   maybe_install_hook SessionEnd       "$se_marker" "$se_cmd"
   # Marker detection is event-scoped, so PreCompact can safely reuse the

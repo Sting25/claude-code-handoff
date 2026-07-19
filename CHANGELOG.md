@@ -10,6 +10,42 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [Unreleased]
+
+### Changed
+- **Self-healing hook install: stale commands are reconciled, not skipped.**
+  `maybe_install_hook` detected a prior install by marker substring (the
+  script path), so when a release changed the arguments/redirects around
+  that path, the old wiring passed the "already present" check forever
+  unless a bespoke `migrate_legacy_*` function was hand-written for it
+  (0.5.0's `--if-curated` needed one). Now, when the marker matches but the
+  stored command differs from the canonical form for that event, the
+  installer rewrites it in place — loudly: the old and new command are both
+  printed, and the old form additionally survives in the `settings.json`
+  backup made at the start of every patch (the "never silently unwire"
+  principle from #45/#46 — no silent skip, no silent clobber). A config
+  somehow holding both a stale and a current entry is collapsed to one.
+  Reconciliation is per event against that event's canonical command, so
+  SessionEnd and PreCompact (which share the `write_handoff.sh` marker) are
+  handled independently. `maybe_install_statusline` gets the same treatment
+  for the "ours but command differs" case, replacing only `.command` so any
+  sibling keys you added (e.g. `"padding"`) survive; a statusLine that isn't
+  ours remains untouched as before.
+- **`migrate_legacy_se_hook` removed** — subsumed by the reconcile above
+  (its pre-0.5.0 target forms all contain the script-path marker).
+  `migrate_legacy_ss_hook` stays: the pre-0.3.0 inline SessionStart
+  one-liner contains no script path, so only the dedicated detector can
+  find it. Behavior nuance: the old migrator matched any command containing
+  the bare filename `write_handoff.sh`; the reconcile only touches commands
+  containing our full installed path, so a user's own wrapper that mentions
+  the script some other way is now left alone (consistent with #45/#46).
+
+### Added
+- `tests/test_install_reconcile.sh` — covers in-place rewrite with a
+  co-located user command, loud old/new output plus retained backup,
+  idempotent re-run, per-event SessionEnd/PreCompact scoping, stale+current
+  dedupe, and the statusLine ours-stale / not-ours cases.
+
 ## [0.10.0] — 2026-07-18
 
 **Re-run `./install.sh` after `git pull`** to pick up one **new installed

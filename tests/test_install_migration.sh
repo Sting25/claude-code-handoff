@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Coverage for install.sh's legacy hook-migration functions, previously
-# untested:
-#   migrate_legacy_ss_hook — removes the pre-0.3.0 inline SessionStart one-liner
-#   migrate_legacy_se_hook — removes any SessionEnd write_handoff.sh hook that
-#                            predates the --if-curated guard (pre-0.5.0)
-# Two failure modes per migrator: (a) coexistence — a legacy command sharing a
+# Coverage for install.sh's legacy-hook handling:
+#   migrate_legacy_ss_hook — removes the pre-0.3.0 inline SessionStart
+#                            one-liner (no script-path marker in it, so the
+#                            generic reconcile below can't see it)
+#   maybe_install_hook's stale-command reconcile — rewrites any marker-matching
+#                            hook whose command differs from the canonical form
+#                            (this subsumed the former migrate_legacy_se_hook;
+#                            cases C/D below now exercise the reconcile path
+#                            and double as its regression proof)
+# Two failure modes per path: (a) coexistence — a legacy command sharing a
 # hook group with a user's own command must lose only the legacy entry; (b)
 # false-positive — the CURRENT hook form must NOT be mistaken for legacy and
 # stripped (which would churn the file and risk duplication).
@@ -81,12 +85,13 @@ check "SS current: still present exactly once" 1   "$(count_with '.claude/bin/ha
 check "SS current: no legacy marker introduced" 0  "$(count_with 'if [ -f "$f" ]; then echo')"
 rm -rf "$HOME_DIR"
 
-# --- C. Legacy SessionEnd command missing --if-curated is migrated -----------
+# --- C. Legacy SessionEnd command missing --if-curated is reconciled ---------
 # A pre-0.5.0 SE hook (here the 0.4.1-era --if-stale-by form) calls
-# write_handoff.sh without --if-curated. Migration removes it; install then adds
-# the current --if-curated command. Net: exactly one SE write_handoff hook, and
-# it carries --if-curated. (Without migration, maybe_install_hook would see the
-# marker already present and leave the un-guarded legacy in place.)
+# write_handoff.sh without --if-curated. maybe_install_hook's stale-command
+# reconcile rewrites it in place to the current command. Net: exactly one SE
+# write_handoff hook, and it carries --if-curated. (Without the reconcile,
+# the marker substring would read as "already present" and leave the
+# un-guarded legacy in place forever.)
 read -r -d '' SE_LEGACY <<'JSON' || true
 { "hooks": {
   "SessionEnd": [ { "hooks": [
