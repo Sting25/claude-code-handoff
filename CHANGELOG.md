@@ -12,6 +12,18 @@ are appended).
 
 ## [Unreleased]
 
+### Fixed
+- **Test suite no longer writes key material to the real `~/.claude`**
+  (#49). Since the v0.10.0 signing feature, `write_handoff.sh` generates
+  the per-machine HMAC secret on first signed write; the pre-existing
+  `test_write_handoff_*.sh` files invoked it without jailing
+  `HANDOFF_SECRET_FILE` or `HOME`, so the first `tests/run.sh` on a
+  machine silently created `~/.claude/handoff_secret`. The jail now
+  lives centrally in `tests/lib.sh` (every current and future test file
+  inherits it; per-fixture overrides still win), with a guard test
+  (`tests/test_secret_jail.sh`) asserting a signed write under a jailed
+  `HOME` leaves it untouched. No shipped script changed — tests only.
+
 ### Changed
 - **Self-healing hook install: stale commands are reconciled, not skipped.**
   `maybe_install_hook` detected a prior install by marker substring (the

@@ -32,7 +32,12 @@ setup_home() {
   SRC_DIR="$src"
 }
 do_uninstall() {  # [ENV=VAL ...]
-  OUT="$(env CLAUDE_HOME="$HOME_DIR" "$@" bash "$SRC_DIR/install.sh" --uninstall 2>&1)"
+  # env -u strips the suite-wide HANDOFF_SECRET_FILE jail lib.sh exports
+  # (issue #49): the default-path cases below need the override ABSENT —
+  # install.sh --uninstall skips the secret entirely whenever it is set.
+  # The explicit-override case still works: assignments in "$@" come after
+  # -u and win.
+  OUT="$(env -u HANDOFF_SECRET_FILE CLAUDE_HOME="$HOME_DIR" "$@" bash "$SRC_DIR/install.sh" --uninstall 2>&1)"
 }
 cleanup() { rm -rf "$SRC_DIR" "$HOME_DIR"; }
 

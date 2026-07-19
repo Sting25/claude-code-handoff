@@ -17,6 +17,18 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2034  # not used here; consumed by the sourcing test files ("$REPO_ROOT/bin/...")
 REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 
+# Keep signing side effects inside the test sandbox (issue #49):
+# write_handoff.sh generates the per-machine HMAC secret on first signed write
+# (handoff_ensure_secret), defaulting to $HOME/.claude/handoff_secret — so any
+# test that invokes it without jailing this variable would materialize key
+# material in the developer's REAL home. `:=` fills only an unset value: test
+# files that jail a per-fixture path via `env HANDOFF_SECRET_FILE=...` keep
+# their own, and a path deliberately exported by the caller wins too.
+# test_uninstall_secret.sh must strip this with `env -u` for its default-path
+# cases — install.sh --uninstall skips the secret whenever the override is set.
+: "${HANDOFF_SECRET_FILE:=$(mktemp -d)/handoff_secret}"
+export HANDOFF_SECRET_FILE
+
 _pass=0
 _fail=0
 
