@@ -12,6 +12,8 @@ are appended).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-19
+
 ### Fixed
 - **`--doctor` now checks `handoff_recover_tail.sh`** — the script has been
   installed (and uninstalled) all along but was missing from doctor's
