@@ -10,7 +10,7 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
-## [Unreleased]
+## [0.10.0] — 2026-07-18
 
 **Re-run `./install.sh` after `git pull`** to pick up one **new installed
 file**, `bin/handoff_provenance.sh` — a shared library sourced by the
@@ -54,11 +54,6 @@ installs re-run `./install.sh` as usual. New env vars: `HANDOFF_SECRET_FILE`,
   secret's value is never printed. Existing signed handoffs degrade to
   reference-data framing after removal (nothing breaks; `/handoff` re-signs
   on the next install).
-
-## [Unreleased]
-
-**No settings.json changes and no new installed scripts** — a `git pull` is
-enough (copy-mode installs re-run `./install.sh` as usual).
 
 ### Fixed
 - **Pruning could delete files the user put in `.claude/handoff_history/` or
