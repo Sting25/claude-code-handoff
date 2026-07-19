@@ -13,6 +13,16 @@ are appended).
 ## [Unreleased]
 
 ### Fixed
+- **`--doctor` now checks `handoff_recover_tail.sh`** — the script has been
+  installed (and uninstalled) all along but was missing from doctor's
+  checklist, so a dangling or deleted copy went unreported while
+  `/handoff-recover`'s tail rescue silently no-opped. A guard test asserts
+  it appears in doctor output.
+- **The test suite's last real-`$HOME` write is gone.** The "persistent
+  source" fixture in `test_install_ephemeral.sh` was anchored in the real
+  `$HOME` (a mktemp base is volatile by definition); it now uses the repo
+  checkout when that is persistent, falls back to `$HOME` only for a
+  /tmp-clone run, and is trap-cleaned either way. Companion to #49.
 - **Test suite no longer writes key material to the real `~/.claude`**
   (#49). Since the v0.10.0 signing feature, `write_handoff.sh` generates
   the per-machine HMAC secret on first signed write; the pre-existing
