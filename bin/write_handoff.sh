@@ -32,6 +32,16 @@
 #                          session loads the rules as data, not binding.
 #                          Degrades to a no-op warning when signing is
 #                          unavailable (no openssl / no provenance lib).
+#   --session-id ID        Session identity for this write. Embedded as a
+#                          `<!-- HANDOFF_SESSION: ID -->` marker inside the
+#                          signed body; a later write carrying the SAME id
+#                          updates handoff_current.md in place (no rotation
+#                          into history, curated Notes/Rules carried forward)
+#                          instead of rotating its own earlier snapshot.
+#                          Precedence when absent: `.session_id` from the
+#                          hook stdin payload, then $CLAUDE_CODE_SESSION_ID.
+#                          Invalid/unknown ids degrade to today's
+#                          always-rotate behavior — never a hard failure.
 #
 # Reason-aware safety net (hook invocations only): when invoked as a hook,
 # stdin carries a JSON payload that MAY include a `reason` field (e.g.
@@ -65,12 +75,17 @@ umask 077
 hook_payload=""
 [[ -t 0 ]] || hook_payload="$(cat 2>/dev/null || true)"
 session_end_reason=""
+payload_session_id=""
 if [[ -n "$hook_payload" ]] && command -v jq >/dev/null 2>&1; then
   session_end_reason="$(jq -r '.reason // empty' <<<"$hook_payload" 2>/dev/null || true)"
   # Charset guard: known reasons are lowercase words ("clear", "logout",
   # "prompt_input_exit", "resume", "other"); anything else is treated as
   # unrecognized -> empty -> the write proceeds.
   [[ "$session_end_reason" =~ ^[a-z_]+$ ]] || session_end_reason=""
+  # Session identity from the same payload (SessionEnd/PreCompact both carry
+  # .session_id — same jq-optional pattern as handoff_turn_append.sh). Charset
+  # is validated at the resolution point below, alongside the other sources.
+  payload_session_id="$(jq -r '.session_id // empty' <<<"$hook_payload" 2>/dev/null || true)"
 fi
 
 # Shared provenance helpers (issue #42): HMAC signing so the next session's
@@ -97,6 +112,7 @@ can_sign() {
 
 IF_CURATED=0
 RESTAMP=0
+cli_session_id=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --if-curated)
@@ -105,6 +121,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --restamp)
       RESTAMP=1
+      shift
+      ;;
+    --session-id)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --session-id requires a value" >&2
+        exit 2
+      fi
+      cli_session_id="$2"
+      shift 2
+      ;;
+    --session-id=*)
+      cli_session_id="${1#--session-id=}"
       shift
       ;;
     --if-stale-by)
@@ -129,10 +157,32 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --- Session identity (session-sticky writes). Precedence: --session-id
+# flag, hook payload .session_id, CLAUDE_CODE_SESSION_ID env. Each candidate
+# must match the same charset handoff_turn_append.sh enforces on ids; the
+# first VALID one wins and an invalid/empty one just falls through (the empty
+# string fails the regex, so "no id anywhere" resolves to empty). Everything
+# downstream degrades to the pre-session-sticky behavior on an empty id —
+# never a hard failure.
+session_id=""
+for sid_cand in "$cli_session_id" "$payload_session_id" "${CLAUDE_CODE_SESSION_ID:-}"; do
+  if [[ "$sid_cand" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    session_id="$sid_cand"
+    break
+  fi
+done
+
 # Sentinel embedded in the auto-generated placeholder block; presence means
 # the placeholder is still in place, absence means the /handoff skill (or a
 # human editor) has replaced the placeholder with curated Notes.
 HANDOFF_PLACEHOLDER_SENTINEL="<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->"
+
+# Well-formed session-marker line, written by this script immediately before
+# the HMAC trailer (i.e. INSIDE the signed content, so a clone can't graft a
+# marker onto a doc without failing the MAC). Matched as a whole line, same
+# discipline as the trailer strip — prose merely mentioning the marker text
+# is left alone and stays covered by the digest.
+HANDOFF_SESSION_MARKER_RE='^<!-- HANDOFF_SESSION: [A-Za-z0-9_-]+ -->[[:space:]]*$'
 
 # Is handoff_current.md still the *unedited* placeholder?
 #
@@ -314,17 +364,28 @@ if (( RESTAMP )); then
     echo "$handoff_path"
     exit 0
   fi
-  if mac="$(handoff_mac_compute "$handoff_path" ensure)"; then
-    restamp_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
-    trap 'rm -f "$restamp_tmp"' EXIT
-    {
-      # Strip only a well-formed trailer (matching handoff_mac_compute), so a
-      # prose line that merely starts with the prefix is preserved and stays
-      # covered by the digest. `|| true`: grep -v exits 1 on an all-stripped
-      # (empty) doc, which under set -e/pipefail would abort the restamp.
+  restamp_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
+  trap 'rm -f "$restamp_tmp"' EXIT
+  {
+    # Strip only a well-formed trailer (matching handoff_mac_compute), so a
+    # prose line that merely starts with the prefix is preserved and stays
+    # covered by the digest. When a session id is known, also strip any
+    # well-formed session-marker line and re-emit the marker fresh — this
+    # refreshes a stale id and restores a marker the skill's Edit dropped;
+    # without an id, an existing marker is preserved untouched. `|| true`:
+    # grep -v exits 1 on an all-stripped (empty) doc, which under
+    # set -e/pipefail would abort the restamp.
+    if [[ -n "$session_id" ]]; then
+      LC_ALL=C grep -Ev "${HANDOFF_SESSION_MARKER_RE}|^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$" "$handoff_path" || true
+      printf '<!-- HANDOFF_SESSION: %s -->\n' "$session_id"
+    else
       LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$handoff_path" || true
-      printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac"
-    } > "$restamp_tmp"
+    fi
+  } > "$restamp_tmp"
+  # Sign the REBUILT body (not the original file): when the marker line was
+  # inserted or refreshed above, the digest must cover the new content.
+  if mac="$(handoff_mac_compute "$restamp_tmp" ensure)"; then
+    printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$restamp_tmp"
     chmod 600 "$restamp_tmp" 2>/dev/null || true
     mv -f "$restamp_tmp" "$handoff_path"
   else
@@ -532,6 +593,67 @@ if [[ -f "$handoff_path" ]]; then
   # shellcheck disable=SC2016  # backticks are literal chars in the markdown HEAD line, not command substitution
   prev_head="$(grep -m1 '^\*\*HEAD:\*\*' "$handoff_path" 2>/dev/null \
     | sed -E 's/.*`([0-9a-fA-F]+)`.*/\1/' | grep -Ei '^[0-9a-f]+$' || true)"
+fi
+
+# --- Session-sticky update-in-place. A SECOND write from the SAME session
+# must not rotate its own earlier handoff into history (same-session churn
+# evicts OTHER sessions' snapshots from the keep-N retention) or silently
+# drop curation the session already did. Read the session marker out of the
+# existing doc; when it matches this write's id (both non-empty), the rotate/
+# prune step at the bottom is skipped and any curated Notes / Rules blocks
+# are carried forward into the rebuild below. Differing ids, a legacy doc
+# without a marker, or no id for THIS write all fall through to the exact
+# pre-existing rotate behavior (same_session=0, carries empty).
+same_session=0
+carry_notes=""
+carry_rules=""
+if [[ -n "$session_id" && -f "$handoff_path" ]]; then
+  prev_session_id="$(LC_ALL=C grep -E "$HANDOFF_SESSION_MARKER_RE" "$handoff_path" 2>/dev/null \
+    | tail -n 1 \
+    | sed -E 's/^<!-- HANDOFF_SESSION: ([A-Za-z0-9_-]+) -->.*$/\1/' || true)"
+  if [[ -n "$prev_session_id" && "$prev_session_id" == "$session_id" ]]; then
+    same_session=1
+    # Curated Notes: everything from the Notes header to EOF, minus the
+    # session marker and HMAC trailer lines (both re-emitted fresh on this
+    # write). Only when the placeholder sentinel is gone — an unedited
+    # placeholder block is mechanical and the rebuild regenerates it anyway.
+    if ! handoff_is_unedited_placeholder "$handoff_path"; then
+      carry_notes="$(LC_ALL=C awk '
+        $0 == "## Notes from this session" { found = 1 }
+        found { print }
+      ' "$handoff_path" 2>/dev/null \
+        | LC_ALL=C grep -Ev "${HANDOFF_SESSION_MARKER_RE}|^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$" || true)"
+    fi
+    # Curated Rules: the BIND region whose body carries the Rules header,
+    # marker lines included. The exact-header match skips the pinned BIND
+    # region, which precedes the Rules region in the doc. Extract FIRST, then
+    # test the extracted region for the placeholder token — NOT the whole file.
+    # A whole-file grep (as --if-curated uses, where a false negative merely
+    # fails safe toward preserve) is data-loss here, where the rules gate is the
+    # SOLE decider for the carry: the token string legitimately appears in
+    # curated Notes prose or an embedded pin body elsewhere in the doc, and a
+    # match outside the Rules region would falsely drop the still-curated fences.
+    if grep -qF "$HANDOFF_BIND_BEGIN" "$handoff_path" 2>/dev/null; then
+      carry_rules="$(LC_ALL=C awk '
+        $0 == "<!-- HANDOFF_BIND_BEGIN -->" { buf = $0; inb = 1; isrules = 0; next }
+        inb {
+          buf = buf ORS $0
+          if ($0 == "## Rules (fences — carried into the next session)") isrules = 1
+          if ($0 == "<!-- HANDOFF_BIND_END -->") {
+            if (isrules) { print buf; exit }
+            inb = 0
+          }
+        }
+      ' "$handoff_path" 2>/dev/null || true)"
+      # Scoped placeholder check: only a token INSIDE the extracted Rules region
+      # means the region is still an unedited placeholder — discard the carry so
+      # the rebuild regenerates a fresh placeholder (identical to today).
+      if [[ -n "$carry_rules" ]] \
+         && printf '%s' "$carry_rules" | grep -qF "$HANDOFF_RULES_PLACEHOLDER_TOKEN"; then
+        carry_rules=""
+      fi
+    fi
+  fi
 fi
 
 # NB: rotation is deferred until the replacement document is fully built (see
@@ -802,23 +924,51 @@ EOF
   # loads with binding framing — model-authored Notes below never do, so a
   # stray "next session should..." sentence can't become law — and even
   # marked content binds only when the document's provenance verifies.
-  printf '%s\n' "$HANDOFF_BIND_BEGIN"
-  printf '## Rules (fences — carried into the next session)\n\n'
-  printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
-  printf '%s\n' "$HANDOFF_BIND_END"
+  # A same-session rewrite carries an already-curated Rules region forward
+  # verbatim (markers included) in place of the fresh placeholder region.
+  if [[ -n "$carry_rules" ]]; then
+    printf '%s\n' "$carry_rules"
+  else
+    printf '%s\n' "$HANDOFF_BIND_BEGIN"
+    printf '## Rules (fences — carried into the next session)\n\n'
+    printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
+    printf '%s\n' "$HANDOFF_BIND_END"
+  fi
   printf '\n'
   echo '---'
   echo
-  printf '## Notes from this session\n\n'
-  printf '%s\n' "$HANDOFF_PLACEHOLDER_SENTINEL"
-  printf '\n'
-  printf '_The /handoff skill should replace this entire block (sentinel\n'
-  printf 'comment included) with curated decisions, in-flight tracks, open\n'
-  printf 'questions, and "next session should start with X" notes. The auto-\n'
-  printf 'snapshot above captures git state; the prose below captures intent\n'
-  printf 'that only the conversation knows. The sentinel above is how the\n'
-  printf 'SessionEnd safety-net detects whether curation has happened._\n'
+  # Same-session rewrite: curated Notes from this session's earlier write
+  # replace the placeholder block (header line included in the carry). Run
+  # the carry through the marker sanitizer when available — Notes live
+  # OUTSIDE the BIND markers, so a marker-shaped line here could otherwise
+  # unbalance the regions and fail the whole doc closed on load.
+  if [[ -n "$carry_notes" ]]; then
+    if type handoff_sanitize_markers >/dev/null 2>&1; then
+      printf '%s\n' "$carry_notes" | handoff_sanitize_markers
+    else
+      printf '%s\n' "$carry_notes"
+    fi
+  else
+    printf '## Notes from this session\n\n'
+    printf '%s\n' "$HANDOFF_PLACEHOLDER_SENTINEL"
+    printf '\n'
+    printf '_The /handoff skill should replace this entire block (sentinel\n'
+    printf 'comment included) with curated decisions, in-flight tracks, open\n'
+    printf 'questions, and "next session should start with X" notes. The auto-\n'
+    printf 'snapshot above captures git state; the prose below captures intent\n'
+    printf 'that only the conversation knows. The sentinel above is how the\n'
+    printf 'SessionEnd safety-net detects whether curation has happened._\n'
+  fi
 } > "$handoff_tmp"
+
+# Session marker: appended as the last body line, immediately before the HMAC
+# trailer below — i.e. INSIDE the signed content, so the loader's digest
+# covers it and a clone can't graft a marker onto a doc it didn't write.
+# --restamp preserves/refreshes it (see the RESTAMP block above). No id, no
+# marker: the doc is byte-identical to a pre-session-sticky write.
+if [[ -n "$session_id" ]]; then
+  printf '<!-- HANDOFF_SESSION: %s -->\n' "$session_id" >> "$handoff_tmp"
+fi
 
 # Provenance stamp (issue #42): HMAC-SHA256 the fully-built document with the
 # per-machine secret (auto-generated on first use, 0600, never in any repo)
@@ -844,8 +994,14 @@ chmod 600 "$handoff_tmp" 2>/dev/null || true
 # Any failure during the doc build above leaves handoff_current.md untouched
 # (the EXIT trap just removes the tmp); the destructive window is reduced to
 # the two renames here and below.
-rotate_existing_handoff
-prune_history || true   # a prune failure must never abort the handoff write
+# Same-session rewrite: skip rotation AND pruning entirely — the outgoing doc
+# is this session's own superseded draft (its curation was carried forward
+# above), not a session ending worth archiving, and rotating it would churn
+# other sessions' handoffs out of the keep-N history.
+if (( ! same_session )); then
+  rotate_existing_handoff
+  prune_history || true   # a prune failure must never abort the handoff write
+fi
 
 # Atomic, symlink-safe publish: mv replaces the destination NAME, so it can't be
 # made to write through a symlink that reappears after the guard above (TOCTOU),

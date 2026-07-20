@@ -21,10 +21,14 @@ nothing gets lost across the restart boundary.
    - The "verify state matches reality" command block
    - Before overwriting `handoff_current.md`, the script rotates the
      previous one into `.claude/handoff_history/` and prunes to the
-     last `HANDOFF_HISTORY_KEEP` (default 5). The next session's
-     SessionStart hook auto-includes the most recent history entry
-     if the current handoff has no curated Notes; `/handoff-more` lets
-     a future session pull more of the history into context on demand.
+     last `HANDOFF_HISTORY_KEEP` (default 5) — unless the previous one
+     was written by this SAME session (matched via `--session-id`), in
+     which case it is updated in place with curated content carried
+     forward, so same-session re-runs don't churn history. The next
+     session's SessionStart hook auto-includes the most recent history
+     entry if the current handoff has no curated Notes; `/handoff-more`
+     lets a future session pull more of the history into context on
+     demand.
    (Auto-compaction is also checkpointed: a `PreCompact` hook fires
    the same `--if-curated` safety net, so an uncurated session gets a
    mechanical snapshot before compaction destroys the conversation.
@@ -39,10 +43,15 @@ nothing gets lost across the restart boundary.
 
 1. Run via Bash:
    ```bash
-   bash ~/.claude/bin/write_handoff.sh
+   bash ~/.claude/bin/write_handoff.sh ${CLAUDE_CODE_SESSION_ID:+--session-id "$CLAUDE_CODE_SESSION_ID"}
    ```
-   The script outputs the absolute path of the written handoff
-   (`<repo-root>/.claude/handoff_current.md`).
+   The `${VAR:+...}` guard passes `--session-id` only when the env var
+   is set and non-empty — never pass a made-up id. The id makes the
+   write session-sticky: a second `/handoff` from this same session
+   updates `handoff_current.md` in place (carrying your curated
+   Notes/Rules forward) instead of rotating its own earlier snapshot
+   into history. The script outputs the absolute path of the written
+   handoff (`<repo-root>/.claude/handoff_current.md`).
 
 2. Read the file you just wrote. Then Edit it to **replace the
    placeholder block** under `## Notes from this session` with curated
@@ -116,8 +125,11 @@ nothing gets lost across the restart boundary.
    `write_handoff.sh` put on the file at write time (the trailer line
    `<!-- HANDOFF_HMAC: … -->` — leave it alone; it gets replaced). Run:
    ```bash
-   bash ~/.claude/bin/write_handoff.sh --restamp
+   bash ~/.claude/bin/write_handoff.sh --restamp ${CLAUDE_CODE_SESSION_ID:+--session-id "$CLAUDE_CODE_SESSION_ID"}
    ```
+   (Same guard as step 1: the id keeps the session marker line
+   `<!-- HANDOFF_SESSION: … -->` fresh inside the re-signed body —
+   leave that line alone too when editing.)
    This re-signs `handoff_current.md` in place with the per-machine
    secret so the next session loads the Rules/pinned blocks as binding.
    Best-effort: if it warns (no openssl, older install), continue — the
