@@ -12,6 +12,9 @@ are appended).
 
 ## [Unreleased]
 
+### Added
+- **Session-sticky handoff rewrites.** When multiple `/handoff` invocations occur within the same Claude Code session, rewrites now update `handoff_current.md` in place instead of rotating the previous version into history — so curated "Notes from this session" and Rules fences carry forward without history churn. Session identity is resolved with precedence: `--session-id` CLI flag, `.session_id` from hook stdin JSON payload, `CLAUDE_CODE_SESSION_ID` env var, or empty if absent (validated against `[A-Za-z0-9_-]+`; invalid values fall through). When a session id is known, a `<!-- HANDOFF_SESSION: <id> -->` marker is embedded as the final body line before the HMAC trailer (inside the signed content, so it persists through re-signs). Before rotation, the existing doc's marker is extracted; on a same-id match, rotation is skipped entirely and curated Notes (checked via the existing placeholder-detection logic) plus a curated Rules BIND region are carried forward into the fresh doc in place of their placeholders. Differing or absent session ids (legacy files without a marker, or no id available now) behave exactly as before — rotate if curated, delete if not, prune history as usual. Gracefully backward-compatible: repos and Claude Code versions without `CLAUDE_CODE_SESSION_ID` keep the exact pre-sticky rotation behavior. The `/handoff` skill teaches `${CLAUDE_CODE_SESSION_ID:+--session-id "$CLAUDE_CODE_SESSION_ID"}` on both the initial write and `--restamp` calls.
+
 ## [0.11.0] — 2026-07-19
 
 ### Fixed

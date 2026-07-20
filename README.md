@@ -201,6 +201,24 @@ only the exact shape it writes (`handoff_<YYYY-MM-DD>_<HHMMSS>.md`), and
 a raw dump is only ever pruned when its companion cursor file (written
 beside every dump the tool creates) is present.
 
+### Session-sticky writes within a session
+
+Curated `/handoff` rewrites within the same Claude Code session now update
+`handoff_current.md` in place — your Notes and Rules don't rotate into
+history with each rewrite. Session identity is resolved from `--session-id`
+(which the skill passes when `CLAUDE_CODE_SESSION_ID` is set), the hook
+stdin JSON payload, or the env var directly; validated against
+`[A-Za-z0-9_-]+`, falling back to empty if invalid or unset. When a valid
+id is known, the doc embeds a `<!-- HANDOFF_SESSION: <id> -->` marker as
+the last body line before the HMAC trailer (inside the signed content).
+Before rotating, the existing doc's marker is extracted; on a same-id
+match, rotation is skipped and curated Notes plus Rules fences are carried
+forward into the fresh doc in place of their placeholders. If ids differ
+or either side lacks an id, behavior is identical to earlier versions —
+rotate and prune as usual. The feature is fully backward-compatible:
+absent or invalid session ids silently fall back to the pre-sticky rotation
+behavior, so repos without `CLAUDE_CODE_SESSION_ID` keep today's rotation.
+
 ### Pinned context (carried forward every handoff)
 
 Some context outlives a single session but isn't a permanent rule —
