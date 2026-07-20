@@ -29,6 +29,15 @@ REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 : "${HANDOFF_SECRET_FILE:=$(mktemp -d)/handoff_secret}"
 export HANDOFF_SECRET_FILE
 
+# Session-identity jail (session-sticky writes): write_handoff.sh falls back
+# to $CLAUDE_CODE_SESSION_ID when neither --session-id nor a hook payload
+# supplies an id — and this suite often runs INSIDE a Claude Code session,
+# where that var is exported. Left in place, every fixture write would carry
+# the outer session's id and go update-in-place (no rotation), flipping
+# rotation/prune assertions that expect the legacy always-rotate path. Tests
+# that exercise the env fallback set the variable explicitly themselves.
+unset CLAUDE_CODE_SESSION_ID
+
 _pass=0
 _fail=0
 
