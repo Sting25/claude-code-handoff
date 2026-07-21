@@ -12,6 +12,8 @@ are appended).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-21
+
 ### Added
 - **Install-time model pin + doctor context-window check.** `./install.sh
   --model 'opus[1m]'` (env: `HANDOFF_MODEL`; the flag wins) sets a top-level
