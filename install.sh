@@ -24,6 +24,7 @@
 #   ./install.sh              # install (symlink from a persistent clone, else copy)
 #   ./install.sh --copy       # force copy mode (good for ephemeral sources)
 #   ./install.sh --link       # force symlinks even from a volatile path
+#   ./install.sh --model 'opus[1m]'  # also pin "model" in settings.json (env: HANDOFF_MODEL)
 #   ./install.sh --doctor     # report any dangling/missing installed hooks
 #   ./install.sh --uninstall  # remove symlinks + strip patched entries
 #   ./install.sh --help
@@ -45,6 +46,12 @@ settings="$claude_home/settings.json"
 # first run's pre-patch settings.json backup, destroying the only safe copy.
 ts="$(date +%Y%m%d_%H%M%S)_$$"
 mode=install
+
+# Optional model pin (--model / HANDOFF_MODEL, flag wins). Opaque string,
+# passed through verbatim — never validated against a model list, and never
+# defaulted: this repo is installed by other people too, so the pin is always
+# explicit user input. Empty means "no pin requested".
+model_pin=""
 
 # Link strategy. "auto" symlinks from a persistent source and copies from a
 # volatile one (see is_volatile_path below); --copy / --link force the choice,
@@ -118,14 +125,31 @@ while [[ $# -gt 0 ]]; do
     --doctor)    mode=doctor ;;
     --copy)      link_mode=copy ;;
     --link)      link_mode='link' ;;
+    --model)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "ERROR: --model requires a value (e.g. --model 'opus[1m]')" >&2
+        exit 2
+      fi
+      model_pin="$2"; shift ;;
+    --model=*)   model_pin="${1#--model=}" ;;
     --help|-h)
-      sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
 done
+
+# Env fallback for the model pin; an explicit --model flag wins.
+if [[ -z "$model_pin" && -n "${HANDOFF_MODEL:-}" ]]; then
+  model_pin="$HANDOFF_MODEL"
+fi
+
+# Where a model pin WE wrote is recorded, so --uninstall can be an exact
+# inverse: the key is removed only when this installer set it AND the value
+# is still exactly what it set — a user's later edit always wins.
+model_pin_record="$claude_home/handoff-model-pin"
 
 # Canonical hook commands and permissions. Edit these together with
 # CHANGELOG.md if you ever change the snippet shape.
@@ -558,6 +582,46 @@ maybe_install_perm() {
   echo "  add     permission: $perm"
 }
 
+# Optional model pin. Never overwrites an existing "model" key: a machine
+# where the user already chose a model keeps that choice, and the differing
+# request is reported instead of applied. A write is recorded in
+# $model_pin_record (0600 via umask) so --uninstall can undo exactly ours.
+maybe_install_model() {
+  [[ -n "$model_pin" ]] || return 0
+  local cur
+  cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+  if [[ -z "$cur" ]]; then
+    jq --arg m "$model_pin" '.model = $m' "$settings" > "$settings.tmp"
+    mv "$settings.tmp" "$settings"
+    printf '%s\n' "$model_pin" > "$model_pin_record"
+    echo "  add     model: $model_pin (recorded for uninstall)"
+  elif [[ "$cur" == "$model_pin" ]]; then
+    echo "  ok      model already set: $cur"
+  else
+    echo "  keep    model '$cur' (your existing choice preserved — NOT overwriting"
+    echo "          with requested '$model_pin'; edit settings.json yourself to change it)"
+  fi
+}
+
+maybe_uninstall_model() {
+  if [[ ! -f "$model_pin_record" || -L "$model_pin_record" ]]; then
+    echo "  ok      model (not pinned by this installer)"
+    return 0
+  fi
+  local rec cur
+  rec="$(tr -d '[:space:]' < "$model_pin_record" 2>/dev/null || true)"
+  cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+  if [[ -n "$rec" && "$cur" == "$rec" ]]; then
+    jq 'del(.model)' "$settings" > "$settings.tmp"
+    mv "$settings.tmp" "$settings"
+    echo "  remove  model: $rec (this installer set it, unchanged since)"
+  else
+    echo "  keep    model '$cur' (differs from the recorded pin '$rec' — you changed"
+    echo "          it since install; leaving your value alone)"
+  fi
+  rm -f "$model_pin_record"
+}
+
 # statusLine is a single settings.json slot (unlike hooks, which are lists we
 # can append to), so wiring it must never clobber a user's own setting:
 #   - absent/null            -> set ours
@@ -745,6 +809,7 @@ patch_settings() {
   maybe_install_perm "$perm_ss"
   maybe_install_perm "$perm_sl"
   maybe_install_perm "$perm_reset"
+  maybe_install_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   # If no change vs backup, drop the redundant backup.
   if cmp -s "$settings" "$settings.bak.$ts"; then
@@ -772,6 +837,8 @@ unpatch_settings() {
     echo "  - $perm_ss"
     echo "  - $perm_sl"
     echo "  - $perm_reset"
+    echo "and, if you used --model, the top-level \"model\" key (the value this"
+    echo "installer wrote, if any, is recorded in $model_pin_record)."
     return
   fi
   if [[ ! -f "$settings" ]]; then
@@ -804,6 +871,7 @@ unpatch_settings() {
   maybe_uninstall_perm "$perm_ss"
   maybe_uninstall_perm "$perm_sl"
   maybe_uninstall_perm "$perm_reset"
+  maybe_uninstall_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   if cmp -s "$settings" "$settings.bak.$ts"; then
     rm "$settings.bak.$ts"
@@ -817,7 +885,7 @@ unpatch_settings() {
 # loudly here. Exit non-zero if anything is broken so CI / a wrapper can detect
 # it. (issue #21)
 doctor() {
-  local broken=0 dst tgt name
+  local broken=0 dst tgt name mdl
   echo "doctor: checking installed handoff hooks under $claude_home/bin"
   # jq is a RUNTIME dependency of the Stop hook (payload parsing), the ctx
   # nudge, and the /handoff-recover tail rescue — a resolving script link is
@@ -866,6 +934,18 @@ doctor() {
     else
       echo "  info    statusLine unset (re-run ./install.sh to wire it)"
     fi
+    # Model context-window check — advisory only, never counts toward broken:
+    # a bare 'opus'/'claude-opus-4-8' pin silently runs at a 200k context
+    # window; the 1M variant needs the [1m] suffix. Any other value (including
+    # absent) is a legitimate choice we stay quiet about.
+    mdl="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+    case "$mdl" in
+      opus|claude-opus-4-8)
+        echo "  WARN    model '$mdl' in settings.json is the 200k-context variant —"
+        echo "          for the 1M window set \"model\": \"${mdl}[1m]\" (edit settings.json"
+        echo "          or run /model ${mdl}[1m] in a session)."
+        ;;
+    esac
     echo
   fi
   if (( broken )); then
@@ -904,6 +984,12 @@ elif [[ "$mode" == install ]]; then
   echo "settings.json:"
   patch_settings
   echo
+  if [[ -z "$model_pin" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
+     && jq -e 'type == "object" and ((.model // null) == null)' "$settings" >/dev/null 2>&1; then
+    echo "NOTE: no model pinned in settings.json — a bare 'opus' selection runs at a"
+    echo "      200k context window. Re-run  ./install.sh --model 'opus[1m]'  to pin one."
+    echo
+  fi
   echo "done. start a new Claude Code session — /handoff is available now."
   if [[ "$COPIED_ANY" == "1" ]]; then
     echo
