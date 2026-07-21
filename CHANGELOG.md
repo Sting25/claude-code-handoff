@@ -12,6 +12,20 @@ are appended).
 
 ## [Unreleased]
 
+### Added
+- **Install-time model pin + doctor context-window check.** `./install.sh
+  --model 'opus[1m]'` (env: `HANDOFF_MODEL`; the flag wins) sets a top-level
+  `"model"` in `~/.claude/settings.json` so a fresh machine can't silently
+  land on the wrong model — but ONLY when no model is already set: an
+  existing choice is never overwritten, and a differing request is reported
+  instead. A plain install with no model configured prints a one-line NOTE
+  (bare `opus` runs at a 200k context window) rather than staying silent.
+  Writes are recorded in `~/.claude/handoff-model-pin` so `--uninstall`
+  removes the key only when this installer set it and the value is
+  unchanged — a user's later edit always wins. `--doctor` now WARNs when
+  the pinned model is bare `opus`/`claude-opus-4-8` (the 200k-context
+  variants) and points at the `[1m]` suffix.
+
 ## [0.11.0] — 2026-07-19
 
 ### Fixed

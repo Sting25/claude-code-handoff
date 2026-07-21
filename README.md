@@ -393,8 +393,20 @@ symlinks.
 ```bash
 ./install.sh --copy      # force copy mode (snapshot; survives source deletion)
 ./install.sh --link      # force symlinks even from a volatile path
+./install.sh --model 'opus[1m]'   # also pin "model" in settings.json (env: HANDOFF_MODEL)
 ./install.sh --doctor     # report any dangling/missing installed hooks (exit ≠0 if broken)
 ```
+
+**Model pin (new machines).** Claude Code's model choice lives in each
+machine's `~/.claude/settings.json`, so a fresh install defaults wrong —
+notably, a bare `opus` runs at a **200k** context window (the 1M variant
+is `opus[1m]`). `--model` pins the value during install, but **never
+overwrites** a model you already set — a differing request is reported
+and skipped. A plain install with no model configured prints a one-line
+NOTE instead of leaving the gap silent, and `--doctor` warns whenever the
+pinned model is a bare 200k variant. The one-liner for a new machine:
+`./install.sh --model 'opus[1m]'`. `--uninstall` removes the key only if
+this installer set it and you never changed it since.
 
 If a path the installer manages already holds a symlink of **yours**
 pointing somewhere else (a customized fork, a second clone, a dotfiles
