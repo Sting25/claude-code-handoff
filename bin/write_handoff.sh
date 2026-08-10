@@ -320,6 +320,64 @@ if [[ -L "$handoff_path" ]]; then
   rm -f "$handoff_path"
 fi
 
+# ----- mkdir-based mutual-exclusion locks ------------------------------------
+# Shared idiom with handoff_turn_append.sh's flock-less fallback (keep the two
+# in sync): mkdir(2) is the one atomic test-and-create primitive available
+# everywhere this script runs (flock ships on Linux and Git Bash but not
+# macOS), so a lock is "held" while the lock DIRECTORY exists. A hard kill
+# (SIGKILL, OOM, power loss) skips EXIT traps and would leave the dir behind
+# forever, so acquisition includes the same mtime-based staleness reclaim as
+# the turn-append hook: a lock older than HANDOFF_LOCK_STALE_SECS (default
+# 300s — comfortably above Claude Code's 60s hook timeout, so a slow-but-alive
+# holder can't have its lock stolen) is presumed orphaned and reclaimed.
+# Returns 0 with the lock held, 1 otherwise; each call site documents how it
+# degrades on a miss. The lock paths live under .claude/, whose non-symlink
+# status is enforced above.
+try_mkdir_lock() {  # <lock_dir>
+  local lock_dir="$1" stale_secs lock_mtime now
+  # A symlink planted at the lock path (a malicious repo could ship one) makes
+  # mkdir fail with EEXIST forever and rmdir can't reclaim through it — i.e. a
+  # permanently wedged lock. Refuse it, mirroring this script's other symlink
+  # guards; the caller degrades exactly as for a held lock.
+  if [[ -L "$lock_dir" ]]; then
+    echo "write_handoff.sh: $lock_dir is a symlink; refusing to use it as a lock." >&2
+    return 1
+  fi
+  mkdir "$lock_dir" 2>/dev/null && return 0
+  # Held (or leftover). Reclaim only when older than the staleness window.
+  # Age via GNU `stat -c` with a BSD `stat -f` fallback, like turn_append.
+  stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
+  lock_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null \
+                || stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  if [[ "$lock_mtime" =~ ^[0-9]+$ ]] \
+     && (( now - lock_mtime >= stale_secs )) \
+     && rmdir "$lock_dir" 2>/dev/null \
+     && mkdir "$lock_dir" 2>/dev/null; then
+    return 0   # reclaimed a stale lock
+  fi
+  return 1
+}
+
+# One EXIT trap owns ALL cleanup from here on (traps replace each other, so
+# scattering per-resource traps would silently drop earlier ones): the build
+# tmp file, and any lock still held when the script exits — normal release is
+# explicit at the end of each critical section; this is the abort backstop.
+# Every variable is read with a :- default because the trap can fire before
+# any of them is set.
+write_lock_dir=""
+write_lock_held=0
+gitignore_lock=""
+gitignore_lock_held=0
+handoff_tmp=""
+cleanup() {
+  if [[ -n "${handoff_tmp:-}" ]]; then rm -f "$handoff_tmp" 2>/dev/null || true; fi
+  if (( ${write_lock_held:-0} )); then rmdir "$write_lock_dir" 2>/dev/null || true; fi
+  if (( ${gitignore_lock_held:-0} )); then rmdir "$gitignore_lock" 2>/dev/null || true; fi
+  return 0
+}
+trap cleanup EXIT
+
 # --restamp: re-sign the existing document in place and exit. Runs after the
 # symlink guards above (so it can't stamp through a planted link) and before
 # everything else — no rotation, no rebuild, no .gitignore bootstrap. The
@@ -447,17 +505,33 @@ bootstrap_gitignore() {
   echo "write_handoff.sh: added '$entry' to $gi (set HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 to skip)" >&2
 }
 if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]]; then
-  bootstrap_gitignore "$handoff_relpath"
-  bootstrap_gitignore "$history_relpath"
-  # Raw per-turn transcript dumps (written by the Stop hook) contain
-  # verbatim session content — including anything sensitive surfaced in
-  # tool output — so they must never be committable.
-  bootstrap_gitignore ".claude/handoff_backups/"
-  # The pin is local operational state, same class as the handoff itself.
-  # Only auto-ignore when it sits inside the repo (the default and the
-  # common override); an out-of-tree override is the user's to manage.
-  if [[ "$pinned_relpath" != /* && "$pinned_relpath" != "$pinned_file" ]]; then
-    bootstrap_gitignore "$pinned_relpath"
+  # The check-ignore→append sequence in bootstrap_gitignore races the
+  # IDENTICAL bootstrap in handoff_turn_append.sh (Stop hook): both can pass
+  # check-ignore before either appends, and the .gitignore ends up with
+  # duplicated entries. Both scripts therefore take the SAME dedicated lock —
+  # <root>/.claude/.handoff_gitignore.lock, name and idiom shared with
+  # turn_append — around the whole sequence so they actually exclude each
+  # other. On a miss, skip silently: the holder is appending the very same
+  # entries, and check-ignore makes the next fire's retry idempotent.
+  gitignore_lock="$handoff_dir/.handoff_gitignore.lock"
+  if try_mkdir_lock "$gitignore_lock"; then
+    gitignore_lock_held=1
+    bootstrap_gitignore "$handoff_relpath"
+    bootstrap_gitignore "$history_relpath"
+    # Raw per-turn transcript dumps (written by the Stop hook) contain
+    # verbatim session content — including anything sensitive surfaced in
+    # tool output — so they must never be committable.
+    bootstrap_gitignore ".claude/handoff_backups/"
+    # The pin is local operational state, same class as the handoff itself.
+    # Only auto-ignore when it sits inside the repo (the default and the
+    # common override); an out-of-tree override is the user's to manage.
+    if [[ "$pinned_relpath" != /* && "$pinned_relpath" != "$pinned_file" ]]; then
+      bootstrap_gitignore "$pinned_relpath"
+    fi
+    # Release promptly (the doc build below is slow); the cleanup trap is
+    # only the abort backstop.
+    rmdir "$gitignore_lock" 2>/dev/null || true
+    gitignore_lock_held=0
   fi
 fi
 
@@ -698,10 +772,11 @@ list_inflight_md() {
 }
 
 # Build the document in a temp file in $handoff_dir (same filesystem → the mv
-# below is an atomic rename). umask 077 makes it 0600 at creation; the trap
-# removes it if anything aborts before the final publish.
+# below is an atomic rename). umask 077 makes it 0600 at creation; the cleanup
+# EXIT trap (installed above, alongside the lock helpers) removes it if
+# anything aborts before the final publish — do NOT set a new trap here, that
+# would silently replace the shared one and leak any held lock on abort.
 handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
-trap 'rm -f "$handoff_tmp"' EXIT
 
 {
   printf '# %s — session handoff (auto-generated)\n\n' "$repo_name"
@@ -914,10 +989,48 @@ fi
 # covers a tmp produced under an unusual umask). The prose may include secrets.
 chmod 600 "$handoff_tmp" 2>/dev/null || true
 
+# ----- Whole-run write lock: rotation through publish ------------------------
+# Two concurrent runs (SessionEnd + PreCompact firing together, or two
+# sessions open in one repo) interleave rotation and publish: each individual
+# mv is atomic, but the rotate→prune→publish SEQUENCE is not — writer B can
+# rotate away the document writer A published a moment earlier, silently
+# losing a snapshot. Serialize the whole destructive window behind
+# <root>/.claude/.handoff_write.lock. The doc build above deliberately runs
+# UNLOCKED: it only reads, and holding the lock through slow git commands
+# would starve the other writer's brief wait below.
+write_lock_dir="$handoff_dir/.handoff_write.lock"
+if try_mkdir_lock "$write_lock_dir"; then
+  write_lock_held=1
+elif (( IF_CURATED )); then
+  # Hook (safety-net) run: another writer is mid-write, and its snapshot of
+  # this same repo state does the job — a second mechanical snapshot adds
+  # nothing worth contending for. Exit 0 like the other safety-net skips
+  # (the built tmp is discarded by the cleanup trap).
+  echo "$handoff_path"
+  exit 0
+else
+  # Explicit (/handoff or manual) run: the user asked for THIS write, so
+  # never deadlock it. Wait briefly — a competing hook fire finishes in well
+  # under a second — then proceed unlocked with a warning: a possibly-racy
+  # write beats silently dropping the write the user is about to curate.
+  # `sleep 0.2` works on GNU and BSD/macOS sleep; the `|| sleep 1` fallback
+  # covers a strictly-integer POSIX sleep.
+  for _ in 1 2 3 4 5; do
+    sleep 0.2 2>/dev/null || sleep 1
+    if try_mkdir_lock "$write_lock_dir"; then
+      write_lock_held=1
+      break
+    fi
+  done
+  if (( ! write_lock_held )); then
+    echo "write_handoff.sh: write lock $write_lock_dir still held after ~1s; proceeding without it (an explicit run must not deadlock)." >&2
+  fi
+fi
+
 # Rotate the previous handoff only NOW that its replacement is fully built.
 # Any failure during the doc build above leaves handoff_current.md untouched
 # (the EXIT trap just removes the tmp); the destructive window is reduced to
-# the two renames here and below.
+# the two renames here and below — and is serialized by the write lock.
 rotate_existing_handoff
 prune_history || true   # a prune failure must never abort the handoff write
 
@@ -925,5 +1038,11 @@ prune_history || true   # a prune failure must never abort the handoff write
 # made to write through a symlink that reappears after the guard above (TOCTOU),
 # and a crash mid-write can't leave a half-written handoff_current.md.
 mv -f "$handoff_tmp" "$handoff_path"
+
+# Normal-path lock release; the cleanup trap is only the abort backstop.
+if (( write_lock_held )); then
+  rmdir "$write_lock_dir" 2>/dev/null || true
+  write_lock_held=0
+fi
 
 echo "$handoff_path"
