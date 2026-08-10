@@ -35,6 +35,44 @@ are appended).
   collation flipped the `_2` collision suffix order, picking the older of
   two same-second snapshots (and prune could delete the newer one).
 
+### Security — second wave (found by an adversarial re-audit of the first)
+- **`--restamp` no longer launders model-authored Notes into the binding
+  tier (HIGH).** `--restamp` exists to re-sign a document *after* it has
+  been edited: the `/handoff` skill has the model rewrite the Notes block,
+  then restamps. It signed whatever bytes were on disk, so a matched
+  `HANDOFF_BIND_BEGIN`/`END` pair written into Notes — by a model steered
+  by prompt injection in anything it read that session — was signed,
+  passed provenance, and loaded into the *next* session as verified
+  **binding rules**. The restamp path now re-establishes the writer-only
+  bind invariant before signing, and the MAC covers the guarded body.
+- **Symlinked `.claude/handoff_history` exfiltrated session prose (HIGH).**
+  Rotation `mv`s the outgoing document into it, so a repo shipping the
+  directory as a symlink sent every snapshot outside the repo with nothing
+  on stderr — and silently disabled retention along the way, since
+  `find -P` will not descend a symlinked start point. Refused now.
+- **The symlink read guards were leaf-only.** They tested
+  `handoff_current.md`, which is not a symlink when `.claude` *itself* is
+  the link — so committing `.claude` as a symlink bypassed them entirely,
+  while `write_handoff.sh` correctly refused the same repo. Both the
+  loader and the statusline are directory-aware now.
+- **`.claude/handoff_pinned.md` was read unguarded on the write path.**
+  The pin body is copied verbatim into the generated handoff, so a
+  symlinked pin did not merely echo its target — it persisted it into a
+  repo file and replayed it into the next session. Tracked-ness only ever
+  decided *bindability*; it did nothing about disclosure.
+- **Arbitrary command execution via `HANDOFF_LOCK_STALE_SECS`.** The one
+  env var reaching a bash `(( ))` without a numeric guard, and
+  clone-deliverable through a project `.claude/settings.json`. Validated
+  at all three arithmetic sites.
+- **`--doctor` inspected the wrong secret file under `CLAUDE_HOME`** — a
+  false clean on exactly the exposure it was added to catch.
+  `handoff_secret_path` now resolves it the same way `install.sh` does.
+- **`install.sh` validates every jq result before installing it.** Twelve
+  chained `jq > tmp; mv` writes had no check between them; jq on empty
+  input exits 0 and prints nothing, so one bad link would blank
+  `settings.json` with `rc == 0` — leaving the rollback trap unfired and
+  the script printing "done" over a wiped config.
+
 ### Security
 - **Symlink read guard (HIGH).** SessionStart, ctx-check, and the
   statusline read `.claude/handoff_current.md` through a symlink — a
@@ -63,8 +101,41 @@ are appended).
   atomic archive-name claim on same-second rotation collisions.
 - **Stop-hook lock hardening** — lock mtime refreshed before slow pre-loop
   work so a busy holder is not reaped as stale; symlinked lock path
-  refused; `.gitignore` bootstrap serialized between the Stop hook and
-  `write_handoff.sh` via a shared lock (no more duplicate entries).
+  refused (both the flock path and the `mkdir` fallback that runs on stock
+  macOS, where a planted link wedged a session's dumps *permanently*,
+  since `rmdir` cannot reclaim a symlink at any age); `.gitignore`
+  bootstrap serialized between the Stop hook and `write_handoff.sh` via a
+  shared lock (no more duplicate entries).
+- **A held write lock no longer looks like a successful write.** The
+  `--if-curated` safety net printed the handoff path and exited 0 on a
+  contended lock — byte-for-byte indistinguishable from success. A lock
+  left behind by a killed writer therefore voided *every* SessionEnd and
+  PreCompact write in that repo for up to `HANDOFF_LOCK_STALE_SECS`, with
+  no signal anywhere. It now warns and prints nothing on stdout, and
+  SessionStart reports a leftover lock (the installed hooks discard
+  stderr, so the warning alone would reach nobody).
+- **`--restamp` takes the whole-run write lock.** Its `mv` was atomic only
+  in isolation: a concurrent writer could rotate the document away and
+  publish a new one inside the read→sign→publish gap, and the restamp then
+  landed pre-rotation bytes back on top — carrying a fresh, *valid* MAC,
+  so nothing downstream could detect the substitution.
+- **Rotation refuses a non-file at the archive name.** `mv -n file dir`
+  moves the file *into* the directory and succeeds, so the atomic-claim
+  loop read it as a win; the following `chmod 600` then stripped the
+  directory's traverse bit and sealed the curated snapshot somewhere no
+  `-type f` consumer could reach.
+- **`recover_tail` picks the newest transcript, not the lexically first.**
+  The same session id can exist under two project slugs after a rename or
+  move; the stale copy silently outranked the live one and the script
+  reported "no tail to recover" while discarding the very turns it exists
+  to rescue.
+- **A relative `HANDOFF_PINNED_FILE`/`HANDOFF_SYSTEMLOG_FILE` is resolved
+  against the repo root**, not the process cwd — the pin silently vanished
+  from the handoff whenever a hook fired with `cwd != root`.
+- **The "prior handoff artifacts" warning no longer false-positives.** It
+  probed for any file under `handoff_backups/`, but bookkeeping sidecars
+  land there on a project's first session, so it fired on session #2 of a
+  legitimately blank project.
 
 ### Changed
 - **Desktop-aware `/handoff` banner.** The end-of-session banner checks
@@ -76,11 +147,39 @@ are appended).
   installs shellcheck explicitly; exec bits committed on the two scripts
   that lacked them (installs no longer dirty the source tree).
 - README drift corrected (jq hard requirement, KEEP=0 semantics, platform
-  claims, retention ownership scope, HMAC trailer example) and previously
-  undocumented advanced env vars documented.
+  claims, retention ownership scope, HMAC trailer example) and the four
+  previously silent advanced env vars — `CLAUDE_HOME`, `HANDOFF_ANCHOR`,
+  `HANDOFF_DEBUG`, `HANDOFF_MAC_PREFIX` — documented in
+  `docs/reference.md`.
+- **Manual-install instructions now include `bin/handoff_provenance.sh`.**
+  Omitting it produced a working-looking install where handoffs are never
+  signed and the Rules/pinned blocks never bind — permanently, with no
+  error anywhere — while the same document described the trusted-rules
+  tier as a live feature.
+- **`/handoff` step 1 no longer misdiagnoses every failure as "not
+  installed".** `test -f X && bash X || echo MISSING` printed MISSING on
+  *any* non-zero exit, sending users to re-install a correctly-installed
+  repo while the real cause went unaddressed.
+- Documentation corrections where the docs contradicted the code:
+  `HANDOFF_LOCK_STALE_SECS` is a staleness-reclaim threshold and not a
+  timeout (lowering it *steals* live locks); `HANDOFF_HISTORY_KEEP=0`
+  means "keep no history" and still discards the outgoing curated
+  document; `SessionEnd` does fire and write on `/clear`; `git` and `perl`
+  are optional; the `xargs -r` in a shipped snippet is GNU-only and fails
+  on macOS; a shipped `sort -r` was unpinned and loads the older of a
+  same-second pair under a UTF-8 locale.
 - Test-suite hygiene: the secret-jail no longer strands one temp dir per
   test file (~40/run), fixtures moved out of the real `$HOME`, exit traps
   on out-of-TMPDIR fixtures, and a stdin-redirect fix for a suite hang.
+  Two harness bugs fixed: a missing `exit` after an openssl skip turned
+  into a spurious hard FAIL, and a raw `trap … EXIT` clobbered `lib.sh`'s
+  chained trap and with it the secret jail.
+- **CI actually gates now.** shellcheck was `continue-on-error` and was
+  failing on the tree while the build stayed green. Skipped checks were
+  invisible to the runner, so a host missing `perl` could skip the entire
+  Stop-hook exfiltration test class and still print ALL TESTS PASSED;
+  `tests/run.sh` now reports skips per file and `HANDOFF_TESTS_NO_SKIP=1`
+  (set in both CI jobs) makes one a failure.
 
 ## [0.12.0] — 2026-07-21
 
