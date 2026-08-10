@@ -208,8 +208,10 @@ lock_file="$backup_dir/.handoff_raw_${session_id}.lock"
 # below opens it with `exec 9>`, and `>` FOLLOWS a symlink at that path —
 # there is no mktemp-style safety here (the name is predictable from the
 # session id), so a planted link would truncate an attacker-chosen victim
-# file. Guard both before anything is opened. (The mkdir-lock fallback needs
-# no guard: mkdir/rmdir never follow a symlink.)
+# file. Guard both before anything is opened. (The mkdir-lock fallback has its
+# own guard at its call site below — mkdir/rmdir never FOLLOW a symlink, which
+# is precisely why a link planted there wedges the lock permanently instead of
+# leaking through it.)
 refuse_symlink "$dump_file" "dump file" || exit 0
 refuse_symlink "$lock_file" "lock file" || exit 0
 
@@ -225,6 +227,18 @@ if command -v flock >/dev/null 2>&1; then
   fi
 else
   lock_mkdir="${lock_file}.d"
+  # A symlink planted at the mkdir-lock path permanently wedges this session's
+  # dumps: mkdir fails EEXIST forever and the stale reclaim can't recover,
+  # because rmdir cannot remove a symlink no matter how old it is. The comment
+  # above ("the mkdir-lock fallback needs no guard: mkdir/rmdir never follow a
+  # symlink") is right about FOLLOWING and wrong about availability — not
+  # following is exactly what makes the wedge permanent. write_handoff.sh's
+  # try_mkdir_lock guards its own mkdir lock for this reason; this is the
+  # matching refusal, and this is the branch that runs on stock macOS.
+  if [[ -L "$lock_mkdir" ]]; then
+    echo "handoff_turn_append.sh: $lock_mkdir is a symlink; refusing to use it as a lock (it would wedge this session's dumps permanently). Remove it to restore the raw dump." >&2
+    exit 0
+  fi
   if ! mkdir "$lock_mkdir" 2>/dev/null; then
     # The mkdir lock is released by the EXIT trap below, but a hard kill
     # (SIGKILL, OOM, power loss) skips traps and leaves the dir behind —
@@ -521,8 +535,14 @@ fi
 # no longer pruned (it lingers) rather than risking someone else's file. (#46)
 list_our_dumps() {
   local f base id
+  # LC_ALL=C: `ls -t` breaks MTIME TIES by collated name, and ties are not
+  # exotic here — `cp -p`, `rsync -t`, and a tar restore all reproduce
+  # timestamps exactly. Under a UTF-8 locale the tie-break flips against byte
+  # collation, so which dump falls outside the keep-3 cut (and is deleted)
+  # depends on the user's locale. Pinned for the same reason the rotation
+  # sorts in write_handoff.sh and handoff_session_start.sh are.
   # shellcheck disable=SC2012  # ls -t is deliberate: prune needs mtime ordering and BSD find has no -printf
-  ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | while IFS= read -r f; do
+  LC_ALL=C ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     base="$(basename "$f" .md)"       # handoff_raw_<id>
     id="${base#handoff_raw_}"

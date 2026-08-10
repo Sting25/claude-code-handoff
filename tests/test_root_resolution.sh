@@ -117,6 +117,47 @@ check "debug line on stderr"          yes "$(has "$err" "handoff: root=$d in_git
 check "debug line names the rung"     yes "$(has "$err" "via=project_dir")"
 rm -rf "$d"
 
+echo "root resolution — rung 2 (hook-payload cwd) actually wins"
+
+# Every other test in this file either sets CLAUDE_PROJECT_DIR (rung 1 wins) or
+# unsets it while cd'd to the same directory (rung 3 gives the same answer), and
+# the one test that passes a payload cwd does so to prove it LOSES. So the
+# payload_cwd rung could be deleted outright and this suite stayed green — while
+# it is the only anchor handoff_statusline.sh and handoff_ctx_check.sh have.
+# Construct the one situation where the rung is load-bearing: no
+# CLAUDE_PROJECT_DIR, and a payload cwd that differs from the process cwd.
+P="$(mk_repo)"; Q="$(mk_repo)"
+cleanup_on_exit "$P" "$Q"
+via="$( cd "$Q" && env -u CLAUDE_PROJECT_DIR bash -c \
+  ". '$REPO_ROOT/bin/handoff_provenance.sh'; handoff_resolve_root '$P'; printf '%s %s' \"\$HANDOFF_ROOT_VIA\" \"\$HANDOFF_ROOT\"" )"
+check "rung 2 is the one that fires"        "payload_cwd $P" "$via"
+# And end to end: the writer must follow the payload cwd, not the process cwd.
+( cd "$Q" && printf '{"reason":"other","cwd":"%s"}' "$P" \
+    | env -u CLAUDE_PROJECT_DIR bash "$WH" >/dev/null 2>&1 )
+check "doc lands under the payload cwd"     yes "$([[ -f "$P/.claude/handoff_current.md" ]] && echo yes || echo no)"
+check "doc does NOT land under process cwd" no  "$([[ -f "$Q/.claude/handoff_current.md" ]] && echo yes || echo no)"
+
+echo "root resolution — CLAUDE_PROJECT_DIR must be a DIRECTORY to win"
+
+# The -d validation is newly added ("it never was before", per the lib header)
+# and untested: drop it and a stale value becomes the root, `mkdir -p` then
+# resurrects a deleted tree, and every handoff lands in a ghost directory the
+# loader never reads. Two bad shapes: a path that no longer exists, and a path
+# that exists but is a FILE.
+R="$(mk_repo)"
+cleanup_on_exit "$R"
+ghost="$(mktemp -d)"; rmdir "$ghost"                 # a stale, now-deleted dir
+notadir="$(mktemp)"                                  # exists, but is a file
+cleanup_on_exit "$notadir"
+for bad in "$ghost" "$notadir"; do
+  via="$( cd "$R" && env CLAUDE_PROJECT_DIR="$bad" bash -c \
+    ". '$REPO_ROOT/bin/handoff_provenance.sh'; handoff_resolve_root; printf '%s %s' \"\$HANDOFF_ROOT_VIA\" \"\$HANDOFF_ROOT\"" )"
+  check "non-directory CLAUDE_PROJECT_DIR rejected, falls to pwd" "pwd $R" "$via"
+done
+( cd "$R" && env CLAUDE_PROJECT_DIR="$ghost" bash "$WH" >/dev/null 2>&1 </dev/null )
+check "no ghost tree resurrected at the stale path" no  "$([[ -d "$ghost" ]] && echo yes || echo no)"
+check "doc lands in the real repo instead"          yes "$([[ -f "$R/.claude/handoff_current.md" ]] && echo yes || echo no)"
+
 echo "history — same-second collision ordering (LC_ALL=C sort)"
 
 # handoff_<stamp>_2.md is the NEWER of a same-second pair; the history

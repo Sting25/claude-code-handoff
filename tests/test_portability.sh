@@ -143,6 +143,39 @@ check "instrumented short run still appends" yes \
   "$([[ -f "$bd5/handoff_raw_RFRSH.md" ]] && echo yes || echo no)"
 check "lock mtime refreshed outside the append loop" yes \
   "$(grep -q 'handoff_raw_RFRSH.lock.d' "$touch_log" && echo yes || echo no)"
+
+# A SYMLINK planted at the mkdir-lock path must be refused, not treated as a
+# held lock. mkdir fails EEXIST through it forever and the stale reclaim can't
+# help, because rmdir cannot remove a symlink at any age — so without the guard
+# this session's dumps are wedged PERMANENTLY, not just for the stale window.
+# write_handoff.sh's try_mkdir_lock has always guarded its own mkdir lock; this
+# is the matching refusal on the branch that runs on stock macOS.
+repo6="$(mk_repo)"; bd6="$repo6/.claude/handoff_backups"; must mkdir -p "$bd6"
+cleanup_on_exit "$repo6"
+must ln -s /nonexistent-lock-target "$bd6/.handoff_raw_SYMLK.lock.d"
+tx6="$repo6/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx6"
+# Capture stderr: without the guard the outcome is IDENTICAL from the outside
+# (mkdir EEXIST -> stale reclaim -> rmdir fails on the link -> silent exit 0),
+# so "no dump" alone does not distinguish a refusal from the wedge. The
+# diagnostic naming the path is the whole point of the fix — a permanently
+# wedged session must not be silent, since nothing else will ever tell the user
+# why their dumps stopped.
+err6="$( cd "$repo6" && PATH="$noflock5" printf '{"session_id":"SYMLK","transcript_path":"%s"}' "$tx6" \
+          | PATH="$noflock5" bash "$TA" 2>&1 >/dev/null )"
+named=no
+printf '%s' "$err6" | grep -q 'is a symlink' \
+  && printf '%s' "$err6" | grep -q 'handoff_raw_SYMLK.lock.d' && named=yes
+check "symlinked mkdir-lock: refusal names the path" yes "$named"
+check "symlinked mkdir-lock: no dump written"  no  \
+  "$([[ -f "$bd6/handoff_raw_SYMLK.md" ]] && echo yes || echo no)"
+check "symlinked mkdir-lock: link not removed" yes \
+  "$([[ -L "$bd6/.handoff_raw_SYMLK.lock.d" ]] && echo yes || echo no)"
+# Control: a different session in the same repo is unaffected (the refusal is
+# per-session, so one poisoned lock can't take the whole project down).
+tx7="$repo6/tx7.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx7"
+run_turn "$repo6" CLEAN "$tx7" "$noflock5"
+check "control session still appends"          yes \
+  "$([[ -f "$bd6/handoff_raw_CLEAN.md" ]] && echo yes || echo no)"
 rm -rf "$repo" "$repo2" "$repo3" "$repo4" "$repo5" "$noflock" "$noflock5"
 rm -f "$touch_log"
 
