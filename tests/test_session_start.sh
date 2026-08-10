@@ -151,4 +151,35 @@ check "empty history dir -> content emitted" yes "$(has "$out" "MARKER_EMPTYHIST
 check "empty history dir -> no pointer"      no  "$(has "$out" "older handoff(s)")"
 rm -rf "$proj"
 
+# --- DATA-3: dot-prefixed backup sidecars must NOT trigger the miss-        --
+#     visibility warning (false positive on a legitimately fresh project) ---
+# handoff_ctx_check.sh and handoff_statusline.sh drop bookkeeping sidecars
+# (.ctx_<sid>, .ctx_sl_<sid>, ...) under handoff_backups/ starting on a
+# project's FIRST session — .ctx_sl_<sid> in particular is written by the
+# statusline renderer on every prompt, independent of any Stop-hook fire —
+# well before any handoff_raw_*.md dump exists. A whole-directory
+# `find -type f` treated those sidecars alone as "prior handoff artifacts" and
+# fired the warning (and its /handoff-more /handoff-recover instruction) on a
+# project that has never actually had a handoff written.
+proj="$(mk_project)"
+mkdir -p "$proj/.claude/handoff_backups"
+: > "$proj/.claude/handoff_backups/.ctx_abc123"
+: > "$proj/.claude/handoff_backups/.ctx_sl_abc123"
+out="$(run_ss "$proj")"; rc=$?
+check "sidecars only -> exit 0"       0  "$rc"
+check "sidecars only -> no miss warn" no "$(has "$out" "prior handoff artifacts")"
+rm -rf "$proj"
+
+# --- DATA-3 (positive control): a real handoff_raw_*.md dump still counts ---
+# Confirms the fix narrowed the probe rather than breaking it: a genuine dump
+# file (what the Stop hook actually writes on its first real fire) must still
+# trip the warning.
+proj="$(mk_project)"
+mkdir -p "$proj/.claude/handoff_backups"
+: > "$proj/.claude/handoff_backups/handoff_raw_abc123.md"
+out="$(run_ss "$proj")"; rc=$?
+check "real dump -> exit 0"       0   "$rc"
+check "real dump -> miss warning" yes "$(has "$out" "prior handoff artifacts")"
+rm -rf "$proj"
+
 finish
