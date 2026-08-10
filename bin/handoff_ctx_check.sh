@@ -88,6 +88,11 @@
 
 set -euo pipefail
 
+# Context check output and state files carry session metadata that may include
+# model information and token counts. umask 077 makes all of it owner-only at
+# creation time, protecting against unintended disclosure.
+umask 077
+
 THRESHOLD_PCT="${HANDOFF_CTX_THRESHOLD_PCT:-40}"
 COOLDOWN_KB="${HANDOFF_CTX_COOLDOWN_KB:-100}"
 # Validate both numerically, mirroring the MAX_FLAGS guard below. A slightly-
