@@ -17,16 +17,62 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2034  # not used here; consumed by the sourcing test files ("$REPO_ROOT/bin/...")
 REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 
+# --- exit-time cleanup -------------------------------------------------------
+# One suite-owned EXIT trap per test process. Register throwaway paths with
+# `cleanup_on_exit <path>...`; they are rm -rf'd when the test exits by ANY
+# route (success, failed assertion, `set -u` abort, early `exit`). EXIT traps
+# do not fire in subshells or command substitutions, so `$(mk_repo)` and
+# `( cd ... )` blocks cannot trigger an early cleanup. Test files must call
+# cleanup_on_exit instead of writing their own `trap ... EXIT` — a later raw
+# trap silently REPLACES this one and re-opens the secret-jail leak below.
+_lib_cleanup_paths=()
+cleanup_on_exit() { _lib_cleanup_paths+=("$@"); }
+_lib_run_cleanup() {
+  local p
+  # ${arr[@]+...} guard: bash 3.2 under `set -u` errors on expanding an
+  # empty array with a bare "${arr[@]}".
+  for p in ${_lib_cleanup_paths[@]+"${_lib_cleanup_paths[@]}"}; do
+    rm -rf "$p"
+  done
+}
+# shellcheck disable=SC2120  # false positive: $1 is filled by `set --` below, not by callers
+_lib_arm_exit_trap() {
+  # Chain, don't clobber: if an EXIT trap already exists when lib.sh is
+  # sourced, keep it — run its body first (it may reference paths we are
+  # about to delete), then our cleanup. `trap -p EXIT` prints a re-evalable
+  # `trap -- '<body>' EXIT`; parsing uses this function's own positional
+  # params so the sourcing test file's "$@" is untouched.
+  local prev
+  prev="$(trap -p EXIT)"
+  if [[ -n "$prev" ]]; then
+    eval "set -- ${prev#trap -- }"   # $1 = previous trap body, $2 = EXIT
+    trap -- "$1; _lib_run_cleanup" EXIT
+  else
+    trap -- '_lib_run_cleanup' EXIT
+  fi
+}
+# shellcheck disable=SC2119  # companion to the SC2120 disable above
+_lib_arm_exit_trap
+
 # Keep signing side effects inside the test sandbox (issue #49):
 # write_handoff.sh generates the per-machine HMAC secret on first signed write
 # (handoff_ensure_secret), defaulting to $HOME/.claude/handoff_secret — so any
 # test that invokes it without jailing this variable would materialize key
-# material in the developer's REAL home. `:=` fills only an unset value: test
-# files that jail a per-fixture path via `env HANDOFF_SECRET_FILE=...` keep
-# their own, and a path deliberately exported by the caller wins too.
-# test_uninstall_secret.sh must strip this with `env -u` for its default-path
-# cases — install.sh --uninstall skips the secret whenever the override is set.
-: "${HANDOFF_SECRET_FILE:=$(mktemp -d)/handoff_secret}"
+# material in the developer's REAL home. The jail is created only to fill an
+# unset/empty value: test files that jail a per-fixture path via
+# `env HANDOFF_SECRET_FILE=...` keep their own, and a path deliberately
+# exported by the caller wins too (and is never cleaned up here). When lib.sh
+# DID create the dir it registers it for exit-time removal — previously every
+# test file sourcing this file stranded one mktemp dir per invocation
+# (40 per full run). test_uninstall_secret.sh must strip this with `env -u`
+# for its default-path cases — install.sh --uninstall skips the secret
+# whenever the override is set.
+if [[ -z "${HANDOFF_SECRET_FILE:-}" ]]; then
+  _lib_secret_jail="$(mktemp -d)" \
+    || { echo "lib.sh: mktemp -d failed for the secret jail" >&2; exit 1; }
+  HANDOFF_SECRET_FILE="$_lib_secret_jail/handoff_secret"
+  cleanup_on_exit "$_lib_secret_jail"
+fi
 export HANDOFF_SECRET_FILE
 
 _pass=0
