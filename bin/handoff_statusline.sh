@@ -119,7 +119,13 @@ fi
 HANDOFF_PLACEHOLDER_SENTINEL="<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->"
 handoff_state="none"
 handoff_doc="$repo_root/.claude/handoff_current.md"
-if [[ -f "$handoff_doc" ]]; then
+# Symlink read guard — same refusal as handoff_session_start.sh (read-side
+# twin of write_handoff.sh's write guard): display-only or not, the grep below
+# READS the doc, and a malicious cloned repo can COMMIT
+# .claude/handoff_current.md as a symlink to a file outside the repo. `! -L`
+# refuses it, leaving the state "none"; the one-line display has no room for a
+# warning (the loader hooks emit that), and the line must never die to this.
+if [[ ! -L "$handoff_doc" && -f "$handoff_doc" ]]; then
   if grep -qF "$HANDOFF_PLACEHOLDER_SENTINEL" "$handoff_doc" 2>/dev/null; then
     handoff_state="auto"
   else

@@ -226,7 +226,16 @@ FENCES_KB="${HANDOFF_FENCES_REINJECT_KB:-200}"
 [[ "$FENCES_KB" =~ ^[0-9]+$ ]] || FENCES_KB=200
 handoff_doc="$repo_root/.claude/handoff_current.md"
 prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
-if (( FENCES_KB > 0 )) && [[ -f "$handoff_doc" ]] \
+# Symlink read guard — same refusal as handoff_session_start.sh (read-side twin
+# of write_handoff.sh's write guard): handoff_provenance_ok and
+# handoff_bind_content below READ the doc (even the HMAC computation cats it),
+# and a malicious cloned repo can COMMIT .claude/handoff_current.md as a
+# symlink to a file outside the repo. Refuse the read, warn (one visible line
+# in the injected hook output), and skip re-injection; the ctx nudge below
+# still runs — never crash the hook.
+if [[ -L "$handoff_doc" ]]; then
+  echo "⚠️  handoff: $handoff_doc is a symlink — refusing to read through it; rules re-injection skipped. Replace the symlink with a regular file to restore it."
+elif (( FENCES_KB > 0 )) && [[ -f "$handoff_doc" ]] \
    && [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
   # shellcheck source=bin/handoff_provenance.sh
   . "$prov_dir/handoff_provenance.sh"
