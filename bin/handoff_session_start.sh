@@ -69,11 +69,16 @@ fi
 if type handoff_resolve_root >/dev/null 2>&1; then
   handoff_resolve_root "$hook_cwd"
   repo="$HANDOFF_ROOT"
+  in_git="$HANDOFF_ROOT_IN_GIT"
 else
   anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
   [ -d "$anchor" ] || anchor="$PWD"
   repo="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "$repo" ] || repo="$anchor"
+  in_git=1
+  if [ -z "$repo" ]; then
+    in_git=0
+    repo="$anchor"
+  fi
 fi
 current="$repo/.claude/handoff_current.md"
 current_relpath=".claude/handoff_current.md"
@@ -215,7 +220,39 @@ if ! command -v jq >/dev/null 2>&1; then
   echo
 fi
 
-[ -f "$current" ] || exit 0
+# Miss visibility: no handoff_current.md is NORMAL for a fresh project (stay
+# silent — never spam every new repo), but when the history or raw-backup dirs
+# already hold entries, handoffs HAVE been written here before, and a silent
+# no-op is exactly how the root-resolution asymmetry bug hid: the writers used
+# one .claude/, this loader looked at another, and nobody saw anything. Name
+# the path we looked at so a miss is diagnosable.
+if [ ! -f "$current" ]; then
+  if [ -n "$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | head -n 1 || true)" ] \
+     || [ -n "$(find "$repo/.claude/handoff_backups" -maxdepth 1 -type f 2>/dev/null | head -n 1 || true)" ]; then
+    echo "⚠️  handoff: no handoff to load at $current — but this project has prior handoff artifacts (.claude/handoff_history/ or .claude/handoff_backups/), so one may have been expected. Run /handoff-more or /handoff-recover to inspect what exists."
+  fi
+  exit 0
+fi
+
+# Root-consistency check against the doc's own resolution record (written by
+# write_handoff.sh as '<!-- HANDOFF_ROOT: <root> in_git=<0|1> -->'). Older
+# docs have no such line — every extraction below tolerates absence and stays
+# silent. Both sides are compared in physical form (pwd -P) so a mere symlink
+# alias (/var vs /private/var on macOS) can't fake a mismatch.
+recorded_root="$(LC_ALL=C sed -nE 's/^<!-- HANDOFF_ROOT: (.*) in_git=[01] -->[[:space:]]*$/\1/p' "$current" 2>/dev/null | head -n 1 || true)"
+recorded_in_git="$(LC_ALL=C sed -nE 's/^<!-- HANDOFF_ROOT: .* in_git=([01]) -->[[:space:]]*$/\1/p' "$current" 2>/dev/null | head -n 1 || true)"
+if [ -n "$recorded_root" ]; then
+  recorded_phys="$(cd "$recorded_root" 2>/dev/null && pwd -P || printf '%s' "$recorded_root")"
+  repo_phys="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
+  if [ "$recorded_phys" != "$repo_phys" ]; then
+    echo "⚠️  handoff: this doc was written for '$recorded_root' but is loading at '$repo' — likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
+    echo
+  fi
+fi
+if [ "$recorded_in_git" = "0" ] && [ "${in_git:-0}" = "1" ]; then
+  echo "⚠️  handoff: this handoff predates this directory becoming a git repo; its snapshot may be stale (written before git init / clone)."
+  echo
+fi
 
 echo "## Auto-loaded handoff from previous session"
 echo
