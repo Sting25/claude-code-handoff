@@ -12,6 +12,76 @@ are appended).
 
 ## [Unreleased]
 
+### Fixed — the handoff-lookup bug (user-reported)
+- **Unified root resolution across all seven scripts.** The writers anchored
+  on the process cwd (bare `git rev-parse`) while the SessionStart loader
+  anchored on `CLAUDE_PROJECT_DIR` — whenever they disagreed (worktrees,
+  submodules, a `cd` during the session, non-git→git transitions) the
+  handoff was written under one `.claude/` and loaded from another,
+  silently. All scripts now share `handoff_resolve_root()` in the
+  provenance lib: validated `CLAUDE_PROJECT_DIR` → hook-payload cwd →
+  `$PWD`, then `git -C`. Includes an inside-`.git` rescue, and
+  `HANDOFF_ANCHOR=common` opt-in to anchor linked worktrees at the main
+  repo so handoffs survive `git worktree remove`.
+- **The loader is no longer silent on a miss.** The generated doc records
+  its resolved root; SessionStart warns when the doc was written for a
+  different path, when it predates the directory becoming a git repo, and
+  when no handoff exists but prior handoff artifacts do. `HANDOFF_DEBUG=1`
+  traces the resolution chain.
+- **`~/.claude.json` project stats keyed by launch cwd** (was git toplevel,
+  which never matched in monorepo-subdir sessions), with a physical-path
+  fallback for macOS case-aliased paths.
+- **Same-second history rotation sorted under `LC_ALL=C`** — UTF-8 locale
+  collation flipped the `_2` collision suffix order, picking the older of
+  two same-second snapshots (and prune could delete the newer one).
+
+### Security
+- **Symlink read guard (HIGH).** SessionStart, ctx-check, and the
+  statusline read `.claude/handoff_current.md` through a symlink — a
+  malicious cloned repo could commit the file as a symlink to e.g.
+  `~/.ssh/id_rsa` and have the target loaded into model context on first
+  session start. Every read path now refuses symlinks (the write side
+  already did).
+- **HMAC key no longer appears in process argv.** `openssl dgst -hmac
+  "$(cat secret)"` exposed the per-machine secret to other users via `ps`
+  on every signing call. The MAC is now built from the RFC 2104 two-pass
+  definition with the key blocks emitted by the printf builtin; digests
+  are bit-identical, so existing signed docs keep verifying.
+- **Secret-file mode repair.** A secret left group/other-readable (backup
+  restore, dotfiles sync) is chmod-repaired to 0600 on the read path, and
+  `install.sh --doctor` now inspects the secret (mode, symlink, presence).
+
+### Fixed — data safety
+- **`HANDOFF_HISTORY_KEEP=0` no longer deletes existing history** — it now
+  disables pruning entirely, matching the documented meaning. Previously a
+  single run with `0` wiped every prior curated snapshot.
+- **Statusline cache janitor proves ownership before deleting** — exact
+  `.ctx_sl_<session-id>` name, regular file, cache-shaped content; user
+  files that merely match the glob are never touched.
+- **Concurrent-write safety in `write_handoff.sh`** — whole-run mkdir lock
+  (SessionEnd + PreCompact firing together can no longer lose a snapshot),
+  atomic archive-name claim on same-second rotation collisions.
+- **Stop-hook lock hardening** — lock mtime refreshed before slow pre-loop
+  work so a busy holder is not reaped as stale; symlinked lock path
+  refused; `.gitignore` bootstrap serialized between the Stop hook and
+  `write_handoff.sh` via a shared lock (no more duplicate entries).
+
+### Changed
+- **Desktop-aware `/handoff` banner.** The end-of-session banner checks
+  `CLAUDE_CODE_ENTRYPOINT`: terminal sessions get the Ctrl+D wording,
+  desktop-app sessions get "start a New Session" wording, unknown gets
+  both — no more impossible instructions in the desktop app.
+- `install.sh --help` prints the complete usage block (was truncated at
+  line 28); ctx-check gained the same `umask 077` as its siblings; CI
+  installs shellcheck explicitly; exec bits committed on the two scripts
+  that lacked them (installs no longer dirty the source tree).
+- README drift corrected (jq hard requirement, KEEP=0 semantics, platform
+  claims, retention ownership scope, HMAC trailer example) and previously
+  undocumented advanced env vars documented.
+- Test-suite hygiene: the secret-jail no longer strands one temp dir per
+  test file (~40/run), fixtures moved out of the real `$HOME`, exit traps
+  on out-of-TMPDIR fixtures, and a stdin-redirect fix for a suite hang.
+
 ## [0.12.0] — 2026-07-21
 
 ### Added
