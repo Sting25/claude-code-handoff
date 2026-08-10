@@ -115,7 +115,36 @@ check "120s-old lock NOT reclaimed (default now 300s)" no \
   "$([[ -f "$bd4/handoff_raw_MIDAGE.md" ]] && echo yes || echo no)"
 check "120s-old lock left in place for its holder" yes \
   "$([[ -d "$bd4/.handoff_raw_MIDAGE.lock.d" ]] && echo yes || echo no)"
-rm -rf "$repo" "$repo2" "$repo3" "$repo4" "$noflock"
+
+# PRE-LOOP REFRESH (audit 2026-08-10): the holder must refresh the lock dir's
+# mtime OUTSIDE the append loop too — the loop's periodic touch only fires
+# after 200 transcript lines, so a holder stalled before/after the loop (slow
+# wc over a huge transcript, the whole-transcript usage scan) previously aged
+# past the stale window and could be stolen mid-write. On this 1-line
+# transcript the 200-line loop touch can never fire, so ANY touch of the lock
+# dir must come from the new out-of-loop refreshes. Observe via a logging
+# `touch` shim (delegates to the real touch) on the flock-less PATH.
+noflock5="$(path_without flock)"
+REAL_TOUCH="$(command -v touch)"
+touch_log="$(mktemp)"
+# path_without symlinked every tool (incl. touch) into the shim dir; replace
+# the symlink with the logger (a `cat >` through it would hit the real binary).
+rm -f "$noflock5/touch"
+cat > "$noflock5/touch" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$touch_log"
+exec "$REAL_TOUCH" "\$@"
+EOF
+chmod +x "$noflock5/touch"
+repo5="$(mk_repo)"; bd5="$repo5/.claude/handoff_backups"
+tx5="$repo5/tx.jsonl"; printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx5"
+run_turn "$repo5" RFRSH "$tx5" "$noflock5"
+check "instrumented short run still appends" yes \
+  "$([[ -f "$bd5/handoff_raw_RFRSH.md" ]] && echo yes || echo no)"
+check "lock mtime refreshed outside the append loop" yes \
+  "$(grep -q 'handoff_raw_RFRSH.lock.d' "$touch_log" && echo yes || echo no)"
+rm -rf "$repo" "$repo2" "$repo3" "$repo4" "$repo5" "$noflock" "$noflock5"
+rm -f "$touch_log"
 
 # ---------------------------------------------------------------------------
 echo "write_handoff.sh — rotation timestamp from file mtime (GNU + BSD)"
