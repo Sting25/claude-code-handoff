@@ -27,10 +27,15 @@ jobs:
           HANDOFF_TESTS_NO_SKIP: "1"
         run: ./tests/run.sh
 
+  # BLOCKING as of v0.13.0. It was advisory, and that was the wrong way
+  # round: ubuntu has flock and GNU stat/date/mv, so the fallback branches
+  # never execute there — genuine BSD behavior was covered ONLY by the job
+  # that could not fail. A macOS-only regression in the lock or rotation code
+  # merged green, and those are the two areas this release changed most. It
+  # passes on this tree with zero skips, so the gate is real, not aspirational.
   tests-macos:
-    name: tests (macOS / bash 3.2) — advisory
+    name: tests (macOS / bash 3.2) — required
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Run test suite (surfaces BSD / bash-3.2 portability gaps)
