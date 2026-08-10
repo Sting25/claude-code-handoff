@@ -50,11 +50,11 @@ Three paths, doing different jobs:
   thin, when you reference work from a session further back than
   yesterday, or to give a sibling re-entering the repo continuity
   deeper than the last session alone.
-- **`/handoff-recover` (auto-triggered by the SessionStart hook):**
+- **`/handoff-recover` (prompted by an ACTION banner from the SessionStart hook):**
   composes a retroactive curated handoff when the previous session
   ended without `/handoff` — crashed, killed, or just never
-  invoked. The SessionStart hook detects the placeholder Notes
-  block and prints an `ACTION: RUN /handoff-recover` banner; the
+  invoked. When the SessionStart hook detects the placeholder Notes
+  block, it prints an `ACTION: RUN /handoff-recover` banner; the
   skill reads the previous session's raw per-turn dump under
   `.claude/handoff_backups/`, the prior curated handoff under
   `.claude/handoff_history/`, and (if present) the host-wide
@@ -164,7 +164,7 @@ Only the latest snapshot is named `handoff_current.md`. Each new
 write rotates the previous one into `<repo>/.claude/handoff_history/`,
 filename stamped with the snapshot's own timestamp. The last 5 are
 kept (override via `HANDOFF_HISTORY_KEEP=N`, or `0` to disable
-retention); older entries are pruned. So the on-disk layout looks
+pruning; see note below). So the on-disk layout looks
 like:
 
 ```
@@ -193,13 +193,21 @@ The retention dir is bootstrapped into the repo's `.gitignore` on
 first write — handoffs are intentionally per-developer, not
 checked-in artifacts.
 
+**Retention behavior with `HANDOFF_HISTORY_KEEP=0`.** Setting
+`HANDOFF_HISTORY_KEEP=0` disables pruning entirely; existing
+snapshots in history are never touched. (In versions prior to
+v0.13.0, `0` was destructive and deleted all existing history on
+the next write — this has been fixed.)
+
 **Retention only ever deletes files this tool generated.** If you drop
 your own file into `handoff_history/` or `handoff_backups/` — say you
 hand-preserve a snapshot you care about — it is left alone regardless of
 what you name it, and it doesn't consume a retention slot. History prunes
 only the exact shape it writes (`handoff_<YYYY-MM-DD>_<HHMMSS>.md`), and
 a raw dump is only ever pruned when its companion cursor file (written
-beside every dump the tool creates) is present.
+beside every dump the tool creates) is present. The optional statusline
+janitor also prunes the context-cache sidecars (`.ctx_sl_*` files) it
+generates in the same backups directory.
 
 ### Pinned context (carried forward every handoff)
 
@@ -341,16 +349,17 @@ to a follow-up. Open question: whether to validate the upload size on
 the client or rely on the server limit. The design doc at
 `docs/design-new-endpoint.md` is the source of truth; next session
 should start by reading it.
-<!-- HANDOFF_HMAC: 3f1a…e9c2 (64-hex trailer written by write_handoff.sh; see "Trusted rules") -->
+<!-- HANDOFF_HMAC: 3f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f -->
 ````
 
 The auto-snapshot above the `---` is git state — cheap, mechanical,
 always correct. The "Notes from this session" block is the part git
 can't see: decisions, in-flight tracks, open questions. The
-`SessionEnd` hook leaves that block as a placeholder. Running
-`/handoff` is what fills it in, so for any session that involved real
-discussion, `/handoff` is the preferred path; `SessionEnd` is the
-safety net for unplanned exits.
+HMAC trailer (`<!-- HANDOFF_HMAC: ... -->`) proves the handoff was
+written locally (see "Trusted rules" below). The `SessionEnd` hook
+leaves the Notes block as a placeholder. Running `/handoff` is what
+fills it in, so for any session that involved real discussion, `/handoff`
+is the preferred path; `SessionEnd` is the safety net for unplanned exits.
 
 ## Install
 
@@ -375,8 +384,10 @@ idempotent — existing hooks and permissions are detected by marker
 substring and skipped on re-runs. Unrelated entries in your
 settings.json (other hooks, theme, etc.) are left untouched.
 
-Requires `jq` for the settings.json patch. If you don't have it, the
-installer prints the JSON snippet for you to paste manually.
+Requires `jq`. If `jq` is not on PATH, the installer refuses to install
+(`exit 1`) because the Stop hook, context nudge, and `/handoff-recover`
+all depend on it at runtime. (The `--uninstall` and `--doctor` modes still
+work without `jq`.)
 
 ### Install modes: symlink vs. copy
 
@@ -424,14 +435,13 @@ links and prints a visible warning if any dangle.
 
 ### Compatibility
 
-Runs on Linux, macOS, and Windows (Git Bash / WSL). Needs `bash`, `git`,
-and `jq`; the Stop hook also uses `perl` to strip transcript noise.
-`openssl` is optional — without it, handoffs aren't HMAC-signed and the
-rules layer loads as reference data instead of binding (see "Trusted
-rules" above); nothing errors. The hook scripts are kept portable across
-GNU and BSD/macOS userlands (e.g. `flock`/`tac`/`mapfile`/`date`
-differences are handled), and the test suite exercises the BSD code
-paths under tool shims.
+Tested on Linux (CI blocks). Portable to macOS (scripts handle BSD
+userland differences like `flock`/`tac`/`date`; test suite exercises
+BSD paths under tool shims). Windows (Git Bash / WSL) untested in CI.
+Needs `bash`, `git`, and `jq`; the Stop hook also uses `perl` to strip
+transcript noise. `openssl` is optional — without it, handoffs aren't
+HMAC-signed and the rules layer loads as reference data instead of
+binding (see "Trusted rules" above); nothing errors.
 
 ## Updating
 
@@ -472,6 +482,30 @@ generates. A file of yours that happens to sit at that name, or a custom
 Everything else in your `settings.json` — your own hooks (including ones
 co-located in the same event), permissions, `statusLine`, `env`, theme —
 is preserved; uninstall only removes entries it can prove are its own.
+
+## Advanced configuration
+
+Beyond the documented `HANDOFF_*` env vars (see [`skills/handoff/README.md`](skills/handoff/README.md)
+for the full list), these test/debug overrides are available:
+
+```bash
+# Override the per-repo backup directory where raw-dump transcripts and
+# context measurements live. Default: <repo>/.claude/handoff_backups.
+export HANDOFF_BACKUP_DIR=/custom/path
+
+# Override the projects root searched by /handoff-recover to find the
+# current session's transcript. Default: $HOME/.claude/projects.
+export HANDOFF_PROJECTS_DIR=/custom/projects/path
+
+# Use this exact JSONL path as the transcript, skipping the projects-dir
+# search. Useful for testing or when the transcript lives outside the
+# normal Claude Code structure.
+export HANDOFF_RECOVER_TRANSCRIPT=/path/to/transcript.jsonl
+
+# Lock timeout (seconds) for the handoff_turn_append.sh Stop hook when
+# acquiring the write lock on per-turn dumps. Default: 300.
+export HANDOFF_LOCK_STALE_SECS=600
+```
 
 ## What's in the repo
 
