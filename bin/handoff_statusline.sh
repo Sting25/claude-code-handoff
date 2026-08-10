@@ -197,11 +197,38 @@ write_cache() {
   # rotated out — a session that renders a statusline but never completes a
   # turn (open-and-quit, broken Stop hook) never gets a dump, so its cache
   # would accumulate forever. This script is the only producer of these files,
-  # so it also janitors them: anything (including orphaned mktemp temps) not
-  # touched in 7 days is long past ctx-check's staleness horizon and dead
-  # weight. -type f skips symlinks; the current session's file was written
-  # just above, so its fresh mtime keeps it out of the prune set.
-  find "$bd" -maxdepth 1 -name '.ctx_sl_*' -type f -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true
+  # so it also janitors them after the 7-day staleness horizon.
+  #
+  # ONLY DELETE FILES WE GENERATED (the retention rule: never rm by glob+mtime
+  # alone — cf. the companion-cursor ownership proof in handoff_turn_append.sh's
+  # prune). The '.ctx_sl_*' glob is broader than what write_cache writes: a
+  # user's hand-dropped ".ctx_sl_notes.backup" matches it, and a bare
+  # glob+mtime -exec rm deleted any such file silently once it aged past 7
+  # days. Ownership proof, all three required before rm:
+  #   name    — exactly .ctx_sl_<sid> with <sid> in the session-id charset
+  #             ([A-Za-z0-9_-]+ — the same guard the cache write above applies);
+  #   file    — a REGULAR file, never a symlink (find -type f tests the link
+  #             itself, so links are already excluded; the -L re-check is belt
+  #             and braces against a swap between find and rm);
+  #   content — the cache's own shape: nothing but known key=value lines, with
+  #             at least one numeric window=/tokens= line (cheap grep proof,
+  #             same spirit as the cursor companion).
+  # Safe-direction trade-off: orphaned mktemp temps (.ctx_sl_<sid>.XXXXXX) now
+  # fail the name proof and linger instead of being reaped — their suffix is
+  # indistinguishable from a user's ".backup"-style name, and leftover litter
+  # beats deleting someone else's file.
+  local stale sid
+  while IFS= read -r stale; do
+    [[ -n "$stale" ]] || continue
+    sid="${stale##*/}"; sid="${sid#.ctx_sl_}"
+    [[ "$sid" =~ ^[A-Za-z0-9_-]+$ ]] || continue
+    [[ -f "$stale" && ! -L "$stale" ]] || continue
+    LC_ALL=C grep -Eq '^(window|tokens)=[0-9]+$' "$stale" 2>/dev/null || continue
+    if LC_ALL=C grep -Evq '^(window=[0-9]+|tokens=[0-9]+|pct=[0-9]+(\.[0-9]+)?|model=[]A-Za-z0-9._ ()[-]+)$' "$stale" 2>/dev/null; then
+      continue  # some line is not cache-shaped -> not provably ours
+    fi
+    rm -f -- "$stale"
+  done < <(find "$bd" -maxdepth 1 -name '.ctx_sl_*' -type f -mtime +7 2>/dev/null || true)
 }
 # `|| true`: display already succeeded; a cache failure must never surface as
 # a nonzero exit (which would blank the status line on some CC versions).
