@@ -24,20 +24,6 @@
 
 set -euo pipefail
 
-# Anchor on the git worktree top, matching the writer hooks (write_handoff.sh,
-# handoff_turn_append.sh, and handoff_ctx_check.sh all resolve their root via
-# `git rev-parse --show-toplevel`). Reading CLAUDE_PROJECT_DIR/$PWD directly broke
-# when Claude Code was launched from a SUBDIRECTORY of the repo: the writers put
-# the handoff at <toplevel>/.claude but this hook looked under <subdir>/.claude,
-# found nothing, and silently no-op'd. Resolve the top from the project dir; fall
-# back to that dir when it is not a git worktree.
-start_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
-repo="$(git -C "$start_dir" rev-parse --show-toplevel 2>/dev/null || true)"
-[ -n "$repo" ] || repo="$start_dir"
-current="$repo/.claude/handoff_current.md"
-current_relpath=".claude/handoff_current.md"
-history_dir="$repo/.claude/handoff_history"
-
 # --- Hook payload. SessionStart hooks receive JSON on stdin, including a
 # "source" field ("startup" | "resume" | "clear" | "compact"). We branch on it
 # in-script rather than via a settings.json matcher, so one installed hook
@@ -46,7 +32,8 @@ history_dir="$repo/.claude/handoff_history"
 # startup behavior, exactly as before). The `-t 0` guard skips the read when
 # stdin is a terminal (manual runs, some test invocations) so `cat` can't
 # block. No jq: this script stays dependency-light by contract, and the field
-# is a fixed lowercase enum, so a sed extraction is exact enough.
+# is a fixed lowercase enum, so a sed extraction is exact enough. Read before
+# root resolution below because the payload's "cwd" feeds the resolver.
 payload=""
 if [ ! -t 0 ]; then
   payload="$(cat 2>/dev/null || true)"
@@ -54,6 +41,43 @@ fi
 hook_source="$(printf '%s' "$payload" \
   | LC_ALL=C sed -nE 's/.*"source"[[:space:]]*:[[:space:]]*"([a-z]+)".*/\1/p' \
   | head -n 1 || true)"
+# Payload "cwd" — same no-jq sed style as "source" above, but cwd values
+# contain slashes, so the capture is "any run of non-quote characters" rather
+# than a fixed enum: permissive enough for real paths, and it cannot run past
+# the JSON string's closing quote. Anything surprising (embedded escapes, a
+# deleted dir) is discarded by the -d validation below rather than trusted.
+hook_cwd="$(printf '%s' "$payload" \
+  | LC_ALL=C sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+  | head -n 1 || true)"
+[ -n "$hook_cwd" ] && [ -d "$hook_cwd" ] || hook_cwd=""
+
+# --- Project root. Shared resolver (bin/handoff_provenance.sh):
+# CLAUDE_PROJECT_DIR (validated -d) -> payload cwd -> $PWD, then the git
+# toplevel of that anchor. This loader always anchored on the project dir,
+# but the WRITER hooks used a bare `git rev-parse --show-toplevel` anchored
+# on the hook process's cwd — so with cwd != CLAUDE_PROJECT_DIR (worktrees,
+# submodules, a mid-session `cd`) the handoff was written where this loader
+# never looked and the load silently no-op'd. The subdirectory-launch fix
+# (resolve the git top from the project dir, fall back to the dir itself
+# off-git) is preserved inside the resolver. The lib also serves prov_ok
+# below; when it is absent the inline fallback keeps this script standalone.
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if [ -n "$prov_dir" ] && [ -f "$prov_dir/handoff_provenance.sh" ]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+fi
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$hook_cwd"
+  repo="$HANDOFF_ROOT"
+else
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [ -d "$anchor" ] || anchor="$PWD"
+  repo="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$repo" ] || repo="$anchor"
+fi
+current="$repo/.claude/handoff_current.md"
+current_relpath=".claude/handoff_current.md"
+history_dir="$repo/.claude/handoff_history"
 
 # Untrusted-content safety. handoff_current.md and the history snapshots are cat
 # verbatim into the next session's MODEL CONTEXT, and in a cloned/downloaded repo
@@ -106,10 +130,9 @@ emit_untrusted() {  # <file> -> caveat + defanged content
 # no openssl, no/stale MAC, tracked file, HANDOFF_TRUST_DISABLE=1 — keeps
 # TODAY'S treatment exactly: the whole file under data framing.
 prov_ok=0
-prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
-if [ -n "$prov_dir" ] && [ -f "$prov_dir/handoff_provenance.sh" ] && [ -f "$current" ]; then
-  # shellcheck source=bin/handoff_provenance.sh
-  . "$prov_dir/handoff_provenance.sh"
+# (The lib was already sourced — if present — by the root-resolution block
+# above; gate on the function rather than re-sourcing.)
+if type handoff_provenance_ok >/dev/null 2>&1 && [ -f "$current" ]; then
   if handoff_provenance_ok "$current" "$repo" "$current_relpath" \
      && handoff_bind_has_content "$current"; then
     prov_ok=1

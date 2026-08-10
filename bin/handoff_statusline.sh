@@ -73,14 +73,30 @@ usage_sum="$(jq -r '
 ' <<<"$payload" 2>/dev/null || true)"
 [[ "$usage_sum" =~ ^[0-9]+$ ]] || usage_sum=""
 
-# --- Project scope. workspace/cwd come from the payload (docs claim the
-#     statusline runs in the project dir, but that claim is unverified — trust
-#     the payload first, fall back to $PWD), then the same git-top/-project-dir
-#     chain the other hooks use. ---
+# --- Project scope: shared resolver (CLAUDE_PROJECT_DIR -> payload dir ->
+#     $PWD, then git -C toplevel of that anchor), so the cache lands in the
+#     same .claude/ the writer hooks use — the old chain could disagree with
+#     them whenever cwd != CLAUDE_PROJECT_DIR (worktrees, submodules, a
+#     mid-session `cd`). This script is the one caller allowed to pass the
+#     payload's `workspace.project_dir` as the resolver's payload_cwd rung:
+#     the statusline payload states the project dir authoritatively (with
+#     .cwd as its own fallback). Lib absent -> inline (standalone). ---
 dir="$(jq -r '.workspace.project_dir // .cwd // empty' <<<"$payload" 2>/dev/null || true)"
-[[ -n "$dir" && -d "$dir" ]] || dir="$PWD"
-repo_root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
-[[ -n "$repo_root" ]] || repo_root="${CLAUDE_PROJECT_DIR:-$dir}"
+[[ -n "$dir" && -d "$dir" ]] || dir=""
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+fi
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$dir"
+  repo_root="$HANDOFF_ROOT"
+else
+  anchor="${CLAUDE_PROJECT_DIR:-${dir:-$PWD}}"
+  [[ -d "$anchor" ]] || anchor="${dir:-$PWD}"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$repo_root" ]] || repo_root="$anchor"
+fi
 
 # --- Token derivation (see header for why total_* are never read) ---
 tokens=""

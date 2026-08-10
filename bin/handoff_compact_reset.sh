@@ -44,10 +44,30 @@ session_id="$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)"
 # make the rm targets escape backup_dir.
 [[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
 
-# --- Project scope: same resolver chain as the sibling hooks (git worktree
-#     top, else the Claude Code project dir / cwd for non-git projects). ---
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-[[ -n "$repo_root" ]] || repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Payload `cwd`: second-rung anchor for the shared root resolver below.
+payload_cwd="$(jq -r '.cwd // empty' <<<"$payload" 2>/dev/null || true)"
+[[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
+
+# --- Project scope: shared resolver (CLAUDE_PROJECT_DIR -> payload cwd ->
+#     $PWD, then git -C toplevel of that anchor), matching the sibling hooks.
+#     The old bare `git rev-parse` anchored on the hook process's cwd, so with
+#     cwd != CLAUDE_PROJECT_DIR this hook reset sidecars in a .claude/ other
+#     than the one the Stop hook wrote — the stale pre-compact ledger
+#     survived. Lib absent -> inline the same precedence (standalone). ---
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+fi
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$payload_cwd"
+  repo_root="$HANDOFF_ROOT"
+else
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [[ -d "$anchor" ]] || anchor="$PWD"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$repo_root" ]] || repo_root="$anchor"
+fi
 [[ -z "$repo_root" ]] && exit 0
 
 backup_dir="$repo_root/.claude/handoff_backups"

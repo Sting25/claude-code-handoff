@@ -65,12 +65,18 @@ umask 077
 hook_payload=""
 [[ -t 0 ]] || hook_payload="$(cat 2>/dev/null || true)"
 session_end_reason=""
+payload_cwd=""
 if [[ -n "$hook_payload" ]] && command -v jq >/dev/null 2>&1; then
   session_end_reason="$(jq -r '.reason // empty' <<<"$hook_payload" 2>/dev/null || true)"
   # Charset guard: known reasons are lowercase words ("clear", "logout",
   # "prompt_input_exit", "resume", "other"); anything else is treated as
   # unrecognized -> empty -> the write proceeds.
   [[ "$session_end_reason" =~ ^[a-z_]+$ ]] || session_end_reason=""
+  # Payload `cwd`: fed to handoff_resolve_root below as the second-rung
+  # anchor. Guarded the same way as `.reason` (jq optional, parse failure ->
+  # empty) and validated as an existing directory before use.
+  payload_cwd="$(jq -r '.cwd // empty' <<<"$hook_payload" 2>/dev/null || true)"
+  [[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
 fi
 
 # Shared provenance helpers (issue #42): HMAC signing so the next session's
@@ -208,15 +214,31 @@ if ! [[ "$HISTORY_KEEP" =~ ^[0-9]+$ ]]; then
   HISTORY_KEEP=5
 fi
 
-# Project scope: prefer the git worktree top; fall back to the Claude Code
-# project dir (or cwd) so handoff works in projects NOT under git. `in_git`
-# gates the git-only pieces below (commit snapshot, .gitignore bootstrap,
-# the verify-state command block).
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-in_git=1
-if [[ -z "$repo_root" ]]; then
-  in_git=0
-  repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Project scope: shared resolver (handoff_resolve_root, sourced above) —
+# anchor on CLAUDE_PROJECT_DIR first, then the hook payload's cwd, then $PWD,
+# and take the git toplevel of THAT anchor. The old bare `git rev-parse
+# --show-toplevel` anchored on the hook process's cwd while the SessionStart
+# loader anchored on CLAUDE_PROJECT_DIR — so with cwd != project dir
+# (worktrees, submodules, a `cd` during the session) this writer put the
+# handoff under a root the loader never looked at. Skill-invoked runs (no
+# CLAUDE_PROJECT_DIR in the Bash-tool env, no payload) still anchor on $PWD,
+# unchanged. `in_git` gates the git-only pieces below (commit snapshot,
+# .gitignore bootstrap, the verify-state command block).
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$payload_cwd"
+  repo_root="$HANDOFF_ROOT"
+  in_git="$HANDOFF_ROOT_IN_GIT"
+else
+  # Lib absent (stale copy-mode install): inline the same precedence so this
+  # script stays standalone. No payload rung here — the lib carries it.
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [[ -d "$anchor" ]] || anchor="$PWD"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  in_git=1
+  if [[ -z "$repo_root" ]]; then
+    in_git=0
+    repo_root="$anchor"
+  fi
 fi
 if [[ -z "$repo_root" ]]; then
   echo "ERROR: cannot resolve a project directory (no git worktree, CLAUDE_PROJECT_DIR, or PWD)" >&2

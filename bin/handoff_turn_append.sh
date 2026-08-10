@@ -35,6 +35,10 @@ umask 077
 payload="$(cat)"
 session_id="$(jq -r '.session_id // empty'      <<<"$payload")"
 transcript_path="$(jq -r '.transcript_path // empty' <<<"$payload")"
+# Payload `cwd`: second-rung anchor for the shared root resolver below.
+# Validated as an existing directory before use.
+payload_cwd="$(jq -r '.cwd // empty' <<<"$payload" 2>/dev/null || true)"
+[[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
 
 [[ -z "$session_id"        ]] && exit 0
 [[ -z "$transcript_path"   ]] && exit 0
@@ -57,14 +61,31 @@ transcript_path="$(jq -r '.transcript_path // empty' <<<"$payload")"
 # (hex + dashes); accept only [A-Za-z0-9_-] and exit clean on anything else.
 [[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
 
-# --- Project scope. Prefer the git worktree top; fall back to the Claude Code
-#     project dir (or cwd) so handoff also works in projects NOT under git.
-#     `in_git` gates the git-only .gitignore bootstrap below. ---
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-in_git=1
-if [[ -z "$repo_root" ]]; then
-  in_git=0
-  repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+# --- Project scope: shared resolver (CLAUDE_PROJECT_DIR -> payload cwd ->
+#     $PWD, then git -C toplevel of that anchor). The old bare `git rev-parse`
+#     anchored on the hook process's cwd, so when cwd != CLAUDE_PROJECT_DIR
+#     (worktrees, submodules, mid-session `cd`) this hook dumped turns under a
+#     .claude/ the SessionStart loader (project-dir-anchored) never read.
+#     `in_git` gates the git-only .gitignore bootstrap below. Lib absent ->
+#     inline the same precedence so the hook stays standalone. ---
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+fi
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$payload_cwd"
+  repo_root="$HANDOFF_ROOT"
+  in_git="$HANDOFF_ROOT_IN_GIT"
+else
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [[ -d "$anchor" ]] || anchor="$PWD"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  in_git=1
+  if [[ -z "$repo_root" ]]; then
+    in_git=0
+    repo_root="$anchor"
+  fi
 fi
 [[ -z "$repo_root" ]] && exit 0
 
