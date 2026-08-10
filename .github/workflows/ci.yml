@@ -19,6 +19,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run test suite
+        # NO_SKIP: ubuntu runners ship jq, perl, and openssl, so a skipped
+        # check here means the image changed under us and part of the suite
+        # went quietly untested — which is exactly how a green build stops
+        # meaning anything.
+        env:
+          HANDOFF_TESTS_NO_SKIP: "1"
         run: ./tests/run.sh
 
   tests-macos:
@@ -30,10 +36,15 @@ jobs:
       - name: Run test suite (surfaces BSD / bash-3.2 portability gaps)
         run: ./tests/run.sh
 
+  # BLOCKING as of v0.13.0. It was advisory, and the mask was not
+  # hypothetical: the exact command below failed on the tree while CI stayed
+  # green, so the committed .shellcheckrc and the many targeted
+  # `# shellcheck disable=` annotations were being maintained against a check
+  # that could not fail. The tree is clean now, so the gate costs nothing to
+  # hold and everything to drop.
   shellcheck:
-    name: shellcheck — advisory
+    name: shellcheck — required
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install shellcheck
