@@ -165,4 +165,46 @@ out="$(run_doctor)"
 check "doctor: absent secret -> note, no error"  yes "$(has "$out" "note    $dsec absent")"
 check "doctor: absent secret -> not BROKEN"      no  "$(has "$out" "BROKEN  $dsec")"
 
+# --- handoff_secret_path honors CLAUDE_HOME (SEC-3) --------------------------
+# handoff_secret_path used to hardcode $HOME/.claude/handoff_secret and ignore
+# CLAUDE_HOME entirely, while install.sh's own doctor check (above) and
+# remove_secret_if_ours already resolved the secret under $CLAUDE_HOME. That
+# split meant --doctor could report "ok" on a path write_handoff.sh (which
+# sources this file) never actually signed under when CLAUDE_HOME was set —
+# a false clean on exactly the exposure the doctor check exists to catch.
+# Pin the fix from both ends: the function's own resolution, AND that a real
+# signed write under CLAUDE_HOME lands at the SAME path doctor inspects.
+#
+# fakehome stands in for $HOME on the regressed code path: if a future change
+# reintroduces the $HOME/.claude fallback while CLAUDE_HOME is set, that
+# fallback must land inside THIS fixture, never the developer's real
+# ~/.claude — so HOME is overridden here too, not just CLAUDE_HOME. Without
+# this, running this exact check against the pre-fix handoff_secret_path (as
+# done to verify the check gates the bug — see the fix commit's message)
+# would have minted or touched a real secret under the developer's actual
+# home. HANDOFF_SECRET_FILE (lib.sh's secret jail, exported for every other
+# check in this file) is unset for the same reason CLAUDE_HOME needs to be
+# visible: it would otherwise win and mask a regression in the CLAUDE_HOME
+# fallback entirely. Restored after each call.
+home2="$work/home2"
+fakehome="$work/fakehome"
+must mkdir -p "$home2" "$fakehome"
+saved_hsf="${HANDOFF_SECRET_FILE-}"
+
+unset HANDOFF_SECRET_FILE
+resolved="$(HOME="$fakehome" CLAUDE_HOME="$home2" handoff_secret_path)"
+export HANDOFF_SECRET_FILE="$saved_hsf"
+check "secret_path: honors CLAUDE_HOME"          "$home2/handoff_secret" "$resolved"
+
+doctor_out="$(env -u HANDOFF_SECRET_FILE HOME="$fakehome" CLAUDE_HOME="$home2" bash "$INSTALL" --doctor 2>&1)"
+check "secret_path: matches doctor's resolved path" yes "$(has "$doctor_out" "$resolved")"
+
+unset HANDOFF_SECRET_FILE
+out="$(HOME="$fakehome" CLAUDE_HOME="$home2" handoff_ensure_secret)"; rc=$?
+export HANDOFF_SECRET_FILE="$saved_hsf"
+check "secret_path: ensure_secret succeeds under CLAUDE_HOME" 0 "$rc"
+check "secret_path: ensure_secret echoes doctor's path"      "$resolved" "$out"
+check "secret_path: signed secret lands at doctor's path"    yes \
+  "$([ -f "$resolved" ] && echo yes || echo no)"
+
 finish

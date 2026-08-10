@@ -21,8 +21,9 @@
 #      non-git project there is no clone-delivery vector via git, so the
 #      check passes trivially (the HMAC below still gates).
 #   2. A valid HMAC-SHA256 trailer, written by write_handoff.sh with a
-#      per-machine secret under ~/.claude/ (0600, auto-generated, never
-#      in any repo). A cloned/tarball repo cannot forge it.
+#      per-machine secret under ~/.claude/ (or $CLAUDE_HOME, see
+#      handoff_secret_path below; 0600, auto-generated, never in any
+#      repo). A cloned/tarball repo cannot forge it.
 #
 # Zero hard dependencies: openssl is OPTIONAL. When it is absent,
 # signing is skipped and verification fails closed — the handoff loads
@@ -66,8 +67,20 @@ HANDOFF_RULES_HEADING='## Rules (fences — carried into the next session)'
 # shellcheck disable=SC2034
 HANDOFF_NOTES_HEADING='## Notes from this session'
 
+# Mirrors install.sh's claude_home="${CLAUDE_HOME:-$HOME/.claude}" EXACTLY.
+# This used to hardcode $HOME/.claude/handoff_secret, ignoring CLAUDE_HOME —
+# the one holdout after install.sh's doctor check and remove_secret_if_ours
+# were already CLAUDE_HOME-aware. Result: --doctor could say "ok" about
+# $CLAUDE_HOME/handoff_secret while this file's callers actually signed under
+# $HOME/.claude/handoff_secret — a false clean on the exposure doctor exists
+# to catch. Following install.sh (vs. hardcoding doctor back) is also the
+# back-compat-safe direction: CLAUDE_HOME is undocumented/test-only (never in
+# the README), so ${CLAUDE_HOME:-$HOME/.claude} == $HOME/.claude for every
+# real install — a no-op change, not a relocation — whereas the alternative
+# would make remove_secret_if_ours (already claude_home-based) target a file
+# signing never used whenever CLAUDE_HOME is set.
 handoff_secret_path() {
-  printf '%s\n' "${HANDOFF_SECRET_FILE:-$HOME/.claude/handoff_secret}"
+  printf '%s\n' "${HANDOFF_SECRET_FILE:-${CLAUDE_HOME:-$HOME/.claude}/handoff_secret}"
 }
 
 # ---------------------------------------------------------------------------

@@ -508,6 +508,35 @@ numbers, call our script from your existing statusline command instead.
 EOF
 }
 
+# Install $settings.tmp over $settings — the ONE place every maybe_install_*/
+# maybe_uninstall_*/migrate_* function below lands its jq output, instead of
+# each calling `mv` directly. ensure_settings_json validates $settings once,
+# up front, but every one of these functions re-reads whatever the PREVIOUS
+# step's `mv` just installed — so that one up-front check does not cover the
+# rest of the chain. jq on empty/unreadable input still exits 0 and prints
+# nothing (a crashed jq, a disk full mid-write, anything that truncates the
+# pipe): a bare `mv` of that nothing would blank settings.json with a
+# false-success exit code, and because rc==0 the EXIT trap's rollback (see
+# cleanup() near the top of the file) would never fire — the script would
+# print "done" over a wiped config. handoff_statusline.sh's write_cache
+# already guards precisely this pattern ("never install the tmp unless printf
+# succeeded") for a far less valuable file; this is the same discipline
+# applied to the one file every hook depends on.
+#
+# Every call site here runs inside patch_settings() or unpatch_settings(),
+# which arm patch_in_progress and take the pre-patch backup BEFORE calling
+# any of these — so `exit 1` on a bad tmp both aborts the run AND is the
+# rollback: cleanup() sees patch_in_progress=1 and a non-zero rc and restores
+# $settings from $settings_backup. No caller needs to check a return value.
+commit_settings_tmp() {
+  if [[ ! -s "$settings.tmp" ]] || ! jq -e . "$settings.tmp" >/dev/null 2>&1; then
+    echo "  ERROR   jq produced empty or invalid JSON while patching $settings — aborting." >&2
+    echo "          $settings is unmodified; restoring from the pre-patch backup." >&2
+    exit 1
+  fi
+  mv "$settings.tmp" "$settings"
+}
+
 # Install-or-reconcile one hook. Three cases per event:
 #   - marker absent            -> append the canonical command (fresh install)
 #   - marker present, current  -> ok (idempotent re-run)
@@ -550,7 +579,7 @@ maybe_install_hook() {
         | map(select((.hooks // []) | length > 0))
       )
     ' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  UPDATE  hook $event — stale command from an older install rewritten:"
     while IFS= read -r _old; do
       echo "          old: $_old"
@@ -563,7 +592,7 @@ maybe_install_hook() {
     .hooks //= {}
     | .hooks[$e] = ((.hooks[$e] // []) + [{"hooks": [{"type": "command", "command": $c}]}])
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  add     hook $event"
 }
 
@@ -578,7 +607,7 @@ maybe_install_perm() {
     .permissions //= {}
     | .permissions.allow = ((.permissions.allow // []) + [$p])
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  add     permission: $perm"
 }
 
@@ -592,7 +621,7 @@ maybe_install_model() {
   cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
   if [[ -z "$cur" ]]; then
     jq --arg m "$model_pin" '.model = $m' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     printf '%s\n' "$model_pin" > "$model_pin_record"
     echo "  add     model: $model_pin (recorded for uninstall)"
   elif [[ "$cur" == "$model_pin" ]]; then
@@ -613,7 +642,7 @@ maybe_uninstall_model() {
   cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
   if [[ -n "$rec" && "$cur" == "$rec" ]]; then
     jq 'del(.model)' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  remove  model: $rec (this installer set it, unchanged since)"
   else
     echo "  keep    model '$cur' (differs from the recorded pin '$rec' — you changed"
@@ -636,7 +665,7 @@ maybe_install_statusline() {
   if jq -e '(.statusLine // null) == null' "$settings" >/dev/null 2>&1; then
     jq --arg c "$sl_cmd" '.statusLine = {"type": "command", "command": $c}' \
       "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  add     statusLine"
     return
   fi
@@ -649,7 +678,7 @@ maybe_install_statusline() {
       return
     fi
     jq --arg c "$sl_cmd" '.statusLine.command = $c' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  UPDATE  statusLine — stale command from an older install rewritten:"
     echo "          old: $cur_sl"
     echo "          new: $sl_cmd"
@@ -665,7 +694,7 @@ maybe_uninstall_statusline() {
   if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
        "$settings" >/dev/null 2>&1; then
     jq 'del(.statusLine)' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  remove  statusLine"
   elif jq -e '(.statusLine // null) != null' "$settings" >/dev/null 2>&1; then
     echo "  ok      statusLine (not ours; leaving alone)"
@@ -693,7 +722,7 @@ maybe_uninstall_hook() {
     )
     | if ((.hooks[$e] // []) | length) == 0 then del(.hooks[$e]) else . end
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  remove  hook $event"
 }
 
@@ -707,7 +736,7 @@ maybe_uninstall_perm() {
   jq --arg p "$perm" '
     .permissions.allow |= (map(select(. != $p)))
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  remove  permission: $perm"
 }
 
@@ -730,7 +759,7 @@ migrate_legacy_ss_hook() {
     )
     | if ((.hooks.SessionStart // []) | length) == 0 then del(.hooks.SessionStart) else . end
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  migrate legacy SessionStart inline command removed (pre-0.3.0)"
 }
 
