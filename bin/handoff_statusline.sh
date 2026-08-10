@@ -125,7 +125,9 @@ handoff_doc="$repo_root/.claude/handoff_current.md"
 # .claude/handoff_current.md as a symlink to a file outside the repo. `! -L`
 # refuses it, leaving the state "none"; the one-line display has no room for a
 # warning (the loader hooks emit that), and the line must never die to this.
-if [[ ! -L "$handoff_doc" && -f "$handoff_doc" ]]; then
+# Directory-aware, like the loader: a leaf-only test is false when `.claude`
+# itself is the symlink (the leaf is then a real file at the target).
+if [[ ! -L "$repo_root/.claude" && ! -L "$handoff_doc" && -f "$handoff_doc" ]]; then
   if grep -qF "$HANDOFF_PLACEHOLDER_SENTINEL" "$handoff_doc" 2>/dev/null; then
     handoff_state="auto"
   else

@@ -95,8 +95,17 @@ history_dir="$repo/.claude/handoff_history"
 # the one place the user reliably sees) and treat the handoff as ABSENT so the
 # miss-visibility / recover logic below proceeds exactly as for a fresh repo —
 # never crash the hook.
+# The check is DIRECTORY-AWARE, matching write_handoff.sh:313: a leaf-only
+# `-L "$current"` test is false when `.claude` ITSELF is the symlink, because
+# the leaf is then a real file at the target — so committing `.claude` as a
+# link bypassed the guard entirely and the target's content still reached the
+# model. Both components are refused for the same reason.
 current_is_symlink=0
-if [ -L "$current" ]; then
+if [ -L "$repo/.claude" ]; then
+  current_is_symlink=1
+  echo "⚠️  handoff: $repo/.claude is a symlink — refusing to read through it (a cloned repo could point it at a directory outside the repo, so every file under it is attacker-chosen). Treating the handoff as absent; replace the symlink with a real directory to restore loading."
+  echo
+elif [ -L "$current" ]; then
   current_is_symlink=1
   echo "⚠️  handoff: $current is a symlink — refusing to read through it (a cloned repo could point it at a file outside the repo, e.g. a key or dotfile). Treating the handoff as absent; replace the symlink with a regular file to restore loading."
   echo

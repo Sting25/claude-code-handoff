@@ -264,8 +264,17 @@ history_relpath=".claude/handoff_history/"
 # repos without them are entirely unaffected. Override via
 # HANDOFF_PINNED_FILE / HANDOFF_SYSTEMLOG_FILE.
 pinned_file="${HANDOFF_PINNED_FILE:-$handoff_dir/handoff_pinned.md}"
-pinned_relpath="${pinned_file#"$repo_root"/}"
 systemlog_file="${HANDOFF_SYSTEMLOG_FILE:-$repo_root/SYSTEM_LOG.md}"
+# A RELATIVE override is resolved against the REPO ROOT, matching how the
+# tracked-ness check below (and git itself) interprets it. Resolving it against
+# the process cwd instead — which is what reading the raw value does — makes
+# the pin silently VANISH from the handoff whenever a hook fires with cwd !=
+# root, the exact asymmetry this codebase's root resolver exists to close. It
+# also left the .gitignore bootstrap below pointing at a path that never
+# matched. Absolute values are untouched.
+case "$pinned_file" in /*) ;; *) pinned_file="$repo_root/${pinned_file#./}" ;; esac
+case "$systemlog_file" in /*) ;; *) systemlog_file="$repo_root/${systemlog_file#./}" ;; esac
+pinned_relpath="${pinned_file#"$repo_root"/}"
 systemlog_relpath="${systemlog_file#"$repo_root"/}"
 
 # Pin bindability (issue #42): the pinned file is meant to be USER-authored
@@ -304,6 +313,19 @@ if type handoff_is_untracked >/dev/null 2>&1 && [[ -n "$pin_check_rel" ]]; then
   fi
 fi
 
+# Symlink read guard for the pin, the write-path twin of the loader's guard on
+# handoff_current.md. The pin body is cat'd VERBATIM into the generated
+# document, so a cloned repo shipping .claude/handoff_pinned.md as a symlink to
+# ~/.ssh/id_rsa doesn't just echo the target — it PERSISTS it into a repo file
+# and replays it into the next session. Tracked-ness only decides bindability;
+# it does nothing about disclosure. Directory-aware for the same reason the
+# other guards are: with `.claude` itself a symlink the leaf test is false.
+# Refused means treated as absent — an empty path fails the `-s` test below.
+if [[ -L "$pinned_file" || -L "$(dirname "$pinned_file")" ]]; then
+  echo "write_handoff.sh: $pinned_relpath is a symlink (or sits under one); refusing to read through it — the pin body is copied verbatim into the handoff, so a link could persist a file from outside the repo. Treating the pin as absent." >&2
+  pinned_file=""
+fi
+
 # Symlink-safety. The final document write is a `>` redirect (and rotation does
 # `mv "$handoff_path" -> history`); `>` FOLLOWS a symlink and truncates its
 # target. A malicious repo can ship `.claude/handoff_current.md` (or `.claude`
@@ -323,6 +345,19 @@ mkdir -p "$handoff_dir"
 if [[ -L "$handoff_path" ]]; then
   echo "write_handoff.sh: dropping planted symlink at $handoff_relpath (refusing to write through it)." >&2
   rm -f "$handoff_path"
+fi
+# handoff_history/ is the third component of the same guard and was the one
+# left uncovered. Rotation `mv`s the outgoing document — verbatim session
+# prose — into it, so a repo shipping `.claude/handoff_history` as a symlink
+# sends every rotated snapshot outside the repo, silently. It also kills
+# retention: `find -P` will not descend a symlinked start point, so prune and
+# the SessionStart history fallback see an empty history while snapshots
+# accumulate off-tree. Refuse the run rather than deleting the link — same
+# fail-closed choice as the .claude guard above, and it never destroys
+# anything the link points at.
+if [[ -L "$history_dir" ]]; then
+  echo "write_handoff.sh: $history_relpath is a symlink; refusing to operate through it (rotated snapshots contain session prose and would land outside the repo, with retention silently disabled). Replace it with a real directory." >&2
+  exit 1
 fi
 
 # ----- mkdir-based mutual-exclusion locks ------------------------------------
