@@ -517,6 +517,16 @@ rotate_existing_handoff() {
   chmod 600 "$archived" 2>/dev/null || true
 }
 prune_history() {
+  # KEEP=0 means "retention disabled" — documented in the README as "existing
+  # snapshots are never touched", and the rotation guard above already skips
+  # archiving on KEEP<=0. But this prune used to run unconditionally: with
+  # KEEP=0 the `tail -n +$((KEEP+1))` below is `tail -n +1`, which lists EVERY
+  # history file for deletion — so a one-off `HANDOFF_HISTORY_KEEP=0` run
+  # destroyed all prior curated snapshots (the exact opposite of "disabled").
+  # Skip pruning entirely; existing history is left untouched. The non-numeric/
+  # negative fallback above guarantees HISTORY_KEEP is a non-negative integer
+  # by the time we get here.
+  [[ "$HISTORY_KEEP" -gt 0 ]] || return 0
   [[ -d "$history_dir" ]] || return 0
   # Delete all but the HISTORY_KEEP newest. Use a `while IFS= read -r` loop with
   # `rm -f --` (mirroring handoff_turn_append.sh) rather than a bare `xargs -r

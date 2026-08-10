@@ -145,6 +145,28 @@ check "KEEP=0 -> no history dir"        no  "$([[ -d "$repo/.claude/handoff_hist
 check "KEEP=0 -> old current overwritten" no "$(has "$(cat "$repo/.claude/handoff_current.md")" "MARKER_OLDCUR")"
 rm -rf "$repo"
 
+# --- HANDOFF_HISTORY_KEEP=0 must NOT wipe a PRE-POPULATED history ------------
+# Regression: the rotation guard skipped archiving on KEEP=0, but prune_history
+# still ran — and with KEEP=0 its `tail -n +1` listed EVERY history file for
+# deletion, so a single `HANDOFF_HISTORY_KEEP=0` run destroyed all prior
+# curated snapshots. The earlier KEEP=0 test above used a fresh repo (no
+# history dir at all) and never caught it. README documents 0 as "disables
+# pruning entirely; existing snapshots are never touched" — pin exactly that.
+repo="$(mk_repo_gitignored)"
+hist="$repo/.claude/handoff_history"; must mkdir -p "$hist"
+echo "old current MARKER_OLDCUR" > "$repo/.claude/handoff_current.md"
+for ts in 2020-01-01_000000 2020-01-02_000000 2020-01-03_000000; do
+  echo "curated snapshot $ts" > "$hist/handoff_$ts.md"
+done
+( cd "$repo" && HANDOFF_HISTORY_KEEP=0 bash "$WH" >/dev/null 2>&1 )
+kept="$(find "$hist" -maxdepth 1 -name 'handoff_*.md' 2>/dev/null | wc -l | tr -d ' ')"
+check "KEEP=0 + existing history -> ALL 3 survive"  3 "$kept"
+for ts in 2020-01-01_000000 2020-01-02_000000 2020-01-03_000000; do
+  check "KEEP=0 -> $ts untouched" yes "$([[ -f "$hist/handoff_$ts.md" ]] && echo yes || echo no)"
+done
+check "KEEP=0 -> new current still written" no "$(has "$(cat "$repo/.claude/handoff_current.md")" "MARKER_OLDCUR")"
+rm -rf "$repo"
+
 # --- .gitignore bootstrap: on by default, off via env -----------------------
 repo="$(mk_repo)"                       # no .gitignore present
 ( cd "$repo" && HANDOFF_HISTORY_KEEP=0 bash "$WH" >/dev/null 2>&1 )
