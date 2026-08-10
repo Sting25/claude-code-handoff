@@ -112,6 +112,21 @@ check "file-symlink: victim content unchanged"     "ORIGINAL_VICTIM" "$(cat "$vi
 check "file-symlink: secret NOT in victim"         no  "$(grep -q "$SECRET" "$victim" && echo yes || echo no)"
 rm -rf "$repo"; rm -f "$victim"
 
+# --- the LOCK file is a symlink to a victim -> refuse; victim NOT truncated.
+#     Where flock is available the lock is opened with `exec 9>`, and `>`
+#     follows a symlink at that path — pre-guard, a planted link truncated an
+#     attacker-chosen file on the first Stop fire. The guard sits before the
+#     flock/mkdir branch, so on flock-less hosts the refusal (no dump) is the
+#     observable regression signal.
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; mkdir -p "$bd"
+victim="$(mktemp)"; printf 'ORIGINAL_LOCK_VICTIM\n' > "$victim"
+ln -s "$victim" "$bd/.handoff_raw_LCKSYM.lock"
+tx="$repo/tx.jsonl"; printf '{"type":"user","message":{"content":"my key is %s"}}\n' "$SECRET" > "$tx"
+run_turn "$repo" LCKSYM "$tx"
+check "lock-symlink: victim NOT truncated"         "ORIGINAL_LOCK_VICTIM" "$(cat "$victim")"
+check "lock-symlink: hook refused (no dump)"       no  "$([[ -f "$bd/handoff_raw_LCKSYM.md" ]] && echo yes || echo no)"
+rm -rf "$repo"; rm -f "$victim"
+
 # --- .claude is a symlink -> refuse; nothing written into target
 repo="$(mk_repo)"; ext="$(mktemp -d)"
 ln -s "$ext" "$repo/.claude"

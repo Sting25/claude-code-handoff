@@ -154,10 +154,16 @@ dump_file="$backup_dir/handoff_raw_${session_id}.md"
 cursor_file="$backup_dir/.handoff_raw_${session_id}.cursor"
 lock_file="$backup_dir/.handoff_raw_${session_id}.lock"
 
-# backup_dir is confirmed a real dir above; this catches a per-file symlink
-# planted at the exact dump name. (The lock below is acquired with mktemp-style
-# guarantees / a UUID-scoped name, so the dump content sink is the one to guard.)
+# backup_dir is confirmed a real dir above; these catch a per-file symlink
+# planted at the exact dump or lock name. The dump is the secret-bearing sink,
+# but the LOCK file is a truncation primitive of its own: the flock branch
+# below opens it with `exec 9>`, and `>` FOLLOWS a symlink at that path —
+# there is no mktemp-style safety here (the name is predictable from the
+# session id), so a planted link would truncate an attacker-chosen victim
+# file. Guard both before anything is opened. (The mkdir-lock fallback needs
+# no guard: mkdir/rmdir never follow a symlink.)
 refuse_symlink "$dump_file" "dump file" || exit 0
+refuse_symlink "$lock_file" "lock file" || exit 0
 
 # --- Serialize concurrent invocations: only one Stop hook may process
 #     this session at a time. If another instance is already running,
