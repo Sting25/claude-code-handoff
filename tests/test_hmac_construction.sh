@@ -17,10 +17,18 @@ echo "hmac construction (argv hardening + back-compat)"
 # shellcheck source=bin/handoff_provenance.sh
 . "$REPO_ROOT/bin/handoff_provenance.sh"
 
-command -v openssl >/dev/null 2>&1 || { echo "  SKIP  openssl not available"; finish; }
+# `exit` is load-bearing: `finish` only PRINTS the tally, it does not end the
+# file. Without it an openssl-less host falls straight through into the
+# openssl-dependent body below and reports a spurious hard FAIL for a
+# dependency it correctly detected as missing.
+command -v openssl >/dev/null 2>&1 || { echo "  SKIP  openssl not available"; finish; exit 0; }
 
 td="$(mktemp -d)"
-trap 'rm -r "$td" 2>/dev/null' EXIT
+# cleanup_on_exit, never a raw `trap … EXIT`: a raw trap REPLACES lib.sh's
+# chained one, and the casualty is the secret jail lib.sh installs — which then
+# strands a temp dir per run and re-opens the key-material leak the jail exists
+# to prevent. lib.sh:26-27 warns against this in writing.
+cleanup_on_exit "$td"
 
 mk_doc() {  # <path> — doc with a decoy prose trailer line that must stay digested
   {

@@ -163,7 +163,13 @@ check "GNU: stamp reflects mtime" "handoff_2020-03-04_050607.md" "$(rotate_stamp
 # the GNU spellings, then delegate to the real tool in whichever dialect it
 # speaks (GNU translation first, BSD pass-through fallback) so the sim works on
 # both GNU and BSD hosts.
-bsd="$(path_without stat)"; bsd="$(PATH="$bsd" path_without date)"  # drop both real tools
+# Two shim dirs, and BOTH must be registered for removal: the second
+# path_without builds a FRESH directory, so assigning it back over `bsd` dropped
+# the only reference to the first and leaked a ~1,600-entry directory per run.
+bsd_stat_only="$(path_without stat)"
+cleanup_on_exit "$bsd_stat_only"
+bsd="$(PATH="$bsd_stat_only" path_without date)"  # drop both real tools
+cleanup_on_exit "$bsd"
 REAL_STAT="$(command -v stat)"; REAL_DATE="$(command -v date)"
 cat > "$bsd/stat" <<EOF
 #!/usr/bin/env bash
