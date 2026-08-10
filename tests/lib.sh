@@ -35,6 +35,7 @@ _lib_run_cleanup() {
     rm -rf "$p"
   done
 }
+# shellcheck disable=SC2120  # false positive: $1 is filled by `set --` below, not by callers
 _lib_arm_exit_trap() {
   # Chain, don't clobber: if an EXIT trap already exists when lib.sh is
   # sourced, keep it — run its body first (it may reference paths we are
@@ -50,6 +51,7 @@ _lib_arm_exit_trap() {
     trap -- '_lib_run_cleanup' EXIT
   fi
 }
+# shellcheck disable=SC2119  # companion to the SC2120 disable above
 _lib_arm_exit_trap
 
 # Keep signing side effects inside the test sandbox (issue #49):
