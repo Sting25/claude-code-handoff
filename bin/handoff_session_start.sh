@@ -250,15 +250,33 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # Miss visibility: no handoff_current.md is NORMAL for a fresh project (stay
-# silent — never spam every new repo), but when the history or raw-backup dirs
-# already hold entries, handoffs HAVE been written here before, and a silent
-# no-op is exactly how the root-resolution asymmetry bug hid: the writers used
-# one .claude/, this loader looked at another, and nobody saw anything. Name
-# the path we looked at so a miss is diagnosable. A refused symlink (guard
-# above) is treated as absent here — the warning already named it.
+# silent — never spam every new repo), but when the history dir or a raw dump
+# already exist, handoffs HAVE been written here before, and a silent no-op is
+# exactly how the root-resolution asymmetry bug hid: the writers used one
+# .claude/, this loader looked at another, and nobody saw anything. Name the
+# path we looked at so a miss is diagnosable. A refused symlink (guard above)
+# is treated as absent here — the warning already named it.
+#
+# The backups-dir probe is scoped to `handoff_raw_*.md` — the dump file the
+# Stop hook (handoff_turn_append.sh) writes on its first fire — NOT "any file
+# in the directory". handoff_backups/ also holds dot-prefixed bookkeeping
+# sidecars (.ctx_<sid>, .ctx_sl_<sid>, .ctx_tokens_<sid>, .ctx_model_<sid>,
+# .ctx_flagged_<sid>, .handoff_raw_<sid>.cursor/.lock, .fences_<sid>) that
+# handoff_ctx_check.sh and handoff_statusline.sh drop there on a project's
+# FIRST session — .ctx_sl_<sid> in particular is written by the statusline
+# renderer on every prompt, independent of any Stop-hook fire — long before
+# any handoff exists. A whole-directory `find -type f` treated that bookkeeping
+# as evidence of "prior handoff artifacts" and fired the warning (and its
+# "run /handoff-more or /handoff-recover" instruction) on session #2 of any
+# fresh project whose first session ended via a skipped SessionEnd reason
+# (e.g. the default-skipped `resume`) — a false positive on a legitimately
+# blank project. `handoff_raw_*.md` is written unconditionally at the START of
+# the Stop hook's first real fire (before any of those sidecars), so it is
+# both necessary and sufficient evidence that a handoff was actually written
+# here, with no false-negative trade-off.
 if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ]; then
   if [ -n "$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | head -n 1 || true)" ] \
-     || [ -n "$(find "$repo/.claude/handoff_backups" -maxdepth 1 -type f 2>/dev/null | head -n 1 || true)" ]; then
+     || [ -n "$(find "$repo/.claude/handoff_backups" -maxdepth 1 -name 'handoff_raw_*.md' -type f 2>/dev/null | head -n 1 || true)" ]; then
     echo "⚠️  handoff: no handoff to load at $current — but this project has prior handoff artifacts (.claude/handoff_history/ or .claude/handoff_backups/), so one may have been expected. Run /handoff-more or /handoff-recover to inspect what exists."
   fi
   exit 0

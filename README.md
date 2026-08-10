@@ -116,8 +116,15 @@ Full list in [skills/handoff/README.md](skills/handoff/README.md).
 Test/debug overrides:
 
 ```bash
-# Override the per-repo backup directory where raw-dump transcripts and
-# context measurements live. Default: <repo>/.claude/handoff_backups.
+# Override where handoff_recover_tail.sh (and ONLY that script) looks for the
+# per-session cursor file used by /handoff-recover. Default:
+# <repo>/.claude/handoff_backups. This does NOT relocate the backup directory
+# project-wide: the Stop hook, ctx-check, compact-reset, and statusline hooks
+# each resolve <repo>/.claude/handoff_backups independently and ignore this
+# var, so setting it to anything but the real write location desyncs
+# recover_tail from its own cursor file (it warns on stderr if it detects
+# this). Meant for tests that stage a throwaway cursor file, not for
+# relocating handoffs.
 export HANDOFF_BACKUP_DIR=/custom/path
 
 # Override the projects root searched by /handoff-recover to find the
