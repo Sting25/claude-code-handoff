@@ -34,20 +34,51 @@ mk_repo_gitignored() {
 
 echo "write_handoff.sh — write lock / gitignore lock / concurrent smoke"
 
-# --- Held write lock: --if-curated (hook) run yields silently ---------------
+# --- Held write lock: --if-curated (hook) run yields, but VISIBLY (DATA-2) --
 # A FRESH lock dir means another writer is mid-rotation/publish; the safety
 # net's mechanical snapshot adds nothing, so it must exit 0 without writing.
+# It must NOT look like a successful write while doing so: the lock is a bare
+# directory with no owner, so one left behind by a SIGKILL'd/OOM'd writer or a
+# reboot mid-write makes every SessionEnd and PreCompact fire in the repo
+# no-op for up to HANDOFF_LOCK_STALE_SECS — and with the path on stdout and
+# rc=0 that was byte-for-byte identical to success.
 repo="$(mk_repo_gitignored)"
 must mkdir -p "$repo/.claude/.handoff_write.lock"
 out="$( cd "$repo" && bash "$WH" --if-curated 2>/dev/null )"; rc=$?
+err="$( cd "$repo" && bash "$WH" --if-curated 2>&1 >/dev/null )"
 check "held lock + --if-curated -> exit 0"        0   "$rc"
-check "held lock + --if-curated -> path printed"  yes "$(has "$out" ".claude/handoff_current.md")"
+check "held lock + --if-curated -> warns on stderr" yes "$(has "$err" "SKIPPING this safety-net write")"
+check "held lock + --if-curated -> names the lock path" yes \
+  "$(has "$err" ".claude/.handoff_write.lock")"
+check "held lock + --if-curated -> no path on stdout" "" "$out"
 check "held lock + --if-curated -> nothing published" no \
   "$([[ -f "$repo/.claude/handoff_current.md" ]] && echo yes || echo no)"
 check "held lock + --if-curated -> no tmp leftover" 0 \
   "$(find "$repo/.claude" -maxdepth 1 -name '.handoff_current.*' 2>/dev/null | wc -l | tr -d ' ')"
 check "held lock left for its holder" yes \
   "$([[ -d "$repo/.claude/.handoff_write.lock" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# The reported repro, end to end: a real session's document plus a LEFTOVER
+# lock, driven exactly as the SessionEnd hook drives it (JSON payload on
+# stdin). The write is skipped either way — the fix is that the skip is now
+# announced instead of being reported as a completed write.
+repo="$(mk_repo_gitignored)"
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 </dev/null )   # a document to protect
+doc="$repo/.claude/handoff_current.md"
+must test -f "$doc"
+before="$(cat "$doc")"
+must mkdir -p "$repo/.claude/.handoff_write.lock"         # writer died here
+out="$( cd "$repo" && printf '{"reason":"clear"}' | bash "$WH" --if-curated 2>/dev/null )"; rc=$?
+err="$( cd "$repo" && printf '{"reason":"clear"}' | bash "$WH" --if-curated 2>&1 >/dev/null )"
+check "leftover lock: exit 0 (a hook never fails the session)" 0 "$rc"
+check "leftover lock: document byte-identical (write skipped)" yes \
+  "$([[ "$before" == "$(cat "$doc")" ]] && echo yes || echo no)"
+check "leftover lock: nothing rotated into history" 0 \
+  "$(find "$repo/.claude/handoff_history" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+check "leftover lock: the miss is visible on stderr" yes "$(has "$err" "may be stale")"
+check "leftover lock: not reported as a write" "" "$out"
+check "leftover lock: message points at the remedy" yes "$(has "$err" "rmdir")"
 rm -rf "$repo"
 
 # --- Held write lock: explicit run waits, warns, and still writes -----------

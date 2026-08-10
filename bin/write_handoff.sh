@@ -1170,9 +1170,28 @@ if try_mkdir_lock "$write_lock_dir"; then
 elif (( IF_CURATED )); then
   # Hook (safety-net) run: another writer is mid-write, and its snapshot of
   # this same repo state does the job — a second mechanical snapshot adds
-  # nothing worth contending for. Exit 0 like the other safety-net skips
-  # (the built tmp is discarded by the cleanup trap).
-  echo "$handoff_path"
+  # nothing worth contending for. Exit 0 like the other safety-net skips (a
+  # hook must never fail the session; the built tmp is discarded by the
+  # cleanup trap) — but SAY SO, and print nothing on stdout.
+  #
+  # The silent version of this skip could void the safety net outright. The
+  # lock is a bare directory with no owner recorded, so a writer that took a
+  # SIGKILL, met the OOM killer, or lost the machine mid-sequence leaves one
+  # behind with nothing to reap it; until it ages past
+  # HANDOFF_LOCK_STALE_SECS (default 300s) EVERY SessionEnd and PreCompact
+  # fire in that repo skipped its write. And the skip was byte-for-byte
+  # indistinguishable from success: rc=0, the handoff path on stdout, no
+  # diagnostic anywhere. A session could end having written nothing, with the
+  # loaded document silently hours stale and no signal that the net had not
+  # caught it. The path is this script's "the write happened" signal — every
+  # caller keys on it — so emitting it on a skip is the specific lie that made
+  # the failure undetectable. The other --if-curated skips above legitimately
+  # print it: there the document at that path IS the current, correct one and
+  # was deliberately preserved. Here nothing was inspected and nothing written.
+  #
+  # The remedy goes in the message because the operator is the only one who
+  # can tell a wedged lock from a live writer.
+  echo "write_handoff.sh: write lock $write_lock_dir is held; SKIPPING this safety-net write (no rotation, no publish) — $handoff_relpath is unchanged and may be stale. A lock left by a killed writer clears itself after ${HANDOFF_LOCK_STALE_SECS:-300}s; if no other writer is running, remove it: rmdir '$write_lock_dir'" >&2
   exit 0
 else
   # Explicit (/handoff or manual) run: the user asked for THIS write, so
