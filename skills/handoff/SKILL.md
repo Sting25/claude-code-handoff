@@ -1,9 +1,15 @@
 ---
 name: handoff
-description: Snapshot session state to .claude/handoff_current.md (plus a raw-dump backup at .claude/handoff_backups/handoff_raw_<session_id>.md that the Stop hook has been appending to all session) and tell the user (loudly, with -*-*- borders) to start a new session. Use at clean boundaries (commit lands, track wraps), when the user signals context pressure ("getting long", "meter is full"), or whenever the user invokes /handoff. Blocks until the user actually starts a new session — do not start new work after invoking.
+description: Snapshot session state to .claude/handoff_current.md and tell the user (loudly, with -*-*- borders) to start a new session. Requires the scripts/hooks installed by this repo's ./install.sh — not a prompt-only skill. Use at clean boundaries (commit lands, track wraps), when the user signals context pressure ("getting long", "meter is full"), or whenever the user invokes /handoff. Blocks until the user actually starts a new session — do not start new work after invoking.
 ---
 
 # /handoff — write a session handoff
+
+> **Prerequisite:** this skill drives scripts and hooks from
+> https://github.com/Sting25/claude-code-handoff — `write_handoff.sh`
+> under `~/.claude/bin/` and the Stop / SessionStart / SessionEnd hooks
+> in `~/.claude/settings.json` are NOT part of this file. Run
+> `./install.sh` from that repo once per machine before first use.
 
 Used at clean boundaries (after a commit, when a major track wraps),
 when the user signals context pressure, or whenever the user invokes
@@ -37,11 +43,17 @@ nothing gets lost across the restart boundary.
 
 ## Steps
 
-1. Run via Bash:
+1. Check the script is installed, then run it via Bash:
    ```bash
-   bash ~/.claude/bin/write_handoff.sh
+   test -f ~/.claude/bin/write_handoff.sh && bash ~/.claude/bin/write_handoff.sh \
+     || echo "MISSING: write_handoff.sh not installed"
    ```
-   The script outputs the absolute path of the written handoff
+   If it prints MISSING, **stop here** — tell the user to clone
+   https://github.com/Sting25/claude-code-handoff and run `./install.sh`,
+   then re-invoke `/handoff`. Do NOT attempt to reconstruct the script's
+   behavior by hand; the hooks it pairs with won't be installed either,
+   and a hand-rolled snapshot breaks the HMAC/rotation contract.
+   Otherwise, the script outputs the absolute path of the written handoff
    (`<repo-root>/.claude/handoff_current.md`).
 
 2. Read the file you just wrote. Then Edit it to **replace the

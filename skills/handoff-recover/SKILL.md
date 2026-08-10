@@ -1,9 +1,16 @@
 ---
 name: handoff-recover
-description: Compose a retroactive curated handoff when the previous session ended without invoking /handoff. The SessionStart hook emits an "ACTION: RUN /handoff-recover" banner whenever it detects the placeholder Notes block in handoff_current.md (SessionEnd safety-net write only, no model in the loop). Reads the previous session's raw per-turn dump under .claude/handoff_backups/, the most recent curated handoff under .claude/handoff_history/, and (if present) the host-wide session registry, then surfaces a retroactive Notes block in chat and writes it into handoff_current.md so the recovered context persists into future handoff history.
+description: Compose a retroactive curated handoff when the previous session ended without invoking /handoff. Requires the scripts/hooks installed by this repo's ./install.sh — not a prompt-only skill. Triggered by the SessionStart "ACTION: RUN /handoff-recover" banner (emitted when handoff_current.md still has the placeholder Notes block) or by explicit /handoff-recover. Reads the previous session's raw per-turn dump under .claude/handoff_backups/ and the most recent curated handoff under .claude/handoff_history/, then writes a retroactive Notes block into handoff_current.md so the recovered context persists.
 ---
 
 # /handoff-recover — retroactive handoff composition
+
+> **Prerequisite:** this skill leans on scripts and hooks from
+> https://github.com/Sting25/claude-code-handoff — the raw dumps it
+> recovers from are written by the Stop hook, and it runs
+> `handoff_recover_tail.sh` / `write_handoff.sh` from `~/.claude/bin/`.
+> None of that ships with this file alone; run `./install.sh` from that
+> repo once per machine first.
 
 The previous session ended without running `/handoff` — crashed,
 killed, terminal closed, or just never invoked. `SessionEnd` wrote a
@@ -40,6 +47,19 @@ into the current session's context and persists it back into
   is still useful.
 
 ## Steps
+
+**Preflight — verify the toolchain is installed.** Before step 1:
+
+```bash
+test -f ~/.claude/bin/write_handoff.sh || echo "MISSING: handoff scripts not installed"
+```
+
+If it prints MISSING, **stop here** — tell the user to clone
+https://github.com/Sting25/claude-code-handoff and run `./install.sh`,
+then re-invoke `/handoff-recover`. Do NOT reconstruct the scripts'
+behavior by hand: a recovery composed without the real
+`write_handoff.sh --restamp` / `handoff_recover_tail.sh` leaves the
+handoff unsigned and can silently miss the lost session's final turns.
 
 1. **Identify the previous session's raw dump.** The `Stop` hook
    appends every turn to `<repo>/.claude/handoff_backups/handoff_raw_<session_id>.md`.

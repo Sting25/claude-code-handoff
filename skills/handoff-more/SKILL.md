@@ -1,9 +1,15 @@
 ---
 name: handoff-more
-description: Pull older handoffs from .claude/handoff_history/ into the current session's context. Use when the auto-loaded handoff_current.md is thin (placeholder Notes, mechanical session, missing context the user is referencing), when the user references work from "yesterday" or "the session before this one," or whenever the user explicitly invokes /handoff-more. Reads up to N older snapshots (default 5) so the assistant has continuity beyond the single most-recent handoff.
+description: Pull older handoffs from .claude/handoff_history/ into the current session's context. Requires the scripts/hooks installed by this repo's ./install.sh — the history it reads only exists once those are in place. Use when the auto-loaded handoff_current.md is thin (placeholder Notes, missing context the user is referencing), when the user references work from "yesterday" or "the session before this one," or whenever the user explicitly invokes /handoff-more. Reads up to N older snapshots (default 5).
 ---
 
 # /handoff-more — load older handoffs into context
+
+> **Prerequisite:** this skill reads history that only exists when the
+> scripts and hooks from https://github.com/Sting25/claude-code-handoff
+> are installed — `write_handoff.sh` is what rotates snapshots into
+> `handoff_history/`. That toolchain is NOT part of this file alone;
+> run `./install.sh` from that repo once per machine first.
 
 The `SessionStart` hook auto-loads `handoff_current.md` (the most
 recent handoff). This skill pulls in the older snapshots that
@@ -29,7 +35,15 @@ before each new write.
    ```bash
    ls -la <repo-root>/.claude/handoff_history/
    ```
-   If the directory is missing or empty, say so and stop — there's
+   If the directory is missing or empty, check whether that's "no
+   history yet" or "toolchain never installed":
+   ```bash
+   test -f ~/.claude/bin/write_handoff.sh || echo "MISSING: handoff scripts not installed"
+   ```
+   If it prints MISSING, stop and tell the user to clone
+   https://github.com/Sting25/claude-code-handoff and run `./install.sh`
+   — don't try to substitute for the missing toolchain. If the scripts
+   ARE installed, say there's simply no history yet and stop — there's
    nothing to load.
 
 2. Read each retained snapshot, newest first. The default retention
