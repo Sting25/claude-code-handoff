@@ -180,8 +180,9 @@ else
     # under a second, but a FIRST fire over a long backlog (session resume
     # with a new id, cursor evicted by the prune) forks several jq per
     # transcript line and can run for minutes — so the holder re-touches the
-    # lock dir periodically during the append loop (see below), keeping a
-    # live lock's mtime fresh, and the default window is 300s: comfortably
+    # lock dir at acquisition, between phases, and periodically during the
+    # append loop (refresh_lock below), keeping a live lock's mtime fresh,
+    # and the default window is 300s: comfortably
     # above both the touch interval and Claude Code's 60s hook timeout, so a
     # slow-but-alive run can't have its lock stolen (which interleaved dump
     # content and clobbered the cursor). Age via GNU `stat -c` with a BSD
@@ -202,6 +203,23 @@ else
   fi
   trap 'rmdir "$lock_mkdir" 2>/dev/null || true' EXIT
 fi
+
+# Keep the mkdir-lock fresh OUTSIDE the append loop too. The stale reclaim
+# above is purely mtime-based, and the loop's periodic touch only starts once
+# lines are flowing — a holder stalled BEFORE the loop (a slow `wc -l` over a
+# huge transcript, an fs stall) or AFTER it (the whole-transcript usage scan
+# below) would look dead past the stale window while still alive, and a
+# concurrent Stop fire would steal its lock mid-write. Called immediately
+# after acquisition and again before each potentially-slow phase, so no
+# refresh-to-refresh gap spans more than one slow operation. Cheap: a single
+# `touch -c` (never creates; a vanished dir is a no-op), and a no-op entirely
+# under flock, where the OS keeps the lock live for the process lifetime.
+refresh_lock() {
+  if [[ -n "${lock_mkdir:-}" ]]; then
+    touch -c "$lock_mkdir" 2>/dev/null || true
+  fi
+}
+refresh_lock   # stamp explicitly at acquisition; covers the cursor read + wc
 
 # --- Cursor: how many transcript lines we've already processed ---
 prev_count=0
@@ -266,6 +284,8 @@ fi
 # governs files created during *this* run); the contents may include secrets.
 chmod 600 "$dump_file" 2>/dev/null || true
 
+refresh_lock   # entering the append loop; its own periodic touch takes over
+
 # --- Append new turn block ---
 {
   printf '\n## Turn at %s\n\n' "$(date -u +'%Y-%m-%d %H:%M:%S UTC')"
@@ -283,7 +303,7 @@ chmod 600 "$dump_file" 2>/dev/null || true
       if [[ -n "${lock_mkdir:-}" ]]; then
         lines_since_touch=$((lines_since_touch + 1))
         if (( lines_since_touch >= 200 )); then
-          touch "$lock_mkdir" 2>/dev/null || true
+          refresh_lock
           lines_since_touch=0
         fi
       fi
@@ -353,6 +373,8 @@ chmod 600 "$dump_file" 2>/dev/null || true
 tmp_cursor="$(mktemp "${cursor_file}.XXXXXX")"
 echo "$curr_count" > "$tmp_cursor"
 mv -f "$tmp_cursor" "$cursor_file"
+
+refresh_lock   # the usage scan below re-reads the whole transcript (wc + jq)
 
 # --- Record context measurements for the ctx-check UserPromptSubmit hook.
 #     Companion script handoff_ctx_check.sh reads these on the next prompt
