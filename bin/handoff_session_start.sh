@@ -84,6 +84,24 @@ current="$repo/.claude/handoff_current.md"
 current_relpath=".claude/handoff_current.md"
 history_dir="$repo/.claude/handoff_history"
 
+# Symlink read guard — the read-side twin of write_handoff.sh's write guard.
+# Every read below (`[ -f ]`, sed, cat) FOLLOWS a symlink, and this file is
+# emitted verbatim into the next session's MODEL CONTEXT — so a malicious
+# cloned repo can COMMIT .claude/handoff_current.md as a symlink to a victim
+# file outside the repo (~/.ssh/id_rsa, ~/.claude/settings.json) and the first
+# SessionStart in the clone would load the target's content into the model.
+# The write side has refused planted symlinks since the paths#1/#4 fix; the
+# read side needs the matching refusal. Warn visibly (SessionStart output is
+# the one place the user reliably sees) and treat the handoff as ABSENT so the
+# miss-visibility / recover logic below proceeds exactly as for a fresh repo —
+# never crash the hook.
+current_is_symlink=0
+if [ -L "$current" ]; then
+  current_is_symlink=1
+  echo "⚠️  handoff: $current is a symlink — refusing to read through it (a cloned repo could point it at a file outside the repo, e.g. a key or dotfile). Treating the handoff as absent; replace the symlink with a regular file to restore loading."
+  echo
+fi
+
 # Untrusted-content safety. handoff_current.md and the history snapshots are cat
 # verbatim into the next session's MODEL CONTEXT, and in a cloned/downloaded repo
 # they are attacker-influenceable (a malicious repo can COMMIT its own
@@ -136,8 +154,10 @@ emit_untrusted() {  # <file> -> caveat + defanged content
 # TODAY'S treatment exactly: the whole file under data framing.
 prov_ok=0
 # (The lib was already sourced — if present — by the root-resolution block
-# above; gate on the function rather than re-sourcing.)
-if type handoff_provenance_ok >/dev/null 2>&1 && [ -f "$current" ]; then
+# above; gate on the function rather than re-sourcing. The symlink guard above
+# also gates here: even the HMAC computation would read through the link.)
+if type handoff_provenance_ok >/dev/null 2>&1 \
+   && [ "$current_is_symlink" = "0" ] && [ -f "$current" ]; then
   if handoff_provenance_ok "$current" "$repo" "$current_relpath" \
      && handoff_bind_has_content "$current"; then
     prov_ok=1
@@ -225,8 +245,9 @@ fi
 # already hold entries, handoffs HAVE been written here before, and a silent
 # no-op is exactly how the root-resolution asymmetry bug hid: the writers used
 # one .claude/, this loader looked at another, and nobody saw anything. Name
-# the path we looked at so a miss is diagnosable.
-if [ ! -f "$current" ]; then
+# the path we looked at so a miss is diagnosable. A refused symlink (guard
+# above) is treated as absent here — the warning already named it.
+if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ]; then
   if [ -n "$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | head -n 1 || true)" ] \
      || [ -n "$(find "$repo/.claude/handoff_backups" -maxdepth 1 -type f 2>/dev/null | head -n 1 || true)" ]; then
     echo "⚠️  handoff: no handoff to load at $current — but this project has prior handoff artifacts (.claude/handoff_history/ or .claude/handoff_backups/), so one may have been expected. Run /handoff-more or /handoff-recover to inspect what exists."
@@ -323,6 +344,9 @@ if [ "$is_placeholder" = "1" ] \
   # that pair (measured on macOS en_US.UTF-8), silently picking the OLDER of
   # two same-second snapshots. (Lexical _<N> still misorders _10 vs _9 — ten
   # rotations inside one second — which byte collation can't fix; accepted.)
+  # `-type f` excludes symlinks, so a link planted in handoff_history/ is
+  # never selected for the cat below — this is the history-side symmetry of
+  # the handoff_current.md symlink read guard near the top of this script.
   prev="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | LC_ALL=C sort -r | head -1 || true)"
   if [ -n "$prev" ] && [ -f "$prev" ]; then
     echo

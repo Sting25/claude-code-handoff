@@ -143,20 +143,58 @@ check "symlink: target untouched"       "PRISTINE" "$(cat "$victim")"
 rm -rf "$repo"
 
 # --- Stale-cache janitor: a successful cache write reaps sibling .ctx_sl_*
-#     files >7 days old. Sessions that render a statusline but never complete
-#     a turn get no handoff_raw_ dump, so the Stop-hook prune never names
-#     them — without this, their caches would accumulate forever. -------------
+#     files >7 days old — but ONLY files it can PROVE it generated (exact
+#     .ctx_sl_<sid> name, regular file, cache-shaped key=value content), per
+#     the retention rule that the tool never deletes by glob+mtime alone.
+#     Sessions that render a statusline but never complete a turn get no
+#     handoff_raw_ dump, so the Stop-hook prune never names them — without
+#     this, their caches would accumulate forever. -------------
 repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"
 must mkdir -p "$bd"
-: > "$bd/.ctx_sl_STALE"          # orphaned cache from a long-dead session
-: > "$bd/.ctx_sl_GONE.a1b2c3"    # orphaned mktemp temp (killed mid-write)
-must touch -t 202001010000 "$bd/.ctx_sl_STALE" "$bd/.ctx_sl_GONE.a1b2c3"
+# Orphaned cache from a long-dead session, real cache shape -> prune candidate.
+must cat > "$bd/.ctx_sl_STALE" <<'EOF'
+window=200000
+tokens=50000
+pct=25
+model=Fable
+EOF
+# NEGATIVE CONTROLS — all aged >7d, all must SURVIVE the janitor:
+#   a user's hand-dropped file: glob-matches, but the dot fails the sid
+#   charset AND the content isn't cache-shaped;
+must cat > "$bd/.ctx_sl_notes.backup" <<'EOF'
+my precious notes, do not delete
+EOF
+#   an exact-name file whose CONTENT is not cache-shaped (not provably ours);
+must cat > "$bd/.ctx_sl_USERDATA" <<'EOF'
+window=200000
+window dressing: this line is prose, not a cache entry
+EOF
+#   an orphaned mktemp temp — safe-direction trade-off: its suffix is
+#   indistinguishable from a user's ".backup"-style name, so it now lingers;
+: > "$bd/.ctx_sl_GONE.a1b2c3"
+must touch -t 202001010000 "$bd/.ctx_sl_STALE" "$bd/.ctx_sl_notes.backup" \
+  "$bd/.ctx_sl_USERDATA" "$bd/.ctx_sl_GONE.a1b2c3"
+#   a symlink named like a cache, pointing at a real-shaped victim: -type f /
+#   the -L re-check must exclude it (age the LINK itself where touch -h
+#   exists; -type f excludes it regardless).
+sym_victim="$repo/sym_victim.txt"
+must cat > "$sym_victim" <<'EOF'
+window=1000000
+tokens=1
+EOF
+must ln -s "$sym_victim" "$bd/.ctx_sl_SYMOLD"
+touch -h -t 202001010000 "$bd/.ctx_sl_SYMOLD" 2>/dev/null || true
 : > "$bd/.ctx_sl_FRESH"          # recent sibling (another live session)
 run_sl "$repo" "$(full_payload PRUNE)" >/dev/null; rc=$?
 check "prune: exit 0"                     0   "$rc"
 check "prune: new cache written"          yes "$([[ -f "$bd/.ctx_sl_PRUNE" ]] && echo yes || echo no)"
-check "prune: stale orphan removed"       no  "$([[ -e "$bd/.ctx_sl_STALE" ]] && echo yes || echo no)"
-check "prune: stale tmp litter removed"   no  "$([[ -e "$bd/.ctx_sl_GONE.a1b2c3" ]] && echo yes || echo no)"
+check "prune: stale owned cache removed"  no  "$([[ -e "$bd/.ctx_sl_STALE" ]] && echo yes || echo no)"
+check "prune: user file survives"         yes "$([[ -f "$bd/.ctx_sl_notes.backup" ]] && echo yes || echo no)"
+check "prune: user file content intact"   "my precious notes, do not delete" "$(cat "$bd/.ctx_sl_notes.backup")"
+check "prune: non-cache-shaped survives"  yes "$([[ -f "$bd/.ctx_sl_USERDATA" ]] && echo yes || echo no)"
+check "prune: tmp litter lingers (safe)"  yes "$([[ -e "$bd/.ctx_sl_GONE.a1b2c3" ]] && echo yes || echo no)"
+check "prune: symlink survives as link"   yes "$([[ -L "$bd/.ctx_sl_SYMOLD" ]] && echo yes || echo no)"
+check "prune: symlink victim intact"      yes "$(grep -q '^window=1000000$' "$sym_victim" && echo yes || echo no)"
 check "prune: fresh sibling kept (ctrl)"  yes "$([[ -f "$bd/.ctx_sl_FRESH" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
