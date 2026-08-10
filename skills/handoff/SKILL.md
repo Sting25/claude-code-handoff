@@ -258,8 +258,13 @@ write it to `<repo-root>/.claude/handoff_backups/handoff_raw_<timestamp>.md`
 ```bash
 ls -t <repo-root>/.claude/handoff_backups/handoff_raw_*.md 2>/dev/null \
   | tail -n +4 \
-  | xargs -r rm
+  | while IFS= read -r f; do rm -f "$f"; done
 ```
+
+(`xargs -r` would be the obvious spelling, but `-r` is a GNU extension:
+BSD/macOS `xargs` rejects it with `illegal option`, so the prune would
+fail silently on the platform this tool is developed on. The `while
+read` loop is empty-input-safe everywhere.)
 
 If the directory doesn't exist yet, create it. Make sure
 `.claude/handoff_backups/` is in the project `.gitignore` (the hook

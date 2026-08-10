@@ -448,10 +448,15 @@ hook command in `settings.json` to drop the `echo` lines.
   or for older installs that haven't pulled the updated turn-append
   script. Tune `HANDOFF_CTX_THRESHOLD_PCT` if 40% fires too eagerly
   or too late for your workloads.
-- **`SessionEnd` hook fires on session exit, not on `/clear`.** If
-  you `/clear` to recycle context within the same session, no handoff
-  is written. Invoke `/handoff` manually before `/clear` if you need
-  the snapshot.
+- **`SessionEnd` fires on `/clear` too, and writes by default.** The
+  hook receives a `reason` and only skips the ones listed in
+  `HANDOFF_SESSIONEND_SKIP_REASONS`, which defaults to `resume` alone —
+  so `clear`, `logout`, `prompt_input_exit`, and `other` all produce a
+  safety-net write. (An earlier version of this list said `/clear`
+  wrote nothing; that was wrong, and it drove people to do redundant
+  manual work.) You still want `/handoff` before a deliberate `/clear`
+  when you care about the prose: the safety-net write captures git
+  state, not the conversation's intent.
 - **The handoff is per-repo.** If you `cd` between repos in one
   session, the handoff captures only the repo where you invoke. For
   cross-repo handoffs, run `/handoff` once in each.

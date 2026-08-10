@@ -160,8 +160,9 @@ fire on it. Two hooks cover it:
 Only the latest snapshot is named `handoff_current.md`. Each new
 write rotates the previous one into `<repo>/.claude/handoff_history/`,
 filename stamped with the snapshot's own timestamp. The last 5 are
-kept (override via `HANDOFF_HISTORY_KEEP=N`, or `0` to disable
-pruning; see note below). So the on-disk layout looks like:
+kept (override via `HANDOFF_HISTORY_KEEP=N`; `0` means keep no history
+at all, which also disables rotation — see the note below before
+setting it). So the on-disk layout looks like:
 
 ```
 <repo>/.claude/
@@ -189,11 +190,18 @@ The retention dir is bootstrapped into the repo's `.gitignore` on
 first write — handoffs are intentionally per-developer, not
 checked-in artifacts.
 
-**Retention behavior with `HANDOFF_HISTORY_KEEP=0`.** Setting
-`HANDOFF_HISTORY_KEEP=0` disables pruning entirely; existing
-snapshots in history are never touched. (In versions prior to
-v0.13.0, `0` was destructive and deleted all existing history on
-the next write — this has been fixed.)
+**Retention behavior with `HANDOFF_HISTORY_KEEP=0`.** `0` means
+"keep no history," **not** "keep everything." Existing snapshots
+already in `handoff_history/` are never touched — that part was a real
+bug before v0.13.0, where `0` deleted all of them on the next write,
+and it is fixed. But `0` also skips **rotation**, so each write
+overwrites `handoff_current.md` in place and the outgoing curated
+handoff is gone with no archived copy (the pre-0.3.0 behavior).
+
+If you want unlimited retention, set a large `N` — there is no value
+that means "never prune." If you want the tool to stop writing history
+for a one-off run, `0` does that, at the cost of the document it
+replaces.
 
 **Retention only ever deletes files this tool generated.** If you drop
 your own file into `handoff_history/` or `handoff_backups/` — say you
