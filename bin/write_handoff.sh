@@ -65,12 +65,18 @@ umask 077
 hook_payload=""
 [[ -t 0 ]] || hook_payload="$(cat 2>/dev/null || true)"
 session_end_reason=""
+payload_cwd=""
 if [[ -n "$hook_payload" ]] && command -v jq >/dev/null 2>&1; then
   session_end_reason="$(jq -r '.reason // empty' <<<"$hook_payload" 2>/dev/null || true)"
   # Charset guard: known reasons are lowercase words ("clear", "logout",
   # "prompt_input_exit", "resume", "other"); anything else is treated as
   # unrecognized -> empty -> the write proceeds.
   [[ "$session_end_reason" =~ ^[a-z_]+$ ]] || session_end_reason=""
+  # Payload `cwd`: fed to handoff_resolve_root below as the second-rung
+  # anchor. Guarded the same way as `.reason` (jq optional, parse failure ->
+  # empty) and validated as an existing directory before use.
+  payload_cwd="$(jq -r '.cwd // empty' <<<"$hook_payload" 2>/dev/null || true)"
+  [[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
 fi
 
 # Shared provenance helpers (issue #42): HMAC signing so the next session's
@@ -208,15 +214,31 @@ if ! [[ "$HISTORY_KEEP" =~ ^[0-9]+$ ]]; then
   HISTORY_KEEP=5
 fi
 
-# Project scope: prefer the git worktree top; fall back to the Claude Code
-# project dir (or cwd) so handoff works in projects NOT under git. `in_git`
-# gates the git-only pieces below (commit snapshot, .gitignore bootstrap,
-# the verify-state command block).
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-in_git=1
-if [[ -z "$repo_root" ]]; then
-  in_git=0
-  repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Project scope: shared resolver (handoff_resolve_root, sourced above) —
+# anchor on CLAUDE_PROJECT_DIR first, then the hook payload's cwd, then $PWD,
+# and take the git toplevel of THAT anchor. The old bare `git rev-parse
+# --show-toplevel` anchored on the hook process's cwd while the SessionStart
+# loader anchored on CLAUDE_PROJECT_DIR — so with cwd != project dir
+# (worktrees, submodules, a `cd` during the session) this writer put the
+# handoff under a root the loader never looked at. Skill-invoked runs (no
+# CLAUDE_PROJECT_DIR in the Bash-tool env, no payload) still anchor on $PWD,
+# unchanged. `in_git` gates the git-only pieces below (commit snapshot,
+# .gitignore bootstrap, the verify-state command block).
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$payload_cwd"
+  repo_root="$HANDOFF_ROOT"
+  in_git="$HANDOFF_ROOT_IN_GIT"
+else
+  # Lib absent (stale copy-mode install): inline the same precedence so this
+  # script stays standalone. No payload rung here — the lib carries it.
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [[ -d "$anchor" ]] || anchor="$PWD"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  in_git=1
+  if [[ -z "$repo_root" ]]; then
+    in_git=0
+    repo_root="$anchor"
+  fi
 fi
 if [[ -z "$repo_root" ]]; then
   echo "ERROR: cannot resolve a project directory (no git worktree, CLAUDE_PROJECT_DIR, or PWD)" >&2
@@ -511,10 +533,16 @@ prune_history() {
   # deleted with no warning and no backup. Filter to the exact shape we emit:
   # `handoff_<YYYY-MM-DD>_<HHMMSS>.md`, plus the `_<N>` same-second collision
   # suffix. Anything else is someone else's file and is left untouched. (#46)
+  # LC_ALL=C on the sort: same-second collision names (handoff_<stamp>_2.md)
+  # must rank as NEWER than their base (handoff_<stamp>.md), which holds under
+  # byte collation (`_` 0x5F > `.` 0x2E) but flips under UTF-8 locale
+  # collation (measured on macOS en_US.UTF-8) — an at-the-retention-boundary
+  # prune would then delete the newer sibling and keep the older one. Same
+  # fix as handoff_session_start.sh's newest-first pick; keep them in sync.
   local f
   find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
     | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
-    | sort -r \
+    | LC_ALL=C sort -r \
     | tail -n +$((HISTORY_KEEP + 1)) \
     | while IFS= read -r f; do
         [[ -n "$f" ]] && rm -f -- "$f"
@@ -644,13 +672,25 @@ trap 'rm -f "$handoff_tmp"' EXIT
 {
   printf '# %s — session handoff (auto-generated)\n\n' "$repo_name"
   printf '**Generated:** %s\n\n' "$ts_utc"
+  # Machine-readable resolution record: which root this doc was written for,
+  # and whether that root was a git worktree at write time. The SessionStart
+  # loader compares these against ITS resolution and warns on a mismatch
+  # (moved/renamed project) or a non-git -> git flip (the snapshot predates
+  # `git init` / arrived with a clone), instead of silently loading a doc
+  # that describes some other tree. An inert HTML comment, covered by the
+  # HMAC like every other line.
+  printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n\n' "$repo_root" "$in_git"
 
   cat <<EOF
 Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
 \`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).
 Auto-loaded into the next session by the \`SessionStart\` hook in the
-same settings file. Always lives at \`<repo>/.claude/handoff_current.md\`;
-the previous handoff is rotated to \`.claude/handoff_history/\` before
+same settings file. Lives at \`<root>/.claude/handoff_current.md\`, where
+\`<root>\` is resolved from the Claude Code project dir (falling back to
+the hook payload's cwd, then the process cwd) and then anchored on that
+dir's git toplevel — the same resolution the loader uses, recorded in the
+\`HANDOFF_ROOT\` comment above. The previous handoff is rotated to
+\`.claude/handoff_history/\` before
 overwrite (last $HISTORY_KEEP retained; override via \`HANDOFF_HISTORY_KEEP\`).
 Run \`/handoff-more\` in a fresh session to pull older handoffs into context.
 

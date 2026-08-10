@@ -53,6 +53,127 @@ handoff_secret_path() {
   printf '%s\n' "${HANDOFF_SECRET_FILE:-$HOME/.claude/handoff_secret}"
 }
 
+# ---------------------------------------------------------------------------
+# Root resolution — the ONE way every handoff script picks its project root.
+#
+# Before this existed the seven bin/ scripts resolved "repo root" three
+# different ways: the writer hooks used a bare `git rev-parse --show-toplevel`
+# (anchored on the hook process's CWD), the SessionStart loader used
+# `git -C "$CLAUDE_PROJECT_DIR"`, and the statusline trusted its payload dir.
+# Whenever cwd != CLAUDE_PROJECT_DIR — worktrees, submodules, a `cd` during
+# the session — the writers and the loader disagreed on where `.claude/`
+# lives: the handoff was written under one root and loaded (or not) from
+# another, silently. This resolver gives them all the same answer.
+#
+# Usage:   handoff_resolve_root [payload_cwd]
+# Sets (namespaced globals; never echoes, so `set -e` callers can call it
+# bare):
+#   HANDOFF_ROOT         resolved project root
+#   HANDOFF_ROOT_IN_GIT  1 when the root is a git worktree top, else 0
+#   HANDOFF_ROOT_ANCHOR  the anchor dir the resolution started from
+#   HANDOFF_ROOT_VIA     which precedence rung chose the anchor:
+#                        project_dir | payload_cwd | pwd
+#
+# Anchor precedence (first hit wins):
+#   1. $CLAUDE_PROJECT_DIR — set AND an existing directory. Claude Code
+#      exports it for every hook; it names the LAUNCH project regardless of
+#      what the session later cd'd to, so it must beat the process cwd.
+#      Validated with -d (it never was before): a stale/garbage value must
+#      not become the root.
+#   2. $1 (payload_cwd) — non-empty AND an existing directory. Hook payloads
+#      carry a `cwd` field; the statusline passes its authoritative
+#      `workspace.project_dir` here. Callers pass "" when they have none.
+#   3. $PWD — matches the historical behavior of skill-invoked runs, where
+#      the Bash tool env has no CLAUDE_PROJECT_DIR.
+#
+# The root is then `git -C "$anchor" rev-parse --show-toplevel` — NEVER a
+# bare `git rev-parse`, which silently re-anchors on the process cwd. A
+# non-git anchor is its own root (in_git=0).
+#
+# Anchored INSIDE a `.git` dir (e.g. the user cd'd into it), --show-toplevel
+# fails outright; without a rescue the root would become the .git dir itself
+# and the handoff would land at `.git/.claude`. Recover the enclosing repo
+# via the common dir's parent.
+#
+# Worktree opt-in (HANDOFF_ANCHOR=common): resolve the root to the MAIN
+# repo (parent of `git rev-parse --git-common-dir`), so every linked
+# worktree shares one `.claude/` and handoffs survive `git worktree remove`.
+# The DEFAULT stays per-worktree toplevel, deliberately: flipping it would
+# silently relocate every existing user's handoff files on upgrade — worse
+# than the (documented, opt-in-fixable) worktree-deletion hazard. Unset or
+# HANDOFF_ANCHOR=toplevel keeps current behavior.
+#
+# HANDOFF_DEBUG=1 prints a one-line trace to stderr.
+
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+HANDOFF_ROOT=""
+# shellcheck disable=SC2034
+HANDOFF_ROOT_IN_GIT=0
+# shellcheck disable=SC2034
+HANDOFF_ROOT_ANCHOR=""
+# shellcheck disable=SC2034
+HANDOFF_ROOT_VIA=""
+
+handoff_resolve_root() {  # [payload_cwd]
+  local anchor via toplevel common common_phys parent
+  if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
+    anchor="$CLAUDE_PROJECT_DIR" via="project_dir"
+  elif [ -n "${1:-}" ] && [ -d "${1:-}" ]; then
+    anchor="$1" via="payload_cwd"
+  else
+    anchor="$PWD" via="pwd"
+  fi
+  HANDOFF_ROOT_ANCHOR="$anchor"
+  HANDOFF_ROOT_VIA="$via"
+  HANDOFF_ROOT="$anchor"
+  HANDOFF_ROOT_IN_GIT=0
+
+  toplevel="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null)" || toplevel=""
+  if [ -n "$toplevel" ]; then
+    HANDOFF_ROOT="$toplevel"
+    HANDOFF_ROOT_IN_GIT=1
+    if [ "${HANDOFF_ANCHOR:-toplevel}" = "common" ]; then
+      # Main-repo root = parent of the common git dir. --git-common-dir may
+      # print a RELATIVE path (relative to the git process cwd, i.e. our
+      # anchor — from a main-repo toplevel it is just ".git"), so prefix the
+      # anchor before walking up. Any failure falls back to the toplevel
+      # already set above.
+      common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || common=""
+      case "$common" in
+        ""|/*) : ;;
+        *) common="$anchor/$common" ;;
+      esac
+      if [ -n "$common" ] && parent="$(cd "$common/.." 2>/dev/null && pwd -P)" \
+         && [ -d "$parent" ]; then
+        HANDOFF_ROOT="$parent"
+      fi
+    fi
+  elif [ "$(git -C "$anchor" rev-parse --is-inside-git-dir 2>/dev/null)" = "true" ]; then
+    # Anchored inside .git itself: --show-toplevel fails here, and treating
+    # the anchor as a non-git root would put the handoff at `.git/.claude`.
+    # The common dir resolves even from in here ("." when the anchor IS the
+    # main .git dir); its physical parent is the repo root — but only claim
+    # that when the dir is actually named ".git" (a bare repo has no
+    # worktree to anchor on, so it keeps the non-git fallback).
+    common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || common=""
+    case "$common" in
+      ""|/*) : ;;
+      *) common="$anchor/$common" ;;
+    esac
+    if [ -n "$common" ] && common_phys="$(cd "$common" 2>/dev/null && pwd -P)" \
+       && [ "${common_phys##*/}" = ".git" ] && [ -d "${common_phys%/.git}" ]; then
+      HANDOFF_ROOT="${common_phys%/.git}"
+      HANDOFF_ROOT_IN_GIT=1
+    fi
+  fi
+
+  if [ "${HANDOFF_DEBUG:-0}" = "1" ]; then
+    printf 'handoff: root=%s in_git=%s anchor=%s via=%s\n' \
+      "$HANDOFF_ROOT" "$HANDOFF_ROOT_IN_GIT" "$anchor" "$via" >&2
+  fi
+  return 0
+}
+
 # Generate the per-machine secret if it doesn't exist yet (WRITE path
 # only — verification must never mint a secret). 64 hex chars from
 # openssl rand, falling back to /dev/urandom via od. mktemp+mv keeps the
