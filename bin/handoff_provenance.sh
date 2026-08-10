@@ -179,17 +179,44 @@ handoff_resolve_root() {  # [payload_cwd]
   return 0
 }
 
+# Repair a secret file whose mode has group/other bits. The existing-file
+# fast paths below (ensure + verify) would otherwise use a 0644 secret
+# silently forever — and a group/other-readable HMAC key lets any local
+# reader forge the binding-rules trailer. Loose modes arrive from outside
+# our writers: a backup restore, a dotfiles sync, or an earlier version
+# generating under a permissive umask. chmod 600 on sight; when the chmod
+# fails (e.g. file owned by another user), warn on stderr — one line —
+# and CONTINUE: degrading signing over a perms warning would be worse
+# than the exposure the warning flags. Portable mode read: GNU `stat -c
+# %a` with BSD `stat -f %Lp` fallback (the repo-wide dual idiom). Always
+# returns 0 so bare calls are safe under a sourcing script's `set -e`.
+handoff_secret_tighten() {  # <file>
+  local m
+  m="$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null)" || m=""
+  # Unreadable/odd mode string: nothing actionable (a chmod would likely
+  # fail for the same reason), so leave it to the read that follows.
+  case "$m" in "" | *[!0-7]*) return 0 ;; esac
+  if (( 8#$m & 8#77 )); then
+    chmod 600 "$1" 2>/dev/null \
+      || printf 'handoff: warning: secret %s is group/other-accessible (mode %s) and chmod 600 failed — fix it manually\n' "$1" "$m" >&2
+  fi
+  return 0
+}
+
 # Generate the per-machine secret if it doesn't exist yet (WRITE path
 # only — verification must never mint a secret). 64 hex chars from
 # openssl rand, falling back to /dev/urandom via od. mktemp+mv keeps the
 # write atomic; the caller's umask 077 (write_handoff.sh) plus the
 # explicit chmod make it 0600. Refuses a planted symlink at the path.
+# An EXISTING secret gets its mode checked/repaired (handoff_secret_tighten)
+# before being returned — never trusted to still be 0600.
 # Echoes the secret path on success; non-zero when generation isn't
 # possible (callers degrade to unsigned).
 handoff_ensure_secret() {
   local sf dir tmp
   sf="$(handoff_secret_path)"
   if [ ! -L "$sf" ] && [ -f "$sf" ] && [ -s "$sf" ]; then
+    handoff_secret_tighten "$sf"
     printf '%s\n' "$sf"
     return 0
   fi
@@ -230,6 +257,9 @@ handoff_mac_compute() {  # <file> [ensure]
   else
     sf="$(handoff_secret_path)"
     { [ ! -L "$sf" ] && [ -f "$sf" ] && [ -s "$sf" ]; } || return 1
+    # Verify path accepts an existing secret without going through ensure,
+    # so it needs the same mode check/repair (see handoff_secret_tighten).
+    handoff_secret_tighten "$sf"
   fi
   # HMAC-SHA256 from the definition — H((K'⊕opad) ‖ H((K'⊕ipad) ‖ m)) —
   # instead of `openssl dgst -hmac "$key"`, so the key NEVER appears in a
