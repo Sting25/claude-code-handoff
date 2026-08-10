@@ -117,6 +117,33 @@ check "curated rotation -> prose preserved in history" yes \
   "$(grep -rq 'MARKER_ROTCUR' "$repo/.claude/handoff_history" && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- Same-second rotation collision: atomic claim, both archives survive -----
+# Regression: the archive name is derived from the outgoing file's mtime, so
+# two rotations in the same second pick the same name. The old probe-then-mv
+# was a TOCTOU: both could probe clear and the second mv clobbered the first
+# archive. Pre-creating the archived name simulates the raciest interleaving
+# (the other writer already claimed it); the rotation must claim the next
+# counter name and BOTH files must survive with distinct names.
+repo="$(mk_repo_gitignored)"
+hist="$repo/.claude/handoff_history"; must mkdir -p "$hist"
+must cat > "$repo/.claude/handoff_current.md" <<'EOF'
+# h
+
+## Notes from this session
+
+curated notes MARKER_COLLIDE_NEW
+EOF
+touch -d "2020-03-04T05:06:07Z" "$repo/.claude/handoff_current.md"   # ISO T/Z form: GNU + BSD
+echo "earlier archive MARKER_COLLIDE_OLD" > "$hist/handoff_2020-03-04_050607.md"
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 )
+check "collision: pre-existing archive intact" yes \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607.md" 2>/dev/null)" "MARKER_COLLIDE_OLD")"
+check "collision: rotated doc claims counter name" yes \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607_2.md" 2>/dev/null)" "MARKER_COLLIDE_NEW")"
+count="$(find "$hist" -maxdepth 1 -name 'handoff_2020-03-04_050607*' 2>/dev/null | wc -l | tr -d ' ')"
+check "collision: both files survive, distinct names" 2 "$count"
+rm -rf "$repo"
+
 # --- Invalid HANDOFF_HISTORY_KEEP falls back to 5 (no history wipe) ----------
 # Regression: KEEP=-1 made prune run `tail -n +0`, which on GNU deletes EVERY
 # history file (silent data loss). A negative/garbage value must clamp to the

@@ -502,15 +502,39 @@ rotate_existing_handoff() {
   local ts archived
   ts="$(file_mtime_stamp "$handoff_path")"
   archived="$history_dir/handoff_${ts}.md"
-  # If a file with the same timestamp already exists, append a counter
-  # so we don't clobber. Only happens if two rotations land in the same
-  # second, which is rare but possible.
-  if [[ -e "$archived" ]]; then
-    local n=2
-    while [[ -e "${archived%.md}_${n}.md" ]]; do n=$((n+1)); done
-    archived="${archived%.md}_${n}.md"
-  fi
-  mv "$handoff_path" "$archived"
+  # If a file with the same timestamp already exists, append a counter so we
+  # don't clobber. The claim must be ATOMIC, not probe-then-mv: the old
+  # `[[ -e ]]` probe followed by a plain `mv` was a TOCTOU — two concurrent
+  # runs could both probe the same name clear, and the second `mv` silently
+  # clobbered the first run's archive. `mv -n` ("never overwrite an existing
+  # destination") folds the existence check and the rename into one operation.
+  # Portability, verified: BSD/macOS mv supports -n (on a skip it leaves the
+  # source in place and exits 0), and GNU coreutils mv supports -n too — but
+  # GNU's exit status ON SKIP changed across versions (nonzero since
+  # coreutils 9.2), so the exit code is NOT a portable skip signal. The one
+  # invariant both implementations share: a skipped move leaves the SOURCE
+  # file in place. So the loop attempts a candidate name and keys on "did the
+  # source disappear" to know it won; source-still-there means the name was
+  # taken — bump the counter and try the next. Chosen over the ln-then-rm
+  # hard-link idiom because mv preserves the single-rename atomicity the
+  # publish path already relies on and needs no link-count cleanup.
+  # Bounded: 50 same-second collisions is not a real scenario, so after 50
+  # attempts the failure is something else (EPERM, ENOSPC — where mv also
+  # leaves the source, for a different reason); fall through to a plain loud
+  # mv so the real error surfaces under set -e instead of spinning forever.
+  local n=1 attempts=0 candidate="$archived"
+  while :; do
+    mv -n "$handoff_path" "$candidate" 2>/dev/null || true
+    [[ -e "$handoff_path" ]] || break        # source gone -> claim succeeded
+    attempts=$((attempts + 1))
+    if (( attempts >= 50 )); then
+      mv "$handoff_path" "$candidate"        # loud; aborts under set -e on a real error
+      break
+    fi
+    n=$((n + 1))
+    candidate="${archived%.md}_${n}.md"
+  done
+  archived="$candidate"
   # Tighten a doc written 0644 by a pre-0.8.2 version: `mv` preserves the source
   # mode, so without this a world-readable handoff stays world-readable once
   # rotated into history (the prose can hold secrets). New docs are already 0600.
