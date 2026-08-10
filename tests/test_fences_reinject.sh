@@ -38,7 +38,10 @@ REINJECT_HDR="Re-injecting the standing rules"
 proj="$(mk_repo)" || exit 1
 must mkdir -p "$proj/.claude/handoff_backups"
 printf -- '- Never force-push. PIN_MARKER\n' > "$proj/.claude/handoff_pinned.md"
-must env HANDOFF_SECRET_FILE="$proj/.secret" bash -c "cd '$proj' && bash '$WH' >/dev/null 2>&1"
+# </dev/null: write_handoff cats stdin when it's a non-tty (hook-payload
+# read); without the redirect this hangs whenever run.sh's stdin is open
+# but silent (observed under agent harnesses).
+must env HANDOFF_SECRET_FILE="$proj/.secret" bash -c "cd '$proj' && bash '$WH' >/dev/null 2>&1 </dev/null"
 
 set_bytes() { printf '%s\n' "$1" > "$proj/.claude/handoff_backups/.ctx_${SID}"; }
 must set_bytes 100000
