@@ -320,9 +320,28 @@ if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
         window_tokens=1000000
       fi
     elif [[ -f "$HOME/.claude.json" ]]; then
-      # Step 3a: per-project has a 1M-regex match.
-      if jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
-            (.projects[$cwd].lastModelUsage // {})
+      # ~/.claude.json's .projects map is keyed by the LAUNCH cwd — the dir
+      # Claude Code was started from — not by the git toplevel this script
+      # resolves, so indexing with $repo_root missed the entry whenever the
+      # two differ (subdir launch, worktree). Key precedence mirrors the
+      # launch reality: the payload's cwd first (the actual session cwd),
+      # else CLAUDE_PROJECT_DIR, else the resolved root as a last resort.
+      # Each probe tries the key as-is AND its physical (pwd -P) form: on
+      # macOS case-aliasing filesystems ~/.claude.json accumulates both
+      # spellings of the same dir (~/Dev vs ~/dev), and symlinked launch
+      # paths record the logical form. Identical forms just probe twice,
+      # harmlessly.
+      claude_key="$payload_cwd"
+      if [[ -z "$claude_key" && -n "${CLAUDE_PROJECT_DIR:-}" && -d "${CLAUDE_PROJECT_DIR:-}" ]]; then
+        claude_key="$CLAUDE_PROJECT_DIR"
+      fi
+      [[ -n "$claude_key" ]] || claude_key="$repo_root"
+      claude_key_phys="$(cd "$claude_key" 2>/dev/null && pwd -P || printf '%s' "$claude_key")"
+      # Step 3a: per-project has a 1M-regex match. The two key forms' maps
+      # are MERGED (not //-short-circuited) so a k1 entry that exists but
+      # carries no lastModelUsage can't mask a populated k2 entry.
+      if jq -e --arg k1 "$claude_key" --arg k2 "$claude_key_phys" --arg re "$ONE_M_MODEL_RE" '
+            ((.projects[$k1].lastModelUsage // {}) + (.projects[$k2].lastModelUsage // {}))
             | keys
             | map(select(test($re)))
             | length > 0
@@ -330,8 +349,8 @@ if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
         window_tokens=1000000
       # Step 3b/3c: per-project missing or empty → fall back to global.
       #          (jq returns true when lastModelUsage is null OR keys array is empty.)
-      elif jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
-            ((.projects[$cwd].lastModelUsage // {}) | keys | length) == 0
+      elif jq -e --arg k1 "$claude_key" --arg k2 "$claude_key_phys" --arg re "$ONE_M_MODEL_RE" '
+            (((.projects[$k1].lastModelUsage // {}) + (.projects[$k2].lastModelUsage // {})) | keys | length) == 0
             and
             ([.projects[]?.lastModelUsage // {} | keys[]] | map(select(test($re))) | length > 0)
           ' "$HOME/.claude.json" >/dev/null 2>&1; then
