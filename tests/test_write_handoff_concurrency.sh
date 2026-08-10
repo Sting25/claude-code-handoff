@@ -4,6 +4,11 @@
 #   - whole-run write lock (.claude/.handoff_write.lock): --if-curated runs
 #     yield silently when it's held; explicit runs wait briefly then proceed
 #     with a warning (never deadlock); stale locks are reclaimed.
+#   - --restamp takes that SAME write lock (M-4): its read→guard→sign→publish
+#     sequence is atomic only in isolation, so an unserialized restamp could
+#     land pre-rotation bytes on top of a concurrent writer's fresh publish.
+#     A miss skips the restamp loudly (a stale signature is recoverable; a
+#     clobbered document is not).
 #   - .gitignore bootstrap lock (.claude/.handoff_gitignore.lock, shared by
 #     name/idiom with handoff_turn_append.sh): a miss skips the bootstrap
 #     silently; concurrent runs never duplicate the bootstrap lines.
@@ -29,20 +34,51 @@ mk_repo_gitignored() {
 
 echo "write_handoff.sh — write lock / gitignore lock / concurrent smoke"
 
-# --- Held write lock: --if-curated (hook) run yields silently ---------------
+# --- Held write lock: --if-curated (hook) run yields, but VISIBLY (DATA-2) --
 # A FRESH lock dir means another writer is mid-rotation/publish; the safety
 # net's mechanical snapshot adds nothing, so it must exit 0 without writing.
+# It must NOT look like a successful write while doing so: the lock is a bare
+# directory with no owner, so one left behind by a SIGKILL'd/OOM'd writer or a
+# reboot mid-write makes every SessionEnd and PreCompact fire in the repo
+# no-op for up to HANDOFF_LOCK_STALE_SECS — and with the path on stdout and
+# rc=0 that was byte-for-byte identical to success.
 repo="$(mk_repo_gitignored)"
 must mkdir -p "$repo/.claude/.handoff_write.lock"
 out="$( cd "$repo" && bash "$WH" --if-curated 2>/dev/null )"; rc=$?
+err="$( cd "$repo" && bash "$WH" --if-curated 2>&1 >/dev/null )"
 check "held lock + --if-curated -> exit 0"        0   "$rc"
-check "held lock + --if-curated -> path printed"  yes "$(has "$out" ".claude/handoff_current.md")"
+check "held lock + --if-curated -> warns on stderr" yes "$(has "$err" "SKIPPING this safety-net write")"
+check "held lock + --if-curated -> names the lock path" yes \
+  "$(has "$err" ".claude/.handoff_write.lock")"
+check "held lock + --if-curated -> no path on stdout" "" "$out"
 check "held lock + --if-curated -> nothing published" no \
   "$([[ -f "$repo/.claude/handoff_current.md" ]] && echo yes || echo no)"
 check "held lock + --if-curated -> no tmp leftover" 0 \
   "$(find "$repo/.claude" -maxdepth 1 -name '.handoff_current.*' 2>/dev/null | wc -l | tr -d ' ')"
 check "held lock left for its holder" yes \
   "$([[ -d "$repo/.claude/.handoff_write.lock" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# The reported repro, end to end: a real session's document plus a LEFTOVER
+# lock, driven exactly as the SessionEnd hook drives it (JSON payload on
+# stdin). The write is skipped either way — the fix is that the skip is now
+# announced instead of being reported as a completed write.
+repo="$(mk_repo_gitignored)"
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 </dev/null )   # a document to protect
+doc="$repo/.claude/handoff_current.md"
+must test -f "$doc"
+before="$(cat "$doc")"
+must mkdir -p "$repo/.claude/.handoff_write.lock"         # writer died here
+out="$( cd "$repo" && printf '{"reason":"clear"}' | bash "$WH" --if-curated 2>/dev/null )"; rc=$?
+err="$( cd "$repo" && printf '{"reason":"clear"}' | bash "$WH" --if-curated 2>&1 >/dev/null )"
+check "leftover lock: exit 0 (a hook never fails the session)" 0 "$rc"
+check "leftover lock: document byte-identical (write skipped)" yes \
+  "$([[ "$before" == "$(cat "$doc")" ]] && echo yes || echo no)"
+check "leftover lock: nothing rotated into history" 0 \
+  "$(find "$repo/.claude/handoff_history" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+check "leftover lock: the miss is visible on stderr" yes "$(has "$err" "may be stale")"
+check "leftover lock: not reported as a write" "" "$out"
+check "leftover lock: message points at the remedy" yes "$(has "$err" "rmdir")"
 rm -rf "$repo"
 
 # --- Held write lock: explicit run waits, warns, and still writes -----------
@@ -85,6 +121,83 @@ check "symlink lock -> refusal warning"  yes "$(has "$err" "refusing to use it a
 check "symlink lock -> handoff written"  yes \
   "$([[ -f "$repo/.claude/handoff_current.md" ]] && echo yes || echo no)"
 rm -rf "$repo"
+
+# --- Held write lock: --restamp skips instead of clobbering (M-4) -----------
+# A restamp reads the document, guards it, signs it, and publishes with `mv` —
+# atomic per step, but NOT as a sequence. Unserialized, a concurrent writer can
+# rotate the document into history and publish a fresh one inside that gap, and
+# the restamp's mv then puts the PRE-rotation bytes back on top, re-signed so
+# the substitution verifies and is invisible downstream. The fixture edits the
+# document so its stored trailer goes stale: a restamp that ran would re-sign
+# it (MAC verifies again), so "MAC still stale" is the proof it stood down.
+if command -v openssl >/dev/null 2>&1; then
+  # shellcheck source=../bin/handoff_provenance.sh
+  . "$REPO_ROOT/bin/handoff_provenance.sh"
+
+  # Positive control FIRST — with no lock held, this exact fixture must restamp
+  # successfully. Without it, the skip assertions below could pass vacuously
+  # (e.g. if restamp were broken outright for edited documents).
+  repo="$(mk_repo_gitignored)"
+  ( cd "$repo" && bash "$WH" >/dev/null 2>&1 </dev/null )
+  doc="$repo/.claude/handoff_current.md"
+  must test -f "$doc"
+  must bash -c "printf 'EDITED AFTER SIGNING\n' >> '$doc'"
+  check "control: edit made the stored MAC stale" no \
+    "$(handoff_mac_verify "$doc" && echo verified || echo no)"
+  out="$( cd "$repo" && bash "$WH" --restamp 2>/dev/null </dev/null )"; rc=$?
+  check "free lock + --restamp -> exit 0"       0   "$rc"
+  check "free lock + --restamp -> path printed" yes "$(has "$out" ".claude/handoff_current.md")"
+  check "free lock + --restamp -> re-signed"    verified \
+    "$(handoff_mac_verify "$doc" && echo verified || echo no)"
+  check "free lock + --restamp -> lock released" no \
+    "$([[ -d "$repo/.claude/.handoff_write.lock" ]] && echo yes || echo no)"
+  rm -rf "$repo"
+
+  # Same fixture, but a FRESH lock dir stands in for a writer mid-sequence.
+  repo="$(mk_repo_gitignored)"
+  ( cd "$repo" && bash "$WH" >/dev/null 2>&1 </dev/null )
+  doc="$repo/.claude/handoff_current.md"
+  must test -f "$doc"
+  must bash -c "printf 'EDITED AFTER SIGNING\n' >> '$doc'"
+  before="$(cat "$doc")"
+  must mkdir -p "$repo/.claude/.handoff_write.lock"
+  out="$( cd "$repo" && bash "$WH" --restamp 2>/dev/null </dev/null )"; rc=$?
+  err="$( cd "$repo" && bash "$WH" --restamp 2>&1 >/dev/null </dev/null )"
+  check "held lock + --restamp -> exit 0"           0  "$rc"
+  check "held lock + --restamp -> warns loudly"     yes "$(has "$err" "SKIPPING the restamp")"
+  check "held lock + --restamp -> names the lock"   yes "$(has "$err" ".handoff_write.lock")"
+  # The load-bearing assertion: unserialized, the restamp would have re-signed
+  # (and in the real race, republished stale bytes over a fresh publish).
+  check "held lock + --restamp -> NOT re-signed"    no \
+    "$(handoff_mac_verify "$doc" && echo verified || echo no)"
+  check "held lock + --restamp -> document byte-identical" yes \
+    "$([[ "$before" == "$(cat "$doc")" ]] && echo yes || echo no)"
+  # stdout is the "job done" signal; a skip must not fake it.
+  check "held lock + --restamp -> no path on stdout" "" "$out"
+  check "held lock + --restamp -> no tmp leftover"   0 \
+    "$(find "$repo/.claude" -maxdepth 1 -name '.handoff_current.*' 2>/dev/null | wc -l | tr -d ' ')"
+  check "held lock + --restamp -> lock left for its holder" yes \
+    "$([[ -d "$repo/.claude/.handoff_write.lock" ]] && echo yes || echo no)"
+  rm -rf "$repo"
+
+  # A STALE lock (holder hard-killed) must not block a restamp forever.
+  repo="$(mk_repo_gitignored)"
+  ( cd "$repo" && bash "$WH" >/dev/null 2>&1 </dev/null )
+  doc="$repo/.claude/handoff_current.md"
+  must test -f "$doc"
+  must bash -c "printf 'EDITED AFTER SIGNING\n' >> '$doc'"
+  must mkdir -p "$repo/.claude/.handoff_write.lock"
+  must touch -t 202001010000 "$repo/.claude/.handoff_write.lock"
+  ( cd "$repo" && HANDOFF_LOCK_STALE_SECS=1 bash "$WH" --restamp >/dev/null 2>&1 </dev/null ); rc=$?
+  check "stale lock + --restamp -> exit 0"        0 "$rc"
+  check "stale lock + --restamp -> re-signed"     verified \
+    "$(handoff_mac_verify "$doc" && echo verified || echo no)"
+  check "stale lock + --restamp -> lock released" no \
+    "$([[ -d "$repo/.claude/.handoff_write.lock" ]] && echo yes || echo no)"
+  rm -rf "$repo"
+else
+  skip "openssl missing — --restamp write-lock coverage"
+fi
 
 # --- Held gitignore lock: bootstrap skipped silently, write proceeds --------
 # The holder (this script or handoff_turn_append.sh — same lock name) is

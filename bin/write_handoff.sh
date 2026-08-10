@@ -31,7 +31,10 @@
 #                          write-time stamp, and without a restamp the next
 #                          session loads the rules as data, not binding.
 #                          Degrades to a no-op warning when signing is
-#                          unavailable (no openssl / no provenance lib).
+#                          unavailable (no openssl / no provenance lib), and
+#                          likewise when another writer holds the write lock —
+#                          a stale-signed document is recoverable, one
+#                          overwritten with pre-rotation bytes is not.
 #
 # Reason-aware safety net (hook invocations only): when invoked as a hook,
 # stdin carries a JSON payload that MAY include a `reason` field (e.g.
@@ -429,9 +432,12 @@ trap cleanup EXIT
 # --restamp: re-sign the existing document in place and exit. Runs after the
 # symlink guards above (so it can't stamp through a planted link) and before
 # everything else — no rotation, no rebuild, no .gitignore bootstrap. The
-# rewrite is mktemp+mv atomic like the main publish. Every degraded path
-# (missing file, no signing capability) warns and exits 0: the /handoff skill
-# calls this best-effort, and an unsigned file just keeps data framing.
+# rewrite is mktemp+mv atomic like the main publish, and the whole
+# read→guard→sign→publish sequence runs under the same whole-run write lock the
+# main path uses (see the acquisition comment below for why atomic-in-isolation
+# isn't enough). Every degraded path (missing file, no signing capability,
+# contended lock) warns and exits 0: the /handoff skill calls this best-effort,
+# and an unsigned file just keeps data framing.
 if (( RESTAMP )); then
   if [[ ! -f "$handoff_path" ]]; then
     echo "write_handoff.sh: --restamp: no $handoff_relpath to stamp; nothing done." >&2
@@ -440,6 +446,57 @@ if (( RESTAMP )); then
   if ! can_sign; then
     echo "write_handoff.sh: --restamp: signing unavailable (provenance lib missing, or HANDOFF_TRUST_DISABLE=1); leaving the file as is." >&2
     echo "$handoff_path"
+    exit 0
+  fi
+  # Serialize against the main path's rotate→prune→publish behind the SAME
+  # whole-run lock. A restamp is a read-modify-write of handoff_current.md, and
+  # its final `mv` is atomic only in isolation: the sequence is read(doc) →
+  # guard → sign → publish, and a writer running concurrently can rotate that
+  # document into history and publish a fresh one inside the gap. The restamp's
+  # mv then lands the PRE-rotation bytes back on top of the just-published
+  # document — the session loses the newer snapshot, and because the ghost
+  # carries a freshly computed MAC it verifies, so nothing downstream can tell
+  # the substitution happened. The realistic trigger is the /handoff skill
+  # restamping its edit while a SessionEnd or PreCompact safety-net write is
+  # mid-sequence; the lock makes the read and the publish observe one document.
+  #
+  # Degradation on a miss is deliberately the OPPOSITE of the main path's
+  # explicit-run policy below (which proceeds unlocked rather than drop a write
+  # the user asked for). Proceeding unlocked here IS the clobber above, and the
+  # two outcomes are not symmetric: a skipped restamp leaves a correct document
+  # carrying a stale signature, so the next session loads its rules as
+  # reference data instead of binding — the already-documented degraded mode,
+  # and re-runnable — while a clobber destroys curated prose that exists
+  # nowhere else. So: wait the same ~1s a competing hook fire needs to finish,
+  # then warn loudly and skip. Nothing goes to stdout on that path — the
+  # handoff path is this script's "the job was done" signal, and a caller
+  # seeing it would assume binding had been restored when it had not.
+  write_lock_dir="$handoff_dir/.handoff_write.lock"
+  if try_mkdir_lock "$write_lock_dir"; then
+    write_lock_held=1
+  else
+    # `sleep 0.2` works on GNU and BSD/macOS sleep; the `|| sleep 1` fallback
+    # covers a strictly-integer POSIX sleep.
+    for _ in 1 2 3 4 5; do
+      sleep 0.2 2>/dev/null || sleep 1
+      if try_mkdir_lock "$write_lock_dir"; then
+        write_lock_held=1
+        break
+      fi
+    done
+  fi
+  if (( ! write_lock_held )); then
+    echo "write_handoff.sh: --restamp: write lock $write_lock_dir still held after ~1s; SKIPPING the restamp rather than overwriting another writer's publish. $handoff_relpath keeps its current signature, so its rules load as reference data, not binding — re-run /handoff to restore it." >&2
+    exit 0
+  fi
+  # Re-check under the lock. The holder we just waited out may have rotated the
+  # document into history and then aborted before publishing its replacement,
+  # so the file that existed at the guard above can be gone by the time we own
+  # the lock. Reading a missing file below would yield an EMPTY body (the
+  # `|| true` on the grep swallows the read error), sign that, and publish an
+  # empty handoff into the gap — the same content loss by a different route.
+  if [[ ! -f "$handoff_path" ]]; then
+    echo "write_handoff.sh: --restamp: $handoff_relpath disappeared while waiting for the write lock; nothing done." >&2
     exit 0
   fi
   # Build the body to be signed, THEN sign it — the document has been edited
@@ -471,6 +528,12 @@ if (( RESTAMP )); then
     restamp_tmp=""   # published; nothing left for the EXIT trap to remove
   else
     echo "write_handoff.sh: --restamp: cannot sign (openssl or the per-machine secret unavailable); the rules layer will load as reference data, not binding." >&2
+  fi
+  # Normal-path lock release, mirroring the main path's; the cleanup trap is
+  # only the abort backstop.
+  if (( write_lock_held )); then
+    rmdir "$write_lock_dir" 2>/dev/null || true
+    write_lock_held=0
   fi
   echo "$handoff_path"
   exit 0
@@ -618,6 +681,16 @@ file_mtime_stamp() {
   fi
 }
 
+# Is <path> a name the atomic claim below may aim `mv -n` at — i.e. free, or
+# occupied by a regular file (which `mv -n` will refuse, leaving the source
+# put)? Anything else — a directory, a fifo, a dangling symlink — is NOT a
+# claimable destination; see the loop for what goes wrong when one is used.
+# A symlink TO a regular file counts as claimable: `mv -n` sees an existing
+# destination and refuses it, which is the outcome we want anyway.
+claimable_archive_name() {  # <path>
+  [[ ! -e "$1" && ! -L "$1" ]] || [[ -f "$1" ]]
+}
+
 rotate_existing_handoff() {
   [[ -f "$handoff_path" ]] || return 0
   # An outgoing UNEDITED placeholder is deleted, not archived: it carries no
@@ -658,12 +731,43 @@ rotate_existing_handoff() {
   # attempts the failure is something else (EPERM, ENOSPC — where mv also
   # leaves the source, for a different reason); fall through to a plain loud
   # mv so the real error surfaces under set -e instead of spinning forever.
+  #
+  # "Source disappeared" is only a valid win signal when the candidate name was
+  # CLAIMABLE to begin with. `mv -n` refuses to overwrite an existing file, but
+  # a DIRECTORY is not an overwrite: `mv -n file dir` moves the file INTO it and
+  # succeeds, so the source vanishes and the loop reads it as a win. The
+  # rotation then chmod 600's the directory, stripping its traverse bit, and the
+  # curated snapshot is sealed inside a name no `-type f` consumer can reach —
+  # prune_history, handoff_session_start's history fallback and /handoff-more
+  # all walk right past it. Silent loss of exactly the file retention exists to
+  # keep. The probe-then-mv code this replaced got that right by accident
+  # (`[[ -e ]]` is true for a directory, so it bumped to _2); the atomic claim
+  # must get it right on purpose, WITHOUT giving up the claim — the TOCTOU it
+  # closed was two concurrent rotations both finding the same name free, and
+  # that race is still live. So the probe here is narrow: it only rules out
+  # names that are not regular files, and every free-name claim still goes
+  # through `mv -n`. Nothing in this system ever creates a non-file under
+  # handoff_history/ — these arrive from outside (a restore that unpacked a
+  # tree, a user's mkdir, a stray checkout), so there is no writer to race the
+  # probe against.
   local n=1 attempts=0 candidate="$archived"
   while :; do
-    mv -n "$handoff_path" "$candidate" 2>/dev/null || true
-    [[ -e "$handoff_path" ]] || break        # source gone -> claim succeeded
+    if claimable_archive_name "$candidate"; then
+      mv -n "$handoff_path" "$candidate" 2>/dev/null || true
+      [[ -e "$handoff_path" ]] || break      # source gone -> claim succeeded
+    fi
     attempts=$((attempts + 1))
     if (( attempts >= 50 )); then
+      # Out of attempts. If the name is claimable, the blocker is a real errno,
+      # so move LOUDLY and let set -e surface it. If it is not, moving is the
+      # corruption described above — abort the whole write instead. Aborting is
+      # the safe direction: the publish below never runs, so handoff_current.md
+      # keeps its curated prose (unrotated) rather than being overwritten by a
+      # mechanical snapshot whose predecessor we just failed to archive.
+      if ! claimable_archive_name "$candidate"; then
+        echo "write_handoff.sh: cannot rotate $handoff_relpath — 50 candidate names under $history_relpath are occupied by non-files; refusing to move the handoff into one. Clear them and re-run." >&2
+        exit 1
+      fi
       mv "$handoff_path" "$candidate"        # loud; aborts under set -e on a real error
       break
     fi
@@ -1066,9 +1170,28 @@ if try_mkdir_lock "$write_lock_dir"; then
 elif (( IF_CURATED )); then
   # Hook (safety-net) run: another writer is mid-write, and its snapshot of
   # this same repo state does the job — a second mechanical snapshot adds
-  # nothing worth contending for. Exit 0 like the other safety-net skips
-  # (the built tmp is discarded by the cleanup trap).
-  echo "$handoff_path"
+  # nothing worth contending for. Exit 0 like the other safety-net skips (a
+  # hook must never fail the session; the built tmp is discarded by the
+  # cleanup trap) — but SAY SO, and print nothing on stdout.
+  #
+  # The silent version of this skip could void the safety net outright. The
+  # lock is a bare directory with no owner recorded, so a writer that took a
+  # SIGKILL, met the OOM killer, or lost the machine mid-sequence leaves one
+  # behind with nothing to reap it; until it ages past
+  # HANDOFF_LOCK_STALE_SECS (default 300s) EVERY SessionEnd and PreCompact
+  # fire in that repo skipped its write. And the skip was byte-for-byte
+  # indistinguishable from success: rc=0, the handoff path on stdout, no
+  # diagnostic anywhere. A session could end having written nothing, with the
+  # loaded document silently hours stale and no signal that the net had not
+  # caught it. The path is this script's "the write happened" signal — every
+  # caller keys on it — so emitting it on a skip is the specific lie that made
+  # the failure undetectable. The other --if-curated skips above legitimately
+  # print it: there the document at that path IS the current, correct one and
+  # was deliberately preserved. Here nothing was inspected and nothing written.
+  #
+  # The remedy goes in the message because the operator is the only one who
+  # can tell a wedged lock from a live writer.
+  echo "write_handoff.sh: write lock $write_lock_dir is held; SKIPPING this safety-net write (no rotation, no publish) — $handoff_relpath is unchanged and may be stale. A lock left by a killed writer clears itself after ${HANDOFF_LOCK_STALE_SECS:-300}s; if no other writer is running, remove it: rmdir '$write_lock_dir'" >&2
   exit 0
 else
   # Explicit (/handoff or manual) run: the user asked for THIS write, so
