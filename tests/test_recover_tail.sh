@@ -141,4 +141,31 @@ err="$(HANDOFF_BACKUP_DIR="$bd" HANDOFF_RECOVER_TRANSCRIPT="$tx" bash "$RT" SID 
 check "no dump, no cursor -> no anomaly warning" no "$(has "$err" "WARNING")"
 rm -rf "$work"
 
+# --- M-8: same session id under two project-slug dirs -> newest by mtime
+#     wins, not glob/lexical order; stderr warns and names both -------------
+# Claude Code mints a new project-slug directory when a project is renamed,
+# moved, or resumed from a different cwd, so the same <id>.jsonl can exist
+# under two slugs at once. The lexically-EARLIER slug ("aaa-slug") holds a
+# deliberately STALE, shorter transcript with an older mtime; the lexically-
+# LATER slug ("zzz-slug") holds the real, current, longer transcript with a
+# newer mtime. The old first-match-wins glob loop would have picked the stale
+# one purely because "aaa" sorts before "zzz" — this asserts the newest one
+# (by mtime) is picked instead, regardless of name order.
+work="$(mktemp -d)"; mk_fixture "$work"
+bd="$work/bd"
+proj_root="$work/projects"
+must mkdir -p "$proj_root/aaa-slug" "$proj_root/zzz-slug"
+printf '{"type":"user","message":{"content":"STALE_MARKER"}}\n' > "$proj_root/aaa-slug/DUPSID.jsonl"
+touch -t 202001010000 "$proj_root/aaa-slug/DUPSID.jsonl"   # old mtime
+printf '{"type":"user","message":{"content":"LIVE_MARKER"}}\n' > "$proj_root/zzz-slug/DUPSID.jsonl"
+touch -t 202601010000 "$proj_root/zzz-slug/DUPSID.jsonl"   # newer mtime
+out="$(HANDOFF_BACKUP_DIR="$bd" HANDOFF_PROJECTS_DIR="$proj_root" bash "$RT" DUPSID 2>"$work/err.log")"
+err="$(cat "$work/err.log")"
+check "dup session id -> newest transcript wins" yes "$(has "$out" "LIVE_MARKER")"
+check "dup session id -> stale copy not used"    no  "$(has "$out" "STALE_MARKER")"
+check "dup session id -> warns on stderr"        yes "$(has "$err" "WARNING")"
+check "dup session id -> names aaa-slug copy"    yes "$(has "$err" "aaa-slug")"
+check "dup session id -> names zzz-slug copy"    yes "$(has "$err" "zzz-slug")"
+rm -rf "$work"
+
 finish

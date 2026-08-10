@@ -117,12 +117,42 @@ if [[ -n "${HANDOFF_RECOVER_TRANSCRIPT:-}" ]]; then
 else
   projects_dir="${HANDOFF_PROJECTS_DIR:-$HOME/.claude/projects}"
   transcript=""
+  # The <id>.jsonl LEAF is unique, but the SLUG directory above it is not:
+  # Claude Code mints a new project-slug dir when a project is renamed, moved,
+  # or resumed from a different cwd (handoff_session_start.sh's HANDOFF_ROOT
+  # mismatch warning covers the same root cause on the write side), so the
+  # same session id can end up filed under two slugs at once — one live, one a
+  # stale leftover. Collect every match rather than taking the first.
   # Nullglob so a no-match leaves the array empty instead of a literal pattern.
+  cands=()
   shopt -s nullglob
   for cand in "$projects_dir"/*/"${session_id}.jsonl"; do
-    transcript="$cand"; break
+    cands+=("$cand")
   done
   shopt -u nullglob
+  if (( ${#cands[@]} > 1 )); then
+    # The old code took whichever match the glob happened to expand first and
+    # broke out of the loop — effectively lexical order over the slug
+    # directory names, which has no relationship to which transcript is the
+    # real, current one. A stale 1-line copy under an alphabetically-earlier
+    # slug silently outranked a live multi-turn transcript, and recover_tail
+    # reported "dump is complete; no tail to recover" while discarding the
+    # very turns it exists to rescue. Select by mtime instead — same `ls -t`
+    # idiom handoff_turn_append.sh already uses for its dump-pruning order
+    # (BSD find has no -printf, so this is the portable way to get mtime
+    # order across GNU and BSD). LC_ALL=C pins collation, matching the sort
+    # discipline used elsewhere in this codebase (handoff_session_start.sh's
+    # history-file sort, write_handoff.sh's rotation sort): `proj-a` vs
+    # `proj_a` resolve differently under `C` vs `en_US.UTF-8`, and this
+    # script's own path resolution should not silently change which
+    # transcript wins depending on the caller's locale.
+    echo "handoff_recover_tail.sh: WARNING: found ${#cands[@]} transcripts for session $session_id under $projects_dir — using the most recently modified; the others are likely stale copies from a renamed/moved project:" >&2
+    for cand in "${cands[@]}"; do echo "  $cand" >&2; done
+    # shellcheck disable=SC2012  # ls -t is deliberate: mtime ordering, and BSD find has no -printf (same idiom as handoff_turn_append.sh's prune)
+    transcript="$(LC_ALL=C ls -t "${cands[@]}" 2>/dev/null | head -n 1)"
+  elif (( ${#cands[@]} == 1 )); then
+    transcript="${cands[0]}"
+  fi
 fi
 
 if [[ -z "$transcript" || ! -f "$transcript" ]]; then
