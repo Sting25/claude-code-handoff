@@ -41,7 +41,8 @@ manual copy-paste, no kickoff prompt to remember.
 │   ├── handoff_ctx_check.sh       # UserPromptSubmit hook: flags /handoff past threshold
 │   ├── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
 │   ├── handoff_statusline.sh      # statusLine command: renders the line + caches CC's ctx numbers
-│   └── handoff_compact_reset.sh   # PostCompact hook: resets ctx sidecars after compaction
+│   ├── handoff_compact_reset.sh   # PostCompact hook: resets ctx sidecars after compaction
+│   └── handoff_provenance.sh      # sourced LIBRARY (not executable): root resolution + HMAC signing/verification
 ├── skills/
 │   ├── handoff/
 │   │   ├── SKILL.md               # invoked by /handoff
@@ -73,10 +74,22 @@ Manual install:
    all seven. (Without `handoff_recover_tail.sh`, `/handoff-recover`
    still runs but silently loses the crash-truncated final turn — the
    content the helper exists to rescue.)
-2. Drop `skills/handoff/SKILL.md`, `skills/handoff-more/SKILL.md`, and
+2. Drop `bin/handoff_provenance.sh` into `~/.claude/bin/` as well —
+   **do not skip this one.** It is a sourced library, not a hook, so it
+   needs no `+x` bit and nothing ever invokes it directly; that is
+   exactly why it is easy to miss. Every one of the seven scripts above
+   sources it, and both signing (`write_handoff.sh`) and loading
+   (`handoff_session_start.sh`) are gated on its presence. Omit it and
+   you get an install that looks fine and works for snapshots, but
+   handoffs are **never signed** and the Rules / pinned blocks **never
+   bind** — permanently, with no error anywhere. `HANDOFF_SECRET_FILE`,
+   `HANDOFF_TRUST_DISABLE`, and the whole trusted-rules tier documented
+   below can never fire in that install. `./install.sh --doctor` reports
+   whether it is present.
+3. Drop `skills/handoff/SKILL.md`, `skills/handoff-more/SKILL.md`, and
    `skills/handoff-recover/SKILL.md` into the matching
    `~/.claude/skills/<name>/` directories.
-3. Add hooks to `~/.claude/settings.json`:
+4. Add hooks to `~/.claude/settings.json`:
 
    ```json
    {
@@ -184,7 +197,7 @@ Manual install:
      `/handoff-recover`), or `none`, and caches CC's context numbers
      for the `UserPromptSubmit` hook.
 
-4. (Optional) Add the self-policing rule to `~/.claude/RULES.md` so
+5. (Optional) Add the self-policing rule to `~/.claude/RULES.md` so
    the assistant offers `/handoff` proactively. Three real triggers,
    never a fabricated percentage:
 
@@ -201,7 +214,7 @@ Manual install:
    > prompt. The user's meter is still the source of truth for (a)
    > and (b); the hook is the only legitimate numeric signal.
 
-5. First time you invoke `/handoff` in a project, the script
+6. First time you invoke `/handoff` in a project, the script
    self-bootstraps `.claude/handoff_current.md` into that project's
    `.gitignore` (the file is regenerated, not source). One-line
    stderr notice the first time; idempotent after.

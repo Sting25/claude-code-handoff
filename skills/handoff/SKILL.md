@@ -45,8 +45,11 @@ nothing gets lost across the restart boundary.
 
 1. Check the script is installed, then run it via Bash:
    ```bash
-   test -f ~/.claude/bin/write_handoff.sh && bash ~/.claude/bin/write_handoff.sh \
-     || echo "MISSING: write_handoff.sh not installed"
+   test -f ~/.claude/bin/write_handoff.sh || echo "MISSING: write_handoff.sh not installed"
+   ```
+   Then, if it did not print MISSING, run it:
+   ```bash
+   bash ~/.claude/bin/write_handoff.sh
    ```
    If it prints MISSING, **stop here** — tell the user to clone
    https://github.com/Sting25/claude-code-handoff and run `./install.sh`,
@@ -55,6 +58,14 @@ nothing gets lost across the restart boundary.
    and a hand-rolled snapshot breaks the HMAC/rotation contract.
    Otherwise, the script outputs the absolute path of the written handoff
    (`<repo-root>/.claude/handoff_current.md`).
+
+   Keep the check and the run as two separate commands. Chaining them as
+   `test -f X && bash X || echo MISSING` makes **any** non-zero exit from
+   the script print MISSING — including real installed-but-blocked
+   conditions like a symlinked `.claude` — which would send the user off
+   to re-install an already-correct install while the actual cause goes
+   unaddressed. `test -f X || echo MISSING` (the shape `/handoff-more`
+   and `/handoff-recover` use) tests installation and nothing else.
 
 2. Read the file you just wrote. Then Edit it to **replace the
    placeholder block** under `## Notes from this session` with curated
