@@ -59,8 +59,9 @@ rm -rf "$src" "$home"
 # write into the developer's real home — issue #49's sibling). A contributor
 # CAN legitimately run the suite from a /tmp clone, where REPO_ROOT is
 # volatile too — fall back to the old $HOME base there so this case still
-# tests what it claims to. Trap-cleaned so a mid-test crash can't strand the
-# fixture in either location.
+# tests what it claims to. Registered with lib.sh's cleanup_on_exit (NOT a
+# raw `trap ... EXIT`, which would clobber lib.sh's cleanup trap) so a
+# mid-test crash can't strand the fixture in either location.
 eval "$(sed -n '/^is_volatile_path()/,/^}/p' "$REPO_ROOT/install.sh")"
 if is_volatile_path "$REPO_ROOT"; then
   persist_base="$HOME"
@@ -68,7 +69,7 @@ else
   persist_base="$REPO_ROOT/tests"
 fi
 persist="$(mktemp -d "$persist_base/.handoff_test_persist.XXXXXX")"
-trap 'rm -rf "$persist"' EXIT
+cleanup_on_exit "$persist"
 cp "$REPO_ROOT/install.sh" "$persist/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$persist/"
 home="$(mktemp -d)"
 out="$(CLAUDE_HOME="$home" bash "$persist/install.sh" 2>&1)"
