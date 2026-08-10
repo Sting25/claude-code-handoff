@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Concurrency coverage for write_handoff.sh (issue: SessionEnd + PreCompact
+# firing together, or two sessions open in one repo):
+#   - whole-run write lock (.claude/.handoff_write.lock): --if-curated runs
+#     yield silently when it's held; explicit runs wait briefly then proceed
+#     with a warning (never deadlock); stale locks are reclaimed.
+#   - .gitignore bootstrap lock (.claude/.handoff_gitignore.lock, shared by
+#     name/idiom with handoff_turn_append.sh): a miss skips the bootstrap
+#     silently; concurrent runs never duplicate the bootstrap lines.
+#   - concurrent smoke: two near-simultaneous runs leave exactly one complete
+#     handoff_current.md (HMAC verifies when openssl is present), no leftover
+#     tmp files, and no leftover lock dirs.
+# Pure bash + git; the HMAC check self-skips without openssl.
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+WH="$REPO_ROOT/bin/write_handoff.sh"
+SENTINEL="<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->"
+has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
+
+# A repo that already ignores .claude/ (committed), so the bootstrap-focused
+# assertions can opt in with a plain mk_repo instead.
+mk_repo_gitignored() {
+  local d; d="$(mk_repo)"
+  printf '.claude/\n' > "$d/.gitignore"
+  git -C "$d" add .gitignore
+  git -C "$d" commit -qm "ignore .claude"
+  printf '%s\n' "$d"
+}
+
+echo "write_handoff.sh — write lock / gitignore lock / concurrent smoke"
+
+# --- Held write lock: --if-curated (hook) run yields silently ---------------
+# A FRESH lock dir means another writer is mid-rotation/publish; the safety
+# net's mechanical snapshot adds nothing, so it must exit 0 without writing.
+repo="$(mk_repo_gitignored)"
+must mkdir -p "$repo/.claude/.handoff_write.lock"
+out="$( cd "$repo" && bash "$WH" --if-curated 2>/dev/null )"; rc=$?
+check "held lock + --if-curated -> exit 0"        0   "$rc"
+check "held lock + --if-curated -> path printed"  yes "$(has "$out" ".claude/handoff_current.md")"
+check "held lock + --if-curated -> nothing published" no \
+  "$([[ -f "$repo/.claude/handoff_current.md" ]] && echo yes || echo no)"
+check "held lock + --if-curated -> no tmp leftover" 0 \
+  "$(find "$repo/.claude" -maxdepth 1 -name '.handoff_current.*' 2>/dev/null | wc -l | tr -d ' ')"
+check "held lock left for its holder" yes \
+  "$([[ -d "$repo/.claude/.handoff_write.lock" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# --- Held write lock: explicit run waits, warns, and still writes -----------
+# A user-invoked /handoff must never deadlock: after brief retries it
+# proceeds without the lock, loudly.
+repo="$(mk_repo_gitignored)"
+must mkdir -p "$repo/.claude/.handoff_write.lock"
+err="$( cd "$repo" && bash "$WH" 2>&1 >/dev/null )"; rc=$?
+check "held lock + explicit -> exit 0"          0   "$rc"
+check "held lock + explicit -> warns"           yes "$(has "$err" "proceeding without it")"
+check "held lock + explicit -> handoff written" yes \
+  "$([[ -f "$repo/.claude/handoff_current.md" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# --- Stale write lock (holder hard-killed) is reclaimed ----------------------
+# Mirrors turn_append's staleness reclaim: an EXIT trap never fired (SIGKILL,
+# power loss), so an mtime older than HANDOFF_LOCK_STALE_SECS means the
+# holder is gone; the run reclaims, writes, and releases.
+repo="$(mk_repo_gitignored)"
+must mkdir -p "$repo/.claude/.handoff_write.lock"
+touch -t 202001010000 "$repo/.claude/.handoff_write.lock"   # POSIX touch -t: GNU + BSD
+( cd "$repo" && HANDOFF_LOCK_STALE_SECS=1 bash "$WH" --if-curated >/dev/null 2>&1 ); rc=$?
+check "stale lock + --if-curated -> exit 0"      0   "$rc"
+check "stale lock reclaimed -> handoff written"  yes \
+  "$([[ -f "$repo/.claude/handoff_current.md" ]] && echo yes || echo no)"
+check "stale lock released after run" no \
+  "$([[ -d "$repo/.claude/.handoff_write.lock" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# --- Symlink planted at the write-lock path: refused, run degrades ----------
+# mkdir at a symlink fails with EEXIST forever and rmdir can't reclaim it, so
+# the lock helper refuses symlinks outright; an explicit run then proceeds
+# unlocked (same degradation as a held lock) rather than wedging.
+repo="$(mk_repo_gitignored)"
+must mkdir -p "$repo/.claude"
+must ln -s /nonexistent "$repo/.claude/.handoff_write.lock"
+err="$( cd "$repo" && bash "$WH" 2>&1 >/dev/null )"; rc=$?
+check "symlink lock -> exit 0"           0   "$rc"
+check "symlink lock -> refusal warning"  yes "$(has "$err" "refusing to use it as a lock")"
+check "symlink lock -> handoff written"  yes \
+  "$([[ -f "$repo/.claude/handoff_current.md" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# --- Held gitignore lock: bootstrap skipped silently, write proceeds --------
+# The holder (this script or handoff_turn_append.sh — same lock name) is
+# appending the very same entries; a miss must skip the bootstrap without
+# blocking the handoff write itself.
+repo="$(mk_repo)"                          # no .gitignore in this repo
+must mkdir -p "$repo/.claude/.handoff_gitignore.lock"
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 ); rc=$?
+check "held gitignore lock -> exit 0"           0  "$rc"
+check "held gitignore lock -> bootstrap skipped" no \
+  "$([[ -f "$repo/.gitignore" ]] && echo yes || echo no)"
+check "held gitignore lock -> handoff written"  yes \
+  "$([[ -f "$repo/.claude/handoff_current.md" ]] && echo yes || echo no)"
+check "held gitignore lock left for its holder" yes \
+  "$([[ -d "$repo/.claude/.handoff_gitignore.lock" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# --- Normal run: both locks taken and released (no leftovers) ---------------
+repo="$(mk_repo)"
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 )
+check "normal run -> gitignore bootstrapped" yes \
+  "$(has "$(cat "$repo/.gitignore" 2>/dev/null)" ".claude/handoff_current.md")"
+check "normal run -> write lock released" no \
+  "$([[ -d "$repo/.claude/.handoff_write.lock" ]] && echo yes || echo no)"
+check "normal run -> gitignore lock released" no \
+  "$([[ -d "$repo/.claude/.handoff_gitignore.lock" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# --- Concurrent smoke: two near-simultaneous runs ---------------------------
+# The interleaving isn't deterministic, but every outcome the lock permits
+# must hold: exactly one complete handoff_current.md (signed, when openssl
+# exists), no half-written tmp files, no leftover locks, and a .gitignore
+# with no duplicated bootstrap lines (the check-ignore→append race).
+repo="$(mk_repo)"                          # no .gitignore: exercise the bootstrap race
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 ) &
+p1=$!
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 ) &
+p2=$!
+wait "$p1"; rc1=$?
+wait "$p2"; rc2=$?
+check "concurrent: run 1 exit 0" 0 "$rc1"
+check "concurrent: run 2 exit 0" 0 "$rc2"
+check "concurrent: exactly one handoff_current.md" 1 \
+  "$(find "$repo/.claude" -maxdepth 1 -name 'handoff_current.md' 2>/dev/null | wc -l | tr -d ' ')"
+doc="$(cat "$repo/.claude/handoff_current.md" 2>/dev/null)"
+check "concurrent: doc is complete (sentinel present)" yes "$(has "$doc" "$SENTINEL")"
+check "concurrent: no tmp leftovers" 0 \
+  "$(find "$repo/.claude" -maxdepth 1 -name '.handoff_current.*' 2>/dev/null | wc -l | tr -d ' ')"
+check "concurrent: write lock released"    no "$([[ -d "$repo/.claude/.handoff_write.lock" ]] && echo yes || echo no)"
+check "concurrent: gitignore lock released" no "$([[ -d "$repo/.claude/.handoff_gitignore.lock" ]] && echo yes || echo no)"
+check "concurrent: no duplicated .gitignore lines" "" \
+  "$(sort "$repo/.gitignore" 2>/dev/null | uniq -d)"
+# Published doc integrity: the HMAC trailer must verify over the final
+# content — a doc corrupted by interleaved writes would fail the digest.
+if command -v openssl >/dev/null 2>&1; then
+  # shellcheck source=../bin/handoff_provenance.sh
+  . "$REPO_ROOT/bin/handoff_provenance.sh"
+  check "concurrent: HMAC verifies over published doc" verified \
+    "$(handoff_mac_verify "$repo/.claude/handoff_current.md" && echo verified || echo no)"
+else
+  skip "openssl missing — HMAC verification"
+fi
+rm -rf "$repo"
+
+finish
