@@ -5,9 +5,6 @@
 # tests-macos is intentionally NON-blocking: it surfaces the bash-3.2 / BSD
 # portability gaps that otherwise only bite on a dev's Mac, without blocking
 # merges on them.
-#
-# DRAFT: the first run is the real measurement — it confirms the suite is
-# green on Linux and shows exactly what (if anything) macOS still needs.
 name: CI
 
 on:
@@ -39,5 +36,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: ShellCheck all scripts
         run: shellcheck bin/*.sh tests/*.sh install.sh
