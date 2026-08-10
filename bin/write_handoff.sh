@@ -666,13 +666,25 @@ trap 'rm -f "$handoff_tmp"' EXIT
 {
   printf '# %s — session handoff (auto-generated)\n\n' "$repo_name"
   printf '**Generated:** %s\n\n' "$ts_utc"
+  # Machine-readable resolution record: which root this doc was written for,
+  # and whether that root was a git worktree at write time. The SessionStart
+  # loader compares these against ITS resolution and warns on a mismatch
+  # (moved/renamed project) or a non-git -> git flip (the snapshot predates
+  # `git init` / arrived with a clone), instead of silently loading a doc
+  # that describes some other tree. An inert HTML comment, covered by the
+  # HMAC like every other line.
+  printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n\n' "$repo_root" "$in_git"
 
   cat <<EOF
 Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
 \`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).
 Auto-loaded into the next session by the \`SessionStart\` hook in the
-same settings file. Always lives at \`<repo>/.claude/handoff_current.md\`;
-the previous handoff is rotated to \`.claude/handoff_history/\` before
+same settings file. Lives at \`<root>/.claude/handoff_current.md\`, where
+\`<root>\` is resolved from the Claude Code project dir (falling back to
+the hook payload's cwd, then the process cwd) and then anchored on that
+dir's git toplevel — the same resolution the loader uses, recorded in the
+\`HANDOFF_ROOT\` comment above. The previous handoff is rotated to
+\`.claude/handoff_history/\` before
 overwrite (last $HISTORY_KEEP retained; override via \`HANDOFF_HISTORY_KEEP\`).
 Run \`/handoff-more\` in a fresh session to pull older handoffs into context.
 
