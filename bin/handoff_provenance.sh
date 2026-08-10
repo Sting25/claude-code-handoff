@@ -30,13 +30,18 @@
 # here returns non-zero for "cannot establish trust" rather than
 # erroring, so `set -e` callers must invoke them inside a condition.
 #
-# Threat-model note on `openssl dgst -hmac <key>`: the key appears in
-# the process argument list for the duration of the call. The secret
-# only defends against repo-DELIVERED content (clones, tarballs); a
-# local same-user process could read ~/.claude/handoff_secret directly
-# anyway, so ps exposure does not extend the attack surface this design
-# cares about. `-hmac` is used because it is the one form both GNU
-# openssl and macOS LibreSSL support.
+# Threat-model note on the HMAC construction: the obvious
+# `openssl dgst -hmac <key>` puts the key in the process argument list,
+# and argv is readable by OTHER users via ps on a multi-user host —
+# unlike the 0600 secret file itself. (An earlier revision accepted the
+# exposure on the grounds that a same-user process could read the file
+# anyway; that rationale ignored the cross-user ps window, and signing
+# fires on every SessionEnd/PreCompact.) So handoff_mac_compute builds
+# HMAC-SHA256 from its definition instead — two openssl digest passes
+# over stdin, with the ipad/opad key blocks emitted by the printf
+# BUILTIN (no separate process, no argv) — and openssl only ever sees
+# data on stdin. Digest-identical to `-hmac` for the same key bytes,
+# so docs signed by older versions keep verifying.
 # shellcheck shell=bash
 
 # Marker lines. write_handoff.sh emits them around the pinned section
@@ -226,14 +231,55 @@ handoff_mac_compute() {  # <file> [ensure]
     sf="$(handoff_secret_path)"
     { [ ! -L "$sf" ] && [ -f "$sf" ] && [ -s "$sf" ]; } || return 1
   fi
-  # Strip only a WELL-FORMED trailer line (prefix + 64 hex + " -->"), not any
-  # line that merely starts with the prefix — a prose line beginning "<!--
-  # HANDOFF_HMAC: ..." must stay in the digest (and must not be deleted by
-  # --restamp, which strips with the same pattern). `|| true`: grep -v exits 1
+  # HMAC-SHA256 from the definition — H((K'⊕opad) ‖ H((K'⊕ipad) ‖ m)) —
+  # instead of `openssl dgst -hmac "$key"`, so the key NEVER appears in a
+  # process argument list (see the threat-model note in the header). The
+  # key bytes here are the literal file content minus trailing newlines,
+  # exactly what `-hmac "$(cat "$sf")"` used before, so the digests are
+  # bit-identical and older signed docs keep verifying.
+  local key kb pad_i='' pad_o='' x b i inner
+  key="$(cat "$sf" 2>/dev/null)" || return 1
+  [ -n "$key" ] || return 1
+  # Key block K': hex of the key bytes; >64-byte keys are first hashed
+  # (per RFC 2104), then zero-padded to the 64-byte SHA-256 block size.
+  # od (POSIX) renders the bytes; the generated secret is 64 ASCII hex
+  # chars = exactly one block, so both branches are rare in practice.
+  kb="$(printf '%s' "$key" | od -An -tx1 2>/dev/null | tr -d ' \n')"
+  [ -n "$kb" ] || return 1
+  if [ "${#kb}" -gt 128 ]; then
+    kb="$(printf '%s' "$key" | openssl dgst -sha256 -binary 2>/dev/null \
+      | od -An -tx1 2>/dev/null | tr -d ' \n')"
+    [ "${#kb}" = 64 ] || return 1
+  fi
+  while [ "${#kb}" -lt 128 ]; do kb="${kb}00"; done
+  # ipad/opad blocks as \xHH escape strings, built with the printf
+  # BUILTIN (printf -v spawns no process, so no argv for ps to see).
+  for ((i = 0; i < 128; i += 2)); do
+    b=$((16#${kb:i:2}))
+    printf -v x '\\x%02x' $((b ^ 0x36)); pad_i+=$x
+    printf -v x '\\x%02x' $((b ^ 0x5c)); pad_o+=$x
+  done
+  # Inner pass: ipad block, then the doc minus any WELL-FORMED trailer
+  # line (prefix + 64 hex + " -->") — not any line that merely starts
+  # with the prefix; a prose line beginning "<!-- HANDOFF_HMAC: ..."
+  # must stay in the digest (and must not be deleted by --restamp,
+  # which strips with the same pattern). `|| true`: grep -v exits 1
   # when it selects nothing (an empty document), which under a caller's
-  # pipefail would abort — the hex-regex check below is the real validity gate.
-  out="$({ LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$file" 2>/dev/null || true; } \
-    | openssl dgst -sha256 -hmac "$(cat "$sf")" 2>/dev/null)" || return 1
+  # pipefail would abort — the hex-regex check below is the real gate.
+  # shellcheck disable=SC2059  # deliberate: the format IS the \xHH data
+  inner="$({ printf "$pad_i"
+             LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$file" 2>/dev/null || true
+           } | openssl dgst -sha256 -binary 2>/dev/null \
+             | od -An -tx1 2>/dev/null | tr -d ' \n')" || return 1
+  [ "${#inner}" = 64 ] || return 1
+  # Outer pass: opad block plus the inner digest bytes. The inner hex is
+  # machine-generated [0-9a-f], so sed turning it into \xHH escapes for
+  # the printf builtin is injection-safe; it reaches sed via stdin, not
+  # argv.
+  # shellcheck disable=SC2059  # deliberate: the format IS the \xHH data
+  out="$({ printf "$pad_o"
+           printf "$(printf '%s' "$inner" | sed 's/../\\x&/g')"
+         } | openssl dgst -sha256 2>/dev/null)" || return 1
   # Output shape varies ("(stdin)= <hex>", "SHA2-256(stdin)= <hex>");
   # the digest is always the last whitespace-separated field.
   out="${out##* }"
