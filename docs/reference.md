@@ -17,6 +17,7 @@ env-var list, see [skills/handoff/README.md](../skills/handoff/README.md).
 - [Trusted rules: when the fences actually bind](#trusted-rules-when-the-fences-actually-bind)
 - [System-log nudge](#system-log-nudge)
 - [What the handoff actually looks like](#what-the-handoff-actually-looks-like)
+- [Advanced environment variables](#advanced-environment-variables)
 - [Install internals](#install-internals)
 - [Updating](#updating)
 - [Uninstall details](#uninstall-details)
@@ -305,6 +306,12 @@ After `/handoff` (or any session exit) you get
 
 **Generated:** 2026-05-12 14:59 UTC
 
+<!-- HANDOFF_ROOT: /path/to/myproject in_git=1 -->
+
+_(Twelve or so lines of auto-written preamble follow here, explaining
+what wrote this file, where it lives, and how rotation works. Elided in
+this example; the real file has them.)_
+
 ---
 
 ## Repo: myproject
@@ -360,10 +367,50 @@ The auto-snapshot above the `---` is git state — cheap, mechanical,
 always correct. The "Notes from this session" block is the part git
 can't see: decisions, in-flight tracks, open questions. The
 HMAC trailer (`<!-- HANDOFF_HMAC: ... -->`) proves the handoff was
-written locally (see "Trusted rules" above). The `SessionEnd` hook
+written locally (see "Trusted rules" above). The `HANDOFF_ROOT` line
+near the top records which project root the writer resolved; the
+SessionStart loader compares it against the root it resolves and warns
+when the two disagree, which is how a moved or renamed project (or a
+copied `.claude/`) announces itself instead of silently loading a
+snapshot that describes somewhere else. The `SessionEnd` hook
 leaves the Notes block as a placeholder. Running `/handoff` is what
 fills it in, so for any session that involved real discussion, `/handoff`
 is the preferred path; `SessionEnd` is the safety net for unplanned exits.
+
+## Advanced environment variables
+
+These are implemented and supported, but deliberately kept out of the
+README's configuration block — you should not need any of them for a
+normal install. They are listed here so nothing in the code is
+undocumented.
+
+**`CLAUDE_HOME`** — install target, default `$HOME/.claude`. Everything
+the installer writes goes under it, and `handoff_secret_path` resolves
+the per-machine HMAC secret the same way, so `--doctor` and the signing
+path always inspect the same file. Setting it after an install
+effectively points the tooling at a different, empty install.
+
+**`HANDOFF_ANCHOR`** — how `handoff_resolve_root` picks the project root
+in a git worktree. Unset (or `toplevel`) keeps the default: each linked
+worktree is its own root, with its own `.claude/`. `common` resolves
+instead to the main repo (the parent of `git rev-parse
+--git-common-dir`), so every linked worktree shares one `.claude/` and
+handoffs survive `git worktree remove`. The default is per-worktree
+deliberately — flipping it would silently relocate every existing user's
+handoff files on upgrade. Two caveats for `common`: in a **submodule**
+it resolves to `<super>/.git/modules`, and under `--separate-git-dir` to
+the external git dir's parent — both outside the working tree. Prefer it
+only in a plain multi-worktree checkout.
+
+**`HANDOFF_DEBUG=1`** — prints a one-line root-resolution trace to
+stderr (which precedence rung won, the anchor, the resolved root). The
+first thing to reach for when a handoff is written somewhere the loader
+doesn't read.
+
+**`HANDOFF_MAC_PREFIX`** — the literal prefix of the HMAC trailer line,
+default `<!-- HANDOFF_HMAC: `. Changing it invalidates every existing
+signature, since verification strips and rebuilds the trailer using this
+exact string. Present for testing; there is no reason to set it.
 
 ## Install internals
 

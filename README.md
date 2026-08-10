@@ -38,17 +38,22 @@ through hooks without you thinking about it.
 
 ## Requirements
 
-- `bash`, `git`, and `jq`. If `jq` is not on PATH, the installer
-  refuses to install (`exit 1`) because the Stop hook, context nudge,
-  and `/handoff-recover` all depend on it at runtime. (`--uninstall`
-  and `--doctor` still work without `jq`.)
-- `perl` — used by the Stop hook to strip transcript noise.
+- `bash` and `jq`. If `jq` is not on PATH, the installer refuses to
+  install (`exit 1`) because the Stop hook, context nudge, and
+  `/handoff-recover` all depend on it at runtime. (`--uninstall` and
+  `--doctor` still work without `jq`.)
+- `git` — optional since 0.8.4. Outside a git worktree the snapshot
+  simply omits the git sections and the project directory becomes the
+  root; the installer runs no git at all.
+- `perl` — optional. The Stop hook and `/handoff-recover` use it to
+  strip transcript noise and fall back to `cat` when it is absent, so
+  the dumps are just noisier without it.
 - `openssl` — optional. Without it, handoffs aren't HMAC-signed and
   the rules layer loads as reference data instead of binding; nothing
   errors.
 - Tested on Linux — that CI job blocks. The macOS CI job (bash 3.2 /
   BSD userland) is advisory, non-blocking; the scripts handle BSD
-  differences like `flock`/`tac`/`date`. Windows (Git Bash / WSL) is
+  differences like `flock` and `date`. Windows (Git Bash / WSL) is
   untested in CI.
 
 ## How it works
@@ -136,8 +141,15 @@ export HANDOFF_PROJECTS_DIR=/custom/projects/path
 # normal Claude Code structure.
 export HANDOFF_RECOVER_TRANSCRIPT=/path/to/transcript.jsonl
 
-# Lock timeout (seconds) for the handoff_turn_append.sh Stop hook when
-# acquiring the write lock on per-turn dumps. Default: 300.
+# How old a lock must be before it is presumed ORPHANED and forcibly
+# reclaimed. Not a timeout: nothing waits this long, and lowering it does
+# not make anything give up faster — it makes locks get STOLEN from
+# holders that are slow but alive, which interleaves dump content and
+# clobbers the cursor. Read by the Stop hook's per-turn dump lock AND by
+# write_handoff.sh's whole-run and .gitignore locks. Default: 300, chosen
+# to sit comfortably above Claude Code's 60s hook timeout. Raise it if you
+# see dumps interleaving on a very slow machine; there is no reason to
+# lower it. Must be a plain integer — anything else falls back to 300.
 export HANDOFF_LOCK_STALE_SECS=600
 ```
 
