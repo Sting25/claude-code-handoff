@@ -133,7 +133,7 @@ while [[ $# -gt 0 ]]; do
       model_pin="$2"; shift ;;
     --model=*)   model_pin="${1#--model=}" ;;
     --help|-h)
-      sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
