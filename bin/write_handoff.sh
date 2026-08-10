@@ -347,6 +347,12 @@ try_mkdir_lock() {  # <lock_dir>
   # Held (or leftover). Reclaim only when older than the staleness window.
   # Age via GNU `stat -c` with a BSD `stat -f` fallback, like turn_append.
   stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
+  # Numeric guard before the (( )) below: bash arithmetic recursively
+  # expands its operand, so a non-numeric payload (e.g. an array subscript
+  # with command substitution) delivered via a clone's .claude/settings.json
+  # env would execute. Fall back to the default on anything non-numeric,
+  # matching every other arithmetic env var in this script.
+  [[ "$stale_secs" =~ ^[0-9]+$ ]] || stale_secs=300
   lock_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null \
                 || stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
   now="$(date +%s)"

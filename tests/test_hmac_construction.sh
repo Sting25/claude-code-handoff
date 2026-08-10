@@ -73,6 +73,8 @@ check "well-formed trailer excluded from own digest" yes "$same"
 # Comment lines are excluded — the lib's rationale comment quotes the old
 # form on purpose; only executable code counts as exposure.
 exposed=no
+# shellcheck disable=SC2016  # the pattern is a literal grep needle, not a
+# shell expansion — it must stay single-quoted to match the source verbatim.
 grep -v '^[[:space:]]*#' "$REPO_ROOT/bin/handoff_provenance.sh" \
   | grep -q -- '-hmac "\$(cat' && exposed=yes
 check "no -hmac \"\$(cat …)\" argv shape in lib" no "$exposed"

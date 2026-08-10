@@ -138,6 +138,12 @@ if (( in_git )) \
     gi_held=1
   else
     gi_stale="${HANDOFF_LOCK_STALE_SECS:-300}"
+    # Numeric guard BEFORE the value reaches (( )) below: bash arithmetic
+    # recursively expands its operand, so an array-subscript payload in this
+    # env var would execute command substitution. A clone-delivered
+    # .claude/settings.json can set env, so treat it as untrusted; fall back
+    # to the default on anything non-numeric (matches HISTORY_KEEP et al.).
+    [[ "$gi_stale" =~ ^[0-9]+$ ]] || gi_stale=300
     gi_mtime="$(stat -c %Y "$gi_lock" 2>/dev/null \
                 || stat -f %m "$gi_lock" 2>/dev/null || echo 0)"
     gi_now="$(date +%s)"
@@ -237,6 +243,9 @@ else
     # `stat -f` fallback (this branch only runs where flock is absent —
     # typically macOS/BSD).
     stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
+    # Numeric guard before (( )) — see the gitignore-lock site above; an
+    # array-subscript payload here would otherwise execute.
+    [[ "$stale_secs" =~ ^[0-9]+$ ]] || stale_secs=300
     lock_mtime="$(stat -c %Y "$lock_mkdir" 2>/dev/null \
                   || stat -f %m "$lock_mkdir" 2>/dev/null || echo 0)"
     now="$(date +%s)"
