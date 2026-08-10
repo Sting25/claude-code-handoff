@@ -274,11 +274,15 @@ handoff_mac_compute() {  # <file> [ensure]
   # (per RFC 2104), then zero-padded to the 64-byte SHA-256 block size.
   # od (POSIX) renders the bytes; the generated secret is 64 ASCII hex
   # chars = exactly one block, so both branches are rare in practice.
-  kb="$(printf '%s' "$key" | od -An -tx1 2>/dev/null | tr -d ' \n')"
+  # -v is MANDATORY: without it od replaces any run of identical input
+  # lines with a single "*", so a key containing repeated 16-byte blocks
+  # would be silently truncated — collapsing distinct keys onto one MAC
+  # and breaking cross-version verification for that key class.
+  kb="$(printf '%s' "$key" | od -An -v -tx1 2>/dev/null | tr -d ' \n')"
   [ -n "$kb" ] || return 1
   if [ "${#kb}" -gt 128 ]; then
     kb="$(printf '%s' "$key" | openssl dgst -sha256 -binary 2>/dev/null \
-      | od -An -tx1 2>/dev/null | tr -d ' \n')"
+      | od -An -v -tx1 2>/dev/null | tr -d ' \n')"
     [ "${#kb}" = 64 ] || return 1
   fi
   while [ "${#kb}" -lt 128 ]; do kb="${kb}00"; done
@@ -300,7 +304,7 @@ handoff_mac_compute() {  # <file> [ensure]
   inner="$({ printf "$pad_i"
              LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$file" 2>/dev/null || true
            } | openssl dgst -sha256 -binary 2>/dev/null \
-             | od -An -tx1 2>/dev/null | tr -d ' \n')" || return 1
+             | od -An -v -tx1 2>/dev/null | tr -d ' \n')" || return 1
   [ "${#inner}" = 64 ] || return 1
   # Outer pass: opad block plus the inner digest bytes. The inner hex is
   # machine-generated [0-9a-f], so sed turning it into \xHH escapes for
