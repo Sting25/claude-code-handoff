@@ -495,6 +495,6 @@ handoff_bind_has_content() {  # <file>
 # sync — that copy is deliberately self-contained because SessionStart
 # must not depend on this lib being installed). Reads stdin.
 handoff_defang() {
-  LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' \
+  LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout|local-command-stderr)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' \
     || echo "⚠️  handoff: defang filter failed — rules content above may be truncated"
 }

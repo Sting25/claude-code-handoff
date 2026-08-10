@@ -846,7 +846,11 @@ fi
 substrate_root=""
 if [[ -n "$SUBSTRATE_NAME" ]]; then
   candidate="$(cd "$repo_root/.." && pwd)/$SUBSTRATE_NAME"
-  if [[ -d "$candidate/.git" ]]; then
+  # `git rev-parse`, not `[[ -d "$candidate/.git" ]]`: .git is a FILE (a
+  # gitdir: pointer) in a linked worktree and in a submodule, so the -d test
+  # reported a perfectly legitimate sibling as "not a git repo" and silently
+  # dropped its snapshot. This is the idiom used everywhere else in this file.
+  if git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     substrate_root="$candidate"
   else
     # Configured but not found / not a git repo. Silently skipping hid typos in
@@ -1035,7 +1039,14 @@ EOF
     snapshot_repo "$substrate_root" "Substrate: $SUBSTRATE_NAME"
   fi
 
-  # In-flight markdown across configured paths in the main repo
+  # In-flight markdown across configured paths in the main repo.
+  # `set -f` around both unquoted loops: word splitting on these
+  # space-separated lists is intentional and documented, but PATHNAME
+  # EXPANSION rides along with it unguarded — HANDOFF_INFLIGHT_DIRS="docs *"
+  # globs against the process cwd and turns a config value into a directory
+  # listing of wherever the hook happened to run. Splitting is what we want;
+  # globbing never is.
+  set -f
   for d in $INFLIGHT_DIRS; do
     [[ -d "$repo_root/$d" ]] || continue
     # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
@@ -1070,6 +1081,7 @@ EOF
       fi
     done
   fi
+  set +f
 
   printf '## Verify state matches reality\n\n'
   printf '```bash\n'

@@ -163,6 +163,11 @@ fi
 [[ -z "$repo_root" ]] && exit 0
 
 backup_dir="$repo_root/.claude/handoff_backups"
+# Refuse symlinked parents, matching handoff_turn_append.sh and
+# handoff_statusline.sh. The per-file guards further down cover the individual
+# flag/fences writes; this covers the components above them, so the sweep is
+# systematic rather than nearly-systematic.
+[[ -L "$repo_root/.claude" || -L "$backup_dir" ]] && exit 0
 size_file="$backup_dir/.ctx_${session_id}"
 tokens_file="$backup_dir/.ctx_tokens_${session_id}"
 model_file="$backup_dir/.ctx_model_${session_id}"

@@ -140,7 +140,7 @@ defang_untrusted() {  # <file, or stdin when no arg> -> defanged content on stdo
   # (Keep this pattern in sync with handoff_defang in handoff_provenance.sh —
   # this copy is deliberately self-contained because the defang is security-
   # critical and must not depend on the optional lib being installed.)
-  LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' "$@" \
+  LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout|local-command-stderr)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' "$@" \
     || echo "⚠️  handoff: defang filter failed — handoff content above may be truncated"
 }
 emit_untrusted() {  # <file> -> caveat + defanged content
@@ -390,7 +390,16 @@ if [ "$is_placeholder" = "1" ] \
   # `-type f` excludes symlinks, so a link planted in handoff_history/ is
   # never selected for the cat below — this is the history-side symmetry of
   # the handoff_current.md symlink read guard near the top of this script.
-  prev="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | LC_ALL=C sort -r | head -1 || true)"
+  # The name filter matches write_handoff.sh's prune (the emitted shape
+  # handoff_<YYYY-MM-DD>_<HHMMSS>[_<N>].md) rather than a bare `handoff_*.md`.
+  # Prune restricts to that shape deliberately, so a user's hand-preserved file
+  # in handoff_history/ is never deleted (#46) — but this selector matched
+  # anything, so a kept file like handoff_zzz_IMPORTANT.md sorted first under
+  # `sort -r` and got loaded as "the most recent handoff". The two ends of the
+  # same retention contract should use one filter.
+  prev="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
+    | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
+    | LC_ALL=C sort -r | head -1 || true)"
   if [ -n "$prev" ] && [ -f "$prev" ]; then
     echo
     echo "---"

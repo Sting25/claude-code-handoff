@@ -329,6 +329,7 @@ if command -v perl >/dev/null 2>&1; then
       s{<command-message>.*?</command-message>\s*}{}gs;
       s{<command-args>.*?</command-args>\s*}{}gs;
       s{<local-command-stdout>.*?</local-command-stdout>\s*}{}gs;
+      s{<local-command-stderr>.*?</local-command-stderr>\s*}{}gs;
       s{\n{3,}}{\n\n}g;
     '
   }
