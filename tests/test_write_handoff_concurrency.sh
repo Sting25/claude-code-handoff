@@ -262,4 +262,33 @@ else
 fi
 rm -rf "$repo"
 
+
+# ---------------------------------------------------------------------------
+echo "session_start — leftover write lock is reported to the user"
+
+# write_handoff.sh warns on stderr when a held lock makes it skip a safety-net
+# write, but the INSTALLED SessionEnd/PreCompact hooks are wired
+# `… >/dev/null 2>&1 || true`, so in the default configuration that warning
+# reaches nobody — and a session ending without a write is exactly when no one
+# is watching. SessionStart is where the user does look, so the cause has to be
+# reported there or the DATA-2 fix has no real-world reach.
+SS="$REPO_ROOT/bin/handoff_session_start.sh"
+lk="$(mk_repo)" || exit 1
+cleanup_on_exit "$lk"
+must mkdir -p "$lk/.claude"
+must mkdir "$lk/.claude/.handoff_write.lock"
+out="$( cd "$lk" && CLAUDE_PROJECT_DIR="$lk" bash "$SS" </dev/null 2>/dev/null )"; rc=$?
+named=no
+printf '%s' "$out" | grep -q 'write lock is left over' \
+  && printf '%s' "$out" | grep -q 'handoff_write.lock' && named=yes
+check "leftover lock reported at SessionStart" yes "$named"
+check "and says how to clear it"               yes \
+  "$(printf '%s' "$out" | grep -q 'rmdir' && echo yes || echo no)"
+check "SessionStart still exits 0"             0   "$rc"
+# No lock, no noise — this must not fire on a normal project.
+must rmdir "$lk/.claude/.handoff_write.lock"
+out2="$( cd "$lk" && CLAUDE_PROJECT_DIR="$lk" bash "$SS" </dev/null 2>/dev/null )"
+check "silent when no lock is present"         no  \
+  "$(printf '%s' "$out2" | grep -q 'write lock is left over' && echo yes || echo no)"
+
 finish

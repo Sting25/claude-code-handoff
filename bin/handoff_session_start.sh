@@ -274,6 +274,22 @@ fi
 # the Stop hook's first real fire (before any of those sidecars), so it is
 # both necessary and sufficient evidence that a handoff was actually written
 # here, with no false-negative trade-off.
+# Leftover write lock. write_handoff.sh now warns on stderr when a held lock
+# makes it skip a safety-net write, but the INSTALLED SessionEnd and PreCompact
+# hooks are wired as `… >/dev/null 2>&1 || true` (install.sh), so that warning
+# reaches no one in the default configuration — and a session that ends without
+# writing is precisely the case where nobody is watching. SessionStart is where
+# the user does look, so report the cause here. No writer should be running at
+# session start, so a lock present now was left by one that died before its
+# EXIT trap (SIGKILL, OOM, power loss); until it ages past
+# HANDOFF_LOCK_STALE_SECS every safety-net write in this repo is being dropped.
+# Advisory only — the next writer reclaims a stale lock on its own, and this
+# must never block loading.
+if [ -d "$repo/.claude/.handoff_write.lock" ]; then
+  echo "⚠️  handoff: a write lock is left over at .claude/.handoff_write.lock — a previous writer was killed before it could release it. Until it ages out (HANDOFF_LOCK_STALE_SECS, default 300s), SessionEnd/PreCompact safety-net writes in this repo are being SKIPPED, so the handoff can go stale without any sign. If no writer is running now: rmdir '$repo/.claude/.handoff_write.lock'"
+  echo
+fi
+
 if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ]; then
   if [ -n "$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | head -n 1 || true)" ] \
      || [ -n "$(find "$repo/.claude/handoff_backups" -maxdepth 1 -name 'handoff_raw_*.md' -type f 2>/dev/null | head -n 1 || true)" ]; then
