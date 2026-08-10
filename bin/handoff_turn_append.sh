@@ -289,7 +289,11 @@ fi
 lock_mkdir="${lock_mkdir:-}"
 lock_mkdir_held="${lock_mkdir_held:-0}"
 tmp_cursor=""; tmp_ctx=""; tmp_tokens=""; tmp_model=""
-# shellcheck disable=SC2329  # invoked indirectly by the EXIT trap below
+# Both codes: shellcheck names this same "invoked only via trap" situation
+# SC2329 from 0.11 and SC2317 before it, and CI's runner is older than a
+# typical dev machine — suppressing only one makes the gate pass locally and
+# fail in CI (it did).
+# shellcheck disable=SC2329,SC2317  # invoked indirectly by the EXIT trap below
 ta_cleanup() {
   if (( ${lock_mkdir_held:-0} )); then rmdir "$lock_mkdir" 2>/dev/null || true; fi
   rm -f "${tmp_cursor:-}" "${tmp_ctx:-}" "${tmp_tokens:-}" "${tmp_model:-}" 2>/dev/null || true

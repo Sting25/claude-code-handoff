@@ -50,4 +50,11 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: ShellCheck all scripts
-        run: shellcheck bin/*.sh tests/*.sh install.sh
+        # Print the version first: the runner's shellcheck is typically older
+        # than a developer's, and the two name some checks differently (the
+        # trap-only-invocation warning is SC2329 from 0.11 and SC2317 before
+        # it). When this job fails on a tree that is clean locally, the
+        # version line is the first thing to look at.
+        run: |
+          shellcheck --version
+          shellcheck bin/*.sh tests/*.sh install.sh
