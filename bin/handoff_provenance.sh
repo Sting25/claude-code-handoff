@@ -153,6 +153,16 @@ handoff_resolve_root() {  # [payload_cwd]
   else
     anchor="$PWD" via="pwd"
   fi
+  # Absolutize the anchor. `-d` passes for a RELATIVE value (`.`, `..`, a
+  # subdir name), and off-git the anchor becomes HANDOFF_ROOT verbatim — so a
+  # relative CLAUDE_PROJECT_DIR made every downstream path `./.claude/…`,
+  # resolved against whatever cwd each hook happened to have. It also made the
+  # doc's recorded root disagree with handoff_session_start.sh's own
+  # comparison, which resolves via `pwd -P`, producing a spurious
+  # moved-project warning. `pwd -P` here matches that comparison exactly; if
+  # the cd fails the original value is kept rather than losing the anchor.
+  anchor="$(cd "$anchor" 2>/dev/null && pwd -P)" || anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [ -n "$anchor" ] || anchor="$PWD"
   HANDOFF_ROOT_ANCHOR="$anchor"
   HANDOFF_ROOT_VIA="$via"
   HANDOFF_ROOT="$anchor"

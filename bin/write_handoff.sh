@@ -522,10 +522,12 @@ if (( RESTAMP )); then
         cat
       fi > "$restamp_tmp"
   chmod 600 "$restamp_tmp" 2>/dev/null || true
+  restamp_signed=0
   if mac="$(handoff_mac_compute "$restamp_tmp" ensure)"; then
     printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$restamp_tmp"
     mv -f "$restamp_tmp" "$handoff_path"
     restamp_tmp=""   # published; nothing left for the EXIT trap to remove
+    restamp_signed=1
   else
     echo "write_handoff.sh: --restamp: cannot sign (openssl or the per-machine secret unavailable); the rules layer will load as reference data, not binding." >&2
   fi
@@ -535,7 +537,15 @@ if (( RESTAMP )); then
     rmdir "$write_lock_dir" 2>/dev/null || true
     write_lock_held=0
   fi
-  echo "$handoff_path"
+  # The path on stdout is this script's "the job was done" signal, and every
+  # caller keys on it — so it is only printed when the document was actually
+  # re-signed. Printing it after a failed sign is the same lie the safety-net
+  # skip used to tell: the /handoff skill would report success while the next
+  # session silently loaded the rules as data. The stderr warning above is the
+  # only output on that path. Exit stays 0 — this is best-effort by design.
+  if (( restamp_signed )); then
+    echo "$handoff_path"
+  fi
   exit 0
 fi
 

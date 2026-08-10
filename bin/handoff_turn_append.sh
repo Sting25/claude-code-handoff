@@ -272,8 +272,30 @@ else
       exit 0
     fi
   fi
-  trap 'rmdir "$lock_mkdir" 2>/dev/null || true' EXIT
+  lock_mkdir_held=1
 fi
+
+# One EXIT trap owns all cleanup from here (traps REPLACE each other, so a
+# second `trap … EXIT` would silently drop the first — the same discipline
+# write_handoff.sh states in its own trap comment). It releases the mkdir lock
+# when this run took one, and removes any sidecar tmp still unmoved.
+#
+# The sidecar tmps are the addition: tmp_cursor / tmp_ctx / tmp_tokens /
+# tmp_model are mktemp'd and then mv'd into place, and a hard kill or ENOSPC
+# in that window stranded one. Nothing reaped them — the prune below deletes
+# only exact sidecar names, and the statusline's 7-day janitor deliberately
+# excludes the .XXXXXX suffix. Litter only, but it accumulated in a directory
+# the user is told to ignore.
+lock_mkdir="${lock_mkdir:-}"
+lock_mkdir_held="${lock_mkdir_held:-0}"
+tmp_cursor=""; tmp_ctx=""; tmp_tokens=""; tmp_model=""
+# shellcheck disable=SC2329  # invoked indirectly by the EXIT trap below
+ta_cleanup() {
+  if (( ${lock_mkdir_held:-0} )); then rmdir "$lock_mkdir" 2>/dev/null || true; fi
+  rm -f "${tmp_cursor:-}" "${tmp_ctx:-}" "${tmp_tokens:-}" "${tmp_model:-}" 2>/dev/null || true
+  return 0
+}
+trap ta_cleanup EXIT
 
 # Keep the mkdir-lock fresh OUTSIDE the append loop too. The stale reclaim
 # above is purely mtime-based, and the loop's periodic touch only starts once
