@@ -142,8 +142,22 @@ nothing gets lost across the restart boundary.
    pruning (3 newest) — no action needed from you in the normal path.
    If the file is **missing**, fall through to "Raw dump fallback" below.
 
-5. Print the banner verbatim. Do NOT skip, soften, or shrink this. Use
-   the exact format below — the borders are deliberate width:
+5. Determine how this session is running, so the banner tells the user
+   an action they can actually take (the CLI's "Ctrl+D, then `claude`"
+   is meaningless in the desktop app, and vice versa):
+
+   ```bash
+   printf '%s\n' "${CLAUDE_CODE_ENTRYPOINT:-unknown}"
+   ```
+
+   Then print the banner verbatim. Do NOT skip, soften, or shrink it.
+   Use the exact format below — the borders are deliberate width — and
+   substitute the `action:` block for the detected mode:
+
+   - Output `cli` → use the **terminal** action block.
+   - Any other value (or empty/unknown, or the check failed) → print
+     **both** action blocks, desktop first. Wrong-mode advice is the
+     failure to avoid; two extra lines is the acceptable cost.
 
    ```
    -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-
@@ -153,11 +167,18 @@ nothing gets lost across the restart boundary.
    handoff written to: <path the script printed>
    raw dump written to: <path of the raw-dump file>
 
-   action:  hit Ctrl+D to exit, then run `claude` to start a fresh
-            session. The SessionStart hook in ~/.claude/settings.json
-            auto-loads the handoff. Do NOT use `claude --continue` —
-            that resumes this same saturated context, which defeats
-            the purpose of the handoff.
+   action:  [terminal] hit Ctrl+D to exit, then run `claude` to start
+            a fresh session. Do NOT use `claude --continue` — that
+            resumes this same saturated context, which defeats the
+            purpose of the handoff.
+
+   action:  [desktop app] start a New Session (new-session button or
+            Cmd/Ctrl+N) in this same project folder. Do NOT continue
+            or resume this conversation — that reopens the saturated
+            context the handoff exists to retire.
+
+   (Either way, the SessionStart hook in ~/.claude/settings.json
+   auto-loads the handoff into the fresh session.)
 
    -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-
    ```
