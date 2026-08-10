@@ -119,34 +119,76 @@ mkdir -p "$backup_dir"
 if (( in_git )) \
    && [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]] \
    && ! git -C "$repo_root" check-ignore -q ".claude/handoff_backups/" 2>/dev/null; then
-  gi="$repo_root/.gitignore"
-  # Don't append through a symlinked .gitignore (a malicious repo could point it
-  # at a victim file). If it's a symlink, skip the bootstrap — the dump is still
-  # protected by the backup-dir symlink guard above, and worst case it shows up
-  # in `git status` rather than leaking.
-  if [[ ! -L "$gi" ]]; then
-    existed=1; [[ -e "$gi" ]] || existed=0
-    # Best-effort append. An UNWRITABLE .gitignore (root-owned, chmod a-w, a
-    # shared checkout) used to abort the whole hook right here under set -e —
-    # before the lock, the dump write, and the ctx sidecars — on EVERY Stop
-    # fire, silently ('2>/dev/null || true' wiring). The bootstrap is a
-    # nicety, not a dependency of the dump: on failure warn and continue,
-    # accepting the same degraded outcome as the symlink skip above (the
-    # backup dir shows in `git status`). Commands in an `if` condition are
-    # exempt from set -e, so the group can fail without killing the script.
-    if {
-         if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
-           printf '\n' >> "$gi"
-         fi
-         echo ".claude/handoff_backups/" >> "$gi"
-       } 2>/dev/null; then
-      # A .gitignore is not secret; don't let the script-wide `umask 077` leave a
-      # freshly-created one 0600 (see write_handoff.sh). Only normalize a file WE
-      # just created; never touch one the user already had.
-      (( existed )) || chmod 644 "$gi" 2>/dev/null || true
-    else
-      echo "handoff_turn_append.sh: cannot append to $gi; skipping .gitignore bootstrap (the backup dir may show in git status)." >&2
+  # Serialize the check-then-append against write_handoff.sh, which runs the
+  # SAME bootstrap: a SessionEnd write and a final Stop fire can land together,
+  # and unserialized both pass check-ignore and both append — a duplicate
+  # .gitignore line, or interleaved partial writes. Both scripts take this
+  # shared mkdir lock around their check+append. On lock-miss skip silently:
+  # the peer is bootstrapping right now, and if it somehow fails the next
+  # fire retries. mkdir/rmdir never follow a symlink, so a planted link at
+  # the lock path can't be written through — it just reads as "held" (its
+  # rmdir fails) and the bootstrap is skipped, same degraded-but-safe outcome
+  # as the symlinked-.gitignore skip below. No staleness machinery is needed
+  # for a micro-critical-section this small, but a holder that died mid-append
+  # (hard kill skips cleanup) would wedge the bootstrap forever — so reclaim
+  # a lock older than the same generous window the session lock uses.
+  gi_lock="$repo_root/.claude/.handoff_gitignore.lock"
+  gi_held=0
+  if mkdir "$gi_lock" 2>/dev/null; then
+    gi_held=1
+  else
+    gi_stale="${HANDOFF_LOCK_STALE_SECS:-300}"
+    gi_mtime="$(stat -c %Y "$gi_lock" 2>/dev/null \
+                || stat -f %m "$gi_lock" 2>/dev/null || echo 0)"
+    gi_now="$(date +%s)"
+    if [[ "$gi_mtime" =~ ^[0-9]+$ ]] \
+       && (( gi_now - gi_mtime >= gi_stale )) \
+       && rmdir "$gi_lock" 2>/dev/null \
+       && mkdir "$gi_lock" 2>/dev/null; then
+      gi_held=1
     fi
+  fi
+  # Re-check under the lock: the peer may have completed the bootstrap between
+  # our unlocked fast-path check above and our acquisition. Without this the
+  # lock alone still yields a duplicate line — only a check made while HOLDING
+  # the lock can be acted on atomically.
+  if (( gi_held )) \
+     && ! git -C "$repo_root" check-ignore -q ".claude/handoff_backups/" 2>/dev/null; then
+    gi="$repo_root/.gitignore"
+    # Don't append through a symlinked .gitignore (a malicious repo could point it
+    # at a victim file). If it's a symlink, skip the bootstrap — the dump is still
+    # protected by the backup-dir symlink guard above, and worst case it shows up
+    # in `git status` rather than leaking.
+    if [[ ! -L "$gi" ]]; then
+      existed=1; [[ -e "$gi" ]] || existed=0
+      # Best-effort append. An UNWRITABLE .gitignore (root-owned, chmod a-w, a
+      # shared checkout) used to abort the whole hook right here under set -e —
+      # before the lock, the dump write, and the ctx sidecars — on EVERY Stop
+      # fire, silently ('2>/dev/null || true' wiring). The bootstrap is a
+      # nicety, not a dependency of the dump: on failure warn and continue,
+      # accepting the same degraded outcome as the symlink skip above (the
+      # backup dir shows in `git status`). Commands in an `if` condition are
+      # exempt from set -e, so the group can fail without killing the script.
+      if {
+           if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
+             printf '\n' >> "$gi"
+           fi
+           echo ".claude/handoff_backups/" >> "$gi"
+         } 2>/dev/null; then
+        # A .gitignore is not secret; don't let the script-wide `umask 077` leave a
+        # freshly-created one 0600 (see write_handoff.sh). Only normalize a file WE
+        # just created; never touch one the user already had.
+        (( existed )) || chmod 644 "$gi" 2>/dev/null || true
+      else
+        echo "handoff_turn_append.sh: cannot append to $gi; skipping .gitignore bootstrap (the backup dir may show in git status)." >&2
+      fi
+    fi
+  fi
+  # Release promptly — this micro-lock must not ride the EXIT trap (the
+  # session mkdir-lock branch below installs its own trap, which would
+  # replace any set here). No exit path exists between acquire and here.
+  if (( gi_held )); then
+    rmdir "$gi_lock" 2>/dev/null || true
   fi
 fi
 
