@@ -885,7 +885,7 @@ unpatch_settings() {
 # loudly here. Exit non-zero if anything is broken so CI / a wrapper can detect
 # it. (issue #21)
 doctor() {
-  local broken=0 dst tgt name mdl
+  local broken=0 dst tgt name mdl secret smode
   echo "doctor: checking installed handoff hooks under $claude_home/bin"
   # jq is a RUNTIME dependency of the Stop hook (payload parsing), the ctx
   # nudge, and the /handoff-recover tail rescue — a resolving script link is
@@ -920,6 +920,38 @@ doctor() {
       broken=$((broken + 1))
     fi
   done
+  # Secret-file hygiene. The per-machine HMAC secret is what makes a
+  # handoff's rules layer load as BINDING (issue #42): group/other-readable,
+  # any local reader can forge the trailer; a symlink at the path could be
+  # planted to point key generation somewhere attacker-readable (the signer
+  # refuses it, silently degrading to unsigned). Same effective path as the
+  # runtime and remove_secret_if_ours: the HANDOFF_SECRET_FILE override wins
+  # over the default under $claude_home — doctor is read-only, so unlike
+  # uninstall it can safely inspect an overridden location. Absent is NOT an
+  # error: the secret is minted lazily on the first signed write.
+  secret="${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}"
+  if [[ -L "$secret" ]]; then
+    echo "  BROKEN  $secret is a symlink (possibly planted) — the signer refuses it;"
+    echo "          remove the link: rm '$secret' (a fresh secret is generated on the next signed write)"
+    broken=$((broken + 1))
+  elif [[ -f "$secret" ]]; then
+    # Portable mode read: GNU stat -c %a with BSD stat -f %Lp fallback.
+    smode="$(stat -c %a "$secret" 2>/dev/null || stat -f %Lp "$secret" 2>/dev/null)" || smode=""
+    if [[ "$smode" =~ ^[0-7]+$ ]] && (( 8#$smode & 8#77 )); then
+      echo "  BROKEN  $secret is group/other-readable (mode $smode) — the HMAC key is"
+      echo "          exposed to other local users; run: chmod 600 '$secret'"
+      broken=$((broken + 1))
+    else
+      echo "  ok      $secret (regular file, mode ${smode:-unreadable}, no group/other access)"
+    fi
+  elif [[ -e "$secret" ]]; then
+    # Exists but is not a regular file (directory, fifo, ...): the signer
+    # can't use it, so signing is silently disabled — that's breakage.
+    echo "  BROKEN  $secret exists but is not a regular file — signing is silently disabled"
+    broken=$((broken + 1))
+  else
+    echo "  note    $secret absent — generated on first signed write (not an error)"
+  fi
   echo
   # statusLine wiring report — informational only, never counts toward
   # `broken`: an unwired or user-owned statusLine is a legitimate state (we
