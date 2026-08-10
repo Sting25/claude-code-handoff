@@ -54,6 +54,18 @@ HANDOFF_BIND_BEGIN='<!-- HANDOFF_BIND_BEGIN -->'
 HANDOFF_BIND_END='<!-- HANDOFF_BIND_END -->'
 HANDOFF_MAC_PREFIX='<!-- HANDOFF_HMAC: '
 
+# The section headings write_handoff.sh emits IMMEDIATELY after each of its
+# own BIND_BEGIN lines. They are the shape that tells a legitimate,
+# writer-opened region apart from one a later editor introduced — see
+# handoff_guard_bind_regions. Defined here (and defaulted in write_handoff.sh
+# for the lib-absent install) so the emitter and the guard can never drift.
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+HANDOFF_PIN_HEADING='## 📌 Pinned — carried forward every handoff'
+# shellcheck disable=SC2034
+HANDOFF_RULES_HEADING='## Rules (fences — carried into the next session)'
+# shellcheck disable=SC2034
+HANDOFF_NOTES_HEADING='## Notes from this session'
+
 handoff_secret_path() {
   printf '%s\n' "${HANDOFF_SECRET_FILE:-$HOME/.claude/handoff_secret}"
 }
@@ -390,6 +402,56 @@ handoff_sanitize_markers() {
     -e 's/^<!-- HANDOFF_BIND_END -->[[:space:]]*$/«HANDOFF_BIND_END» (defanged: embedded content may not close a rules region)/' \
     -e 's/^(<!-- HANDOFF_HMAC: [0-9a-f]{64} -->)[[:space:]]*$/«\1» (defanged: not a provenance stamp)/' \
     || echo "⚠️  handoff: marker-sanitize filter failed — embedded content above may be truncated"
+}
+
+# Re-establish "only the writer may open a bind region" over a document that
+# has been EDITED since it was built, then re-signed (`write_handoff.sh
+# --restamp`). handoff_sanitize_markers protects content the writer embeds at
+# build time; this protects the whole document at restamp time, which is the
+# other half of the same invariant.
+#
+# Why it is needed: the /handoff skill has the model rewrite the Notes block
+# and then restamps. Restamp signs whatever bytes are on disk, so a matched
+# BIND_BEGIN/END pair written into Notes — by a model steered by prompt
+# injection in anything it read this session — would be signed here, pass
+# provenance, and load into the NEXT session as verified binding rules.
+#
+# The rule: a BEGIN is kept only when the very next line is one of the
+# writer's own section headings (the writer always emits the heading directly
+# after the marker), an END only when a kept region is open, and NOTHING is
+# kept at or after the Notes heading — the region below it is model-authored
+# by design and must stay on the data tier. Everything else is rewritten to
+# the same visibly-defanged form handoff_sanitize_markers uses. Reads stdin,
+# writes stdout.
+handoff_guard_bind_regions() {
+  LC_ALL=C awk \
+    -v begin_m="$HANDOFF_BIND_BEGIN" \
+    -v end_m="$HANDOFF_BIND_END" \
+    -v pin_h="$HANDOFF_PIN_HEADING" \
+    -v rules_h="$HANDOFF_RULES_HEADING" \
+    -v notes_h="$HANDOFF_NOTES_HEADING" \
+    -v begin_d='«HANDOFF_BIND_BEGIN» (defanged: only write_handoff.sh may open a rules region)' \
+    -v end_d='«HANDOFF_BIND_END» (defanged: only write_handoff.sh may close a rules region)' '
+    {
+      # A BEGIN is held for one line so its successor can be inspected.
+      if (held) {
+        held = 0
+        if ($0 == pin_h || $0 == rules_h) { print begin_m; inside = 1 }
+        else { print begin_d }
+      }
+      if ($0 == notes_h) { untrusted = 1 }
+      if ($0 == begin_m) {
+        if (untrusted || inside) print begin_d; else held = 1
+        next
+      }
+      if ($0 == end_m) {
+        if (untrusted || !inside) print end_d; else { print end_m; inside = 0 }
+        next
+      }
+      print
+    }
+    END { if (held) print begin_d }
+  ' || echo "⚠️  handoff: bind-region guard failed — content above may be truncated"
 }
 
 # Extract the BIND-marked regions (marker lines excluded, single-line

@@ -94,6 +94,11 @@ fi
 HANDOFF_BIND_BEGIN="${HANDOFF_BIND_BEGIN:-<!-- HANDOFF_BIND_BEGIN -->}"
 HANDOFF_BIND_END="${HANDOFF_BIND_END:-<!-- HANDOFF_BIND_END -->}"
 HANDOFF_MAC_PREFIX="${HANDOFF_MAC_PREFIX:-<!-- HANDOFF_HMAC: }"
+# Section headings emitted directly after our own BIND markers; the restamp
+# guard uses them to tell a writer-opened region from an editor-opened one.
+HANDOFF_PIN_HEADING="${HANDOFF_PIN_HEADING:-## 📌 Pinned — carried forward every handoff}"
+HANDOFF_RULES_HEADING="${HANDOFF_RULES_HEADING:-## Rules (fences — carried into the next session)}"
+HANDOFF_NOTES_HEADING="${HANDOFF_NOTES_HEADING:-## Notes from this session}"
 
 # Can this run sign at all? Gates every signing call site below.
 can_sign() {
@@ -376,8 +381,10 @@ write_lock_held=0
 gitignore_lock=""
 gitignore_lock_held=0
 handoff_tmp=""
+restamp_tmp=""
 cleanup() {
   if [[ -n "${handoff_tmp:-}" ]]; then rm -f "$handoff_tmp" 2>/dev/null || true; fi
+  if [[ -n "${restamp_tmp:-}" ]]; then rm -f "$restamp_tmp" 2>/dev/null || true; fi
   if (( ${write_lock_held:-0} )); then rmdir "$write_lock_dir" 2>/dev/null || true; fi
   if (( ${gitignore_lock_held:-0} )); then rmdir "$gitignore_lock" 2>/dev/null || true; fi
   return 0
@@ -400,19 +407,33 @@ if (( RESTAMP )); then
     echo "$handoff_path"
     exit 0
   fi
-  if mac="$(handoff_mac_compute "$handoff_path" ensure)"; then
-    restamp_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
-    trap 'rm -f "$restamp_tmp"' EXIT
-    {
-      # Strip only a well-formed trailer (matching handoff_mac_compute), so a
-      # prose line that merely starts with the prefix is preserved and stays
-      # covered by the digest. `|| true`: grep -v exits 1 on an all-stripped
-      # (empty) doc, which under set -e/pipefail would abort the restamp.
-      LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$handoff_path" || true
-      printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac"
-    } > "$restamp_tmp"
-    chmod 600 "$restamp_tmp" 2>/dev/null || true
+  # Build the body to be signed, THEN sign it — the document has been edited
+  # since it was written (that is why a restamp is needed), so the bytes must
+  # be brought back under the writer-only bind invariant before a signature
+  # vouches for them. Signing the on-disk bytes first would stamp whatever the
+  # editor left, including a BIND marker pair smuggled into the Notes block.
+  restamp_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
+  {
+    # Strip only a well-formed trailer (matching handoff_mac_compute), so a
+    # prose line that merely starts with the prefix is preserved and stays
+    # covered by the digest. `|| true`: grep -v exits 1 on an all-stripped
+    # (empty) doc, which under set -e/pipefail would abort the restamp.
+    LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$handoff_path" || true
+  } | if type handoff_guard_bind_regions >/dev/null 2>&1; then
+        handoff_guard_bind_regions
+      else
+        # Stale lib (a copy-mode ~/.claude/bin predating the guard). Pass the
+        # body through unchanged rather than emptying the document; the result
+        # is the pre-guard behavior, so warn that this restamp can promote
+        # edited content into the binding tier.
+        echo "write_handoff.sh: --restamp: installed handoff_provenance.sh predates the bind-region guard; re-run install.sh to restore it." >&2
+        cat
+      fi > "$restamp_tmp"
+  chmod 600 "$restamp_tmp" 2>/dev/null || true
+  if mac="$(handoff_mac_compute "$restamp_tmp" ensure)"; then
+    printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$restamp_tmp"
     mv -f "$restamp_tmp" "$handoff_path"
+    restamp_tmp=""   # published; nothing left for the EXIT trap to remove
   else
     echo "write_handoff.sh: --restamp: cannot sign (openssl or the per-machine secret unavailable); the rules layer will load as reference data, not binding." >&2
   fi
@@ -827,7 +848,7 @@ EOF
     if (( pin_bindable )); then
       printf '%s\n' "$HANDOFF_BIND_BEGIN"
     fi
-    printf '## 📌 Pinned — carried forward every handoff\n\n'
+    printf '%s\n\n' "$HANDOFF_PIN_HEADING"
     if (( ! pin_bindable )); then
       printf '_Note: the pin file is TRACKED in git, so it may have arrived with a\n'
       printf 'clone — it loads as reference data, not binding rules. Untrack it\n'
@@ -958,13 +979,13 @@ EOF
   # stray "next session should..." sentence can't become law — and even
   # marked content binds only when the document's provenance verifies.
   printf '%s\n' "$HANDOFF_BIND_BEGIN"
-  printf '## Rules (fences — carried into the next session)\n\n'
+  printf '%s\n\n' "$HANDOFF_RULES_HEADING"
   printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
   printf '%s\n' "$HANDOFF_BIND_END"
   printf '\n'
   echo '---'
   echo
-  printf '## Notes from this session\n\n'
+  printf '%s\n\n' "$HANDOFF_NOTES_HEADING"
   printf '%s\n' "$HANDOFF_PLACEHOLDER_SENTINEL"
   printf '\n'
   printf '_The /handoff skill should replace this entire block (sentinel\n'
