@@ -28,7 +28,21 @@
 # a normal "nothing to recover," not an error.
 #
 # Test/override env vars:
-#   HANDOFF_BACKUP_DIR          override the backup dir (default <repo>/.claude/handoff_backups)
+#   HANDOFF_BACKUP_DIR          override where THIS SCRIPT looks for the cursor
+#                               file (default <repo>/.claude/handoff_backups).
+#                               Scoped to this reader ONLY: the Stop hook
+#                               (handoff_turn_append.sh), handoff_ctx_check.sh,
+#                               handoff_compact_reset.sh, and
+#                               handoff_statusline.sh each resolve the backup
+#                               dir independently and do NOT honor this var, so
+#                               setting it does not relocate where those hooks
+#                               WRITE — it exists for tests that stage a cursor
+#                               file at a throwaway path, not for relocating
+#                               the backup directory project-wide. Pointing it
+#                               anywhere but the real write location desyncs
+#                               this script from its own cursor file; see the
+#                               "cursor missing but dump present" warning below
+#                               for the detectable symptom.
 #   HANDOFF_RECOVER_TRANSCRIPT  use this exact JSONL path (skip the projects-dir search)
 #   HANDOFF_PROJECTS_DIR        projects root to search (default $HOME/.claude/projects)
 
@@ -87,6 +101,12 @@ else
   backup_dir="$repo_root/.claude/handoff_backups"
 fi
 cursor_file="$backup_dir/.handoff_raw_${session_id}.cursor"
+# Companion dump file. handoff_turn_append.sh writes it FIRST (creating the
+# dump on its first fire), appends the turn, then writes the cursor last
+# (tmp+mv) — so in the normal case the two exist or don't exist together.
+# That makes the dump a witness for a suspiciously-missing cursor below: see
+# the cursor-read block.
+dump_file="$backup_dir/handoff_raw_${session_id}.md"
 
 # --- Locate the transcript JSONL ---
 # Session ids are globally-unique UUIDs, so glob the projects tree for
@@ -115,6 +135,22 @@ cursor=0
 if [[ -f "$cursor_file" ]]; then
   cursor="$(cat "$cursor_file" 2>/dev/null || echo 0)"
   [[ "$cursor" =~ ^[0-9]+$ ]] || cursor=0
+elif [[ -f "$dump_file" ]]; then
+  # cursor=0 is meant for "nothing has been captured yet" (a legitimate first
+  # run). A dump WITHOUT a cursor is a different situation: the dump can only
+  # exist because the Stop hook already ran, and the Stop hook always writes
+  # the cursor in that same run — so the cursor almost certainly exists
+  # somewhere else, most likely because HANDOFF_BACKUP_DIR (see header) points
+  # away from where the Stop hook actually wrote. Silently falling through to
+  # cursor=0 here is the exact bug this guards against: the WHOLE session then
+  # gets formatted below and printed under the "Recovered tail" header,
+  # indistinguishable from a genuine crash-tail rescue, and /handoff-recover
+  # folds a duplicate of already-captured turns into curated Notes. Cursor
+  # still defaults to 0 (a duplicate re-emit is a human-recoverable annoyance;
+  # guessing a wrong non-zero cursor and silently dropping real tail turns
+  # would not be), but the warning gives the caller the signal needed to
+  # notice and fix the actual cause instead of trusting a false "recovered".
+  echo "handoff_recover_tail.sh: WARNING: $dump_file exists but its cursor file ($cursor_file) does not — proceeding with cursor=0 would re-emit the ENTIRE session as 'recovered tail', including turns already captured in the dump. Check whether HANDOFF_BACKUP_DIR is set to something other than where the Stop hook actually writes." >&2
 fi
 
 # Count transcript lines. `awk 'END{print NR}'` counts a final line even when it

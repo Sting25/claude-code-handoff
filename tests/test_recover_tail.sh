@@ -109,4 +109,36 @@ out="$(HANDOFF_BACKUP_DIR="$bd" HANDOFF_RECOVER_TRANSCRIPT="$tx" bash "$RT" SID 
 check "tail tool call rendered" yes "$(has "$out" '`Bash`')"
 rm -rf "$work"
 
+# --- M-7: dump present but cursor missing -> WARNING, not a silent cursor=0 -
+# Distinguishes "no Stop hook has EVER fired" (legitimate cursor=0, covered
+# above) from "the Stop hook fired and wrote a dump, but this script is
+# reading the WRONG backup dir for the cursor" (the documented failure mode:
+# HANDOFF_BACKUP_DIR pointing somewhere other than where the writers actually
+# wrote). Both look identical at the cursor-file level (missing), but only the
+# second one has a dump sitting right next to where the cursor should be —
+# and treating them the same means the whole session gets silently re-emitted
+# as "recovered tail" over an already-captured session.
+work="$(mktemp -d)"; mk_fixture "$work"
+bd="$work/bd"; tx="$work/tx.jsonl"
+must bash -c "cat > '$tx'" <<'EOF'
+{"type":"user","message":{"content":"already captured elsewhere"}}
+EOF
+: > "$bd/handoff_raw_SID.md"   # dump exists; its cursor does not
+err="$(HANDOFF_BACKUP_DIR="$bd" HANDOFF_RECOVER_TRANSCRIPT="$tx" bash "$RT" SID 2>&1 1>/dev/null)"
+check "dump-without-cursor -> warns"           yes "$(has "$err" "WARNING")"
+check "dump-without-cursor -> names dump file" yes "$(has "$err" "handoff_raw_SID.md")"
+rm -rf "$work"
+
+# --- M-7 (negative control): dump absent too -> the ordinary no-cursor path,
+#     no anomaly warning (this is the "sole prompt NEVERCAPTURED" case above,
+#     re-asserted here specifically for stderr silence on the warning text) --
+work="$(mktemp -d)"; mk_fixture "$work"
+bd="$work/bd"; tx="$work/tx.jsonl"
+must bash -c "cat > '$tx'" <<'EOF'
+{"type":"user","message":{"content":"first run, nothing captured yet"}}
+EOF
+err="$(HANDOFF_BACKUP_DIR="$bd" HANDOFF_RECOVER_TRANSCRIPT="$tx" bash "$RT" SID 2>&1 1>/dev/null)"
+check "no dump, no cursor -> no anomaly warning" no "$(has "$err" "WARNING")"
+rm -rf "$work"
+
 finish
