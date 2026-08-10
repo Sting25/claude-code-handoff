@@ -681,6 +681,16 @@ file_mtime_stamp() {
   fi
 }
 
+# Is <path> a name the atomic claim below may aim `mv -n` at — i.e. free, or
+# occupied by a regular file (which `mv -n` will refuse, leaving the source
+# put)? Anything else — a directory, a fifo, a dangling symlink — is NOT a
+# claimable destination; see the loop for what goes wrong when one is used.
+# A symlink TO a regular file counts as claimable: `mv -n` sees an existing
+# destination and refuses it, which is the outcome we want anyway.
+claimable_archive_name() {  # <path>
+  [[ ! -e "$1" && ! -L "$1" ]] || [[ -f "$1" ]]
+}
+
 rotate_existing_handoff() {
   [[ -f "$handoff_path" ]] || return 0
   # An outgoing UNEDITED placeholder is deleted, not archived: it carries no
@@ -721,12 +731,43 @@ rotate_existing_handoff() {
   # attempts the failure is something else (EPERM, ENOSPC — where mv also
   # leaves the source, for a different reason); fall through to a plain loud
   # mv so the real error surfaces under set -e instead of spinning forever.
+  #
+  # "Source disappeared" is only a valid win signal when the candidate name was
+  # CLAIMABLE to begin with. `mv -n` refuses to overwrite an existing file, but
+  # a DIRECTORY is not an overwrite: `mv -n file dir` moves the file INTO it and
+  # succeeds, so the source vanishes and the loop reads it as a win. The
+  # rotation then chmod 600's the directory, stripping its traverse bit, and the
+  # curated snapshot is sealed inside a name no `-type f` consumer can reach —
+  # prune_history, handoff_session_start's history fallback and /handoff-more
+  # all walk right past it. Silent loss of exactly the file retention exists to
+  # keep. The probe-then-mv code this replaced got that right by accident
+  # (`[[ -e ]]` is true for a directory, so it bumped to _2); the atomic claim
+  # must get it right on purpose, WITHOUT giving up the claim — the TOCTOU it
+  # closed was two concurrent rotations both finding the same name free, and
+  # that race is still live. So the probe here is narrow: it only rules out
+  # names that are not regular files, and every free-name claim still goes
+  # through `mv -n`. Nothing in this system ever creates a non-file under
+  # handoff_history/ — these arrive from outside (a restore that unpacked a
+  # tree, a user's mkdir, a stray checkout), so there is no writer to race the
+  # probe against.
   local n=1 attempts=0 candidate="$archived"
   while :; do
-    mv -n "$handoff_path" "$candidate" 2>/dev/null || true
-    [[ -e "$handoff_path" ]] || break        # source gone -> claim succeeded
+    if claimable_archive_name "$candidate"; then
+      mv -n "$handoff_path" "$candidate" 2>/dev/null || true
+      [[ -e "$handoff_path" ]] || break      # source gone -> claim succeeded
+    fi
     attempts=$((attempts + 1))
     if (( attempts >= 50 )); then
+      # Out of attempts. If the name is claimable, the blocker is a real errno,
+      # so move LOUDLY and let set -e surface it. If it is not, moving is the
+      # corruption described above — abort the whole write instead. Aborting is
+      # the safe direction: the publish below never runs, so handoff_current.md
+      # keeps its curated prose (unrotated) rather than being overwritten by a
+      # mechanical snapshot whose predecessor we just failed to archive.
+      if ! claimable_archive_name "$candidate"; then
+        echo "write_handoff.sh: cannot rotate $handoff_relpath — 50 candidate names under $history_relpath are occupied by non-files; refusing to move the handoff into one. Clear them and re-run." >&2
+        exit 1
+      fi
       mv "$handoff_path" "$candidate"        # loud; aborts under set -e on a real error
       break
     fi

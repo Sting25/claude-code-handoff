@@ -144,6 +144,35 @@ count="$(find "$hist" -maxdepth 1 -name 'handoff_2020-03-04_050607*' 2>/dev/null
 check "collision: both files survive, distinct names" 2 "$count"
 rm -rf "$repo"
 
+# --- DATA-1: a DIRECTORY at the archive name must not swallow the snapshot ---
+# The atomic claim keys on "did the source disappear", but `mv -n file dir`
+# moves the file INTO the directory and succeeds — so the claim read that as a
+# win, and the chmod 600 that follows stripped the directory's traverse bit.
+# The curated snapshot ended up sealed inside a name no `-type f` consumer
+# (prune_history, the SessionStart history fallback, /handoff-more) can reach.
+# Note the assertions deliberately avoid looking INSIDE the directory: on the
+# unfixed code it is chmod 600 and un-traversable, so a find in there returns
+# nothing and would pass vacuously. These check the reachable side instead.
+repo="$(mk_repo_gitignored)"
+hist="$repo/.claude/handoff_history"; must mkdir -p "$hist"
+must cat > "$repo/.claude/handoff_current.md" <<'EOF'
+# h
+
+## Notes from this session
+
+curated notes MARKER_DIRCLAIM
+EOF
+touch -d "2020-03-04T05:06:07Z" "$repo/.claude/handoff_current.md"   # ISO T/Z form: GNU + BSD
+must mkdir -p "$hist/handoff_2020-03-04_050607.md"    # a DIRECTORY at the archive name
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 )
+check "dir at archive name: snapshot claims the next counter" yes \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607_2.md" 2>/dev/null)" "MARKER_DIRCLAIM")"
+check "dir at archive name: snapshot visible to -type f consumers" 1 \
+  "$(find "$hist" -maxdepth 1 -type f -name 'handoff_*.md' 2>/dev/null | wc -l | tr -d ' ')"
+check "dir at archive name: directory left traversable (not chmod 600'd)" yes \
+  "$([[ -x "$hist/handoff_2020-03-04_050607.md" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
 # --- Invalid HANDOFF_HISTORY_KEEP falls back to 5 (no history wipe) ----------
 # Regression: KEEP=-1 made prune run `tail -n +0`, which on GNU deletes EVERY
 # history file (silent data loss). A negative/garbage value must clamp to the
