@@ -533,10 +533,16 @@ prune_history() {
   # deleted with no warning and no backup. Filter to the exact shape we emit:
   # `handoff_<YYYY-MM-DD>_<HHMMSS>.md`, plus the `_<N>` same-second collision
   # suffix. Anything else is someone else's file and is left untouched. (#46)
+  # LC_ALL=C on the sort: same-second collision names (handoff_<stamp>_2.md)
+  # must rank as NEWER than their base (handoff_<stamp>.md), which holds under
+  # byte collation (`_` 0x5F > `.` 0x2E) but flips under UTF-8 locale
+  # collation (measured on macOS en_US.UTF-8) — an at-the-retention-boundary
+  # prune would then delete the newer sibling and keep the older one. Same
+  # fix as handoff_session_start.sh's newest-first pick; keep them in sync.
   local f
   find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
     | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
-    | sort -r \
+    | LC_ALL=C sort -r \
     | tail -n +$((HISTORY_KEEP + 1)) \
     | while IFS= read -r f; do
         [[ -n "$f" ]] && rm -f -- "$f"

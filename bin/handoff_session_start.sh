@@ -315,7 +315,15 @@ fi
 prev=""
 if [ "$is_placeholder" = "1" ] \
    && [ "${HANDOFF_SS_DISABLE_FALLBACK:-0}" != "1" ]; then
-  prev="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | sort -r | head -1 || true)"
+  # LC_ALL=C: "newest first" here is a LEXICAL claim about the rotation names
+  # (handoff_<stamp>.md, with a _<N> suffix on same-second collisions), and it
+  # only holds under byte collation, where `_` (0x5F) > `.` (0x2E) sorts
+  # handoff_<stamp>_2.md — the newer file — ahead of handoff_<stamp>.md.
+  # UTF-8 locale collation weighs punctuation differently and flips exactly
+  # that pair (measured on macOS en_US.UTF-8), silently picking the OLDER of
+  # two same-second snapshots. (Lexical _<N> still misorders _10 vs _9 — ten
+  # rotations inside one second — which byte collation can't fix; accepted.)
+  prev="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | LC_ALL=C sort -r | head -1 || true)"
   if [ -n "$prev" ] && [ -f "$prev" ]; then
     echo
     echo "---"
