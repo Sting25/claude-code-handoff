@@ -1,7 +1,7 @@
 {
   "name": "claude-code-handoff",
   "displayName": "Claude Code Handoff",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Session-state handoff between Claude Code sessions via hooks (auto-snapshot on SessionEnd/PreCompact, auto-load on SessionStart) with HMAC-verified provenance.",
   "author": {
     "name": "Christopher Chadwick",

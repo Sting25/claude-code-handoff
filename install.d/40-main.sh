@@ -1,5 +1,16 @@
 # ------------------------------------------------------------------------ main
 
+# The dispatch lives in one brace group with the cleanup trap as its first
+# statement. Bash must parse the entire group before executing any of it, so
+# on a truncated `curl | bash` stream the trap is never armed and the parse
+# error keeps its nonzero exit (armed earlier, bash 3.2 reports rc=0 — see
+# the note above cleanup() in 00-preamble.sh). Residual gap, accepted: a
+# stream that truncates exactly at a statement boundary before this group
+# still exits 0 having installed nothing — no trap arrangement can catch
+# that; only checksum verification of the fetched script would.
+{
+trap cleanup EXIT
+
 if [[ "$mode" == doctor ]]; then
   doctor
 elif [[ "$mode" == install ]]; then
@@ -80,3 +91,4 @@ else
   echo
   echo "done. the repo at $repo_root is untouched."
 fi
+}

@@ -49,4 +49,18 @@ if [[ "$install_diff" == yes ]]; then
   echo "  Run 'bash tools/build-install.sh' and commit the result."
 fi
 
+# Unregistered-module guard (v0.14.1): a slice on disk but missing from the
+# build script's modules list would build green and never ship — the drift
+# gate rebuilds with the same list, so only the build script itself can
+# catch it. Negative control: plant a stray slice, expect the build to fail
+# and name it.
+printf '# stray slice — must fail the build\n' > "$WORKDIR/install.d/99-unregistered.sh"
+stray_out="$(cd "$WORKDIR" && bash tools/build-install.sh 2>&1)"
+stray_rc=$?
+check "unregistered install.d module fails the build" yes "$([ "$stray_rc" -ne 0 ] && echo yes || echo no)"
+stray_named="no"
+case "$stray_out" in *99-unregistered.sh*) stray_named="yes" ;; esac
+check "failure names the stray module" yes "$stray_named"
+must rm "$WORKDIR/install.d/99-unregistered.sh"
+
 finish

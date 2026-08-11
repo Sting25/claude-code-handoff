@@ -10,6 +10,71 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [0.14.1] — 2026-08-11
+
+Patch release from the post-0.14.0 adversarial review (three
+independent read-only reviewers over everything that changed in
+0.14.0, every medium finding independently reproduced before fixing).
+No hook-command or permission-entry changes — nothing to re-patch in
+`~/.claude/settings.json`; plugin installs pick this up on update,
+bare-scripts installs on `git pull` (symlink mode) or re-run
+`./install.sh` (copy mode).
+
+### Fixed
+- **Skills cache fallback picked the oldest cached plugin version
+  across a digit boundary.** The fallback loop kept the LAST glob
+  match, and glob order is lexical — `0.9.0` sorts after `0.14.0`, so
+  with both cached, every skill silently ran the older writer.
+  Reproduced against a synthetic cache, then replaced with
+  newest-mtime selection (BSD/GNU `stat` dual form, bash-3.2-safe,
+  space-safe) across all six occurrences in the three skills.
+- **A truncated piped install stream exited 0.** On bash 3.2,
+  `set -euo pipefail` plus an armed EXIT trap swallow a stream parse
+  error's status — a download cut off mid-stream reported success
+  while installing nothing (nothing harmful ran; verified). The
+  cleanup trap now arms as the first statement of the dispatch brace
+  group in `40-main.sh`, so truncation can never coexist with an armed
+  trap; bash's own rc=2 survives. New test section G pins this,
+  including a guard that fails if the trap ever moves back to the
+  preamble.
+- **Doctor could report `signing: active` while writes silently went
+  unsigned.** `signing_status_reason()` trusted `-f`/`-s`, but the
+  signer also needs the key file readable and non-empty after
+  trailing-newline stripping. The doctor now probes with the signer's
+  exact load (subshell, nothing printed — key bytes never reach
+  output), and distinguishes `not readable by this user` from
+  `is empty`. Newline-only and unreadable-secret tests added.
+- **An unregistered `install.d/` slice no longer ships silently.**
+  `tools/build-install.sh` builds from an explicit module list; a
+  slice on disk but missing from the list built green (and passed the
+  CI drift gate, which rebuilds with the same list) while never
+  shipping. The build now fails by name on any unlisted `*.sh` in
+  `install.d/`; the drift test gained a planted-stray negative
+  control.
+- **Uninstall test could pass vacuously.** The foreign-file uninstall
+  case discarded the exit code and never asserted our symlinks were
+  actually removed; a crashed uninstall passed it. Now asserts exit 0,
+  our files gone, the user's file byte-intact.
+
+### CI
+- **Least-privilege token**: `permissions: contents: read` pinned
+  workflow-wide (lint.yml already did; ci.yml jobs ran on the default
+  grant).
+- **Every tag is validated**: the trigger was `tags: ['v*']`, so a
+  mistyped tag (`0.15.0`, `release-1`) ran no CI at all;
+  `plugin-version-sync` now rejects any non-`vX.Y.Z` tag by name, and
+  its comments state plainly that tag validation is detective, not
+  preventive.
+- **CHANGELOG heading check anchored** (dots escaped): the unanchored
+  fixed-string grep was satisfied by a heading quoted in prose or a
+  code fence.
+
+### Docs
+- CHANGELOG 0.14.0 trued up against shipped code (superseded skills-
+  fallback description, tag-validation overstatement, three unclaimed
+  shipped changes recorded retroactively); README plugin cache path
+  now shows the `CLAUDE_CONFIG_DIR` qualification.
+
 ## [0.14.0] — 2026-08-11
 
 ### Added — plugin packaging (v0.14.0)
@@ -44,21 +109,43 @@ are appended).
   fails the build if `.claude-plugin/plugin.json`'s `"version"` drifts
   from the `VERSION` file, and on a tag push additionally requires the
   tag to match `VERSION` and `CHANGELOG.md` to already carry the
-  matching `## [X.Y.Z]` heading — closing the missed-tag / mismatched-
-  manifest failure mode a normal commit doesn't otherwise catch.
+  matching `## [X.Y.Z]` heading — flagging the missed-tag / mismatched-
+  manifest failure mode a normal commit doesn't otherwise catch
+  (detective, not preventive: the job runs after the tag exists).
 
 ### Added — skills dual-location script resolution
 - **`skills/handoff`, `skills/handoff-more`, `skills/handoff-recover`**
   now resolve the handoff scripts against either install mode instead
   of assuming `~/.claude/bin/`: prefer `${CLAUDE_PLUGIN_ROOT}/bin` when
   that env var is set and the script is actually there, fall back to
-  the legacy `$HOME/.claude/bin`, and — since `CLAUDE_PLUGIN_ROOT`'s
-  visibility to skill-driven Bash calls is unverified — fall back
-  further to a `$HOME/.claude/plugins/cache/*/claude-code-handoff/*/bin`
-  glob (lexically-highest match wins) before reporting the scripts as
-  not installed. Resolution and execution are kept as separate Bash
-  calls in each skill's steps, since shell state (the resolved `$hb`)
-  does not persist across calls.
+  the legacy `$HOME/.claude/bin`, and — since `CLAUDE_PLUGIN_ROOT` was
+  measured NOT to be exported to skill-driven Bash calls — fall back
+  further to a
+  `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/claude-code-handoff/*/bin`
+  glob before reporting the scripts as not installed. (As shipped in
+  0.14.0 the glob loop kept its LAST match — lexical order, which is
+  not version order; 0.14.1 replaces it with newest-mtime selection.)
+  Resolution and execution are kept as separate Bash calls in each
+  skill's steps, since shell state (the resolved `$hb`) does not
+  persist across calls.
+
+### Added — doctor, installer, and uninstall polish
+_(shipped in 0.14.0; recorded retroactively in the 0.14.1 docs true-up)_
+- **Doctor/installer signing status line.** `./install.sh --doctor` and
+  a fresh install now print one consolidated
+  `handoff signing: active | degraded: <reason> | pending: <reason>`
+  line (`signing_status_reason()`), answering "will the next handoff
+  actually be HMAC-signed" instead of leaving it implied by per-item
+  checks.
+- **`CLAUDE_CONFIG_DIR` honored.** The installer's plugin-cache
+  detection, all three skills' fallback glob, and the README statusLine
+  snippet resolve the plugin cache under
+  `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` instead of a hardcoded
+  `$HOME/.claude`.
+- **Uninstall tidies emptied directories.** `--uninstall` now `rmdir`s
+  `~/.claude/bin` and `skills/*` dirs it emptied (rmdir only, never
+  recursive — a directory holding any user file is left alone, with
+  the user's file untouched).
 
 ### Added — tests
 - **`tests/test_plugin_layout.sh`** — static `jq`-based shape

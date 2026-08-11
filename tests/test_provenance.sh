@@ -200,6 +200,31 @@ check "doctor: empty secret -> per-item check still says ok" yes \
   "$(has "$out" "ok      $dsec (regular file")"
 must rm "$dsec"
 
+# newline-only secret: -s is true but the signer's key is empty after $()
+# strips trailing newlines (handoff_mac_compute `[ -n "$key" ]`) — v0.14.0
+# reported this "active" while writes silently went unsigned (v0.14.1 fix).
+printf '\n\n' > "$dsec"
+must chmod 600 "$dsec"
+out="$(run_doctor)"
+check "doctor: newline-only secret -> signing degraded (empty)" yes \
+  "$(has "$out" "note    handoff signing: secret file ($dsec) is empty")"
+must rm "$dsec"
+
+# unreadable secret: cat fails inside the signer, so signing degrades even
+# though the file is non-empty — also reported "active" before v0.14.1.
+# Meaningless as root (mode bits don't bind root), so skip there.
+if [ "$(id -u)" -ne 0 ]; then
+  printf 'realkey\n' > "$dsec"
+  must chmod 000 "$dsec"
+  out="$(run_doctor)"
+  check "doctor: unreadable secret -> signing degraded" yes \
+    "$(has "$out" "note    handoff signing: secret file ($dsec) is not readable by this user")"
+  must chmod 600 "$dsec"
+  must rm "$dsec"
+else
+  skip "running as root — unreadable-secret case unverifiable (root ignores mode bits)"
+fi
+
 must mkdir -p "$dsec"
 out="$(run_doctor)"
 check "doctor: dir at secret path -> signing degraded" yes \

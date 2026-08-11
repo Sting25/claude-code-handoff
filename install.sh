@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 9e3d8bde0614902e7804c96357ccea632e721f105ec1777626e88267f50995ec
+# SOURCE-SHA256: b72aee4a5e94a847b104e322d43ca6da31b474e61dbb03e474e6329d0a7b52e3
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -145,7 +145,14 @@ cleanup() {
     echo "  restore $settings from $settings_backup (aborted mid-patch, rc=$rc)" >&2
   fi
 }
-trap cleanup EXIT
+# NOT armed here. A piped `curl | bash` executes top-level statements as they
+# parse, and on bash 3.2 a stream that truncates AFTER `trap ... EXIT` is
+# armed exits 0 on the resulting syntax error (set -e + EXIT trap swallow the
+# parse-error status; the trap sees $? = 0, so re-raising doesn't help).
+# Arming instead as the first statement of the dispatch group in 40-main.sh
+# means the trap only takes effect once that whole compound has parsed —
+# truncation anywhere inside it dies with bash's own rc=2, and no work
+# (so nothing needing cleanup) can have run before the trap is live.
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -1002,8 +1009,16 @@ signing_status_reason() {
   elif [[ -L "$secret" ]]; then
     echo "degraded: secret file ($secret) is a symlink — the signer refuses it"
   elif [[ -f "$secret" ]]; then
-    if [[ -s "$secret" ]]; then
+    # Probe with the signer's own load, not -s: handoff_mac_compute requires
+    # `cat` to succeed AND the key to be non-empty after $() strips trailing
+    # newlines, so an unreadable or newline-only secret passed -f/-s here
+    # ("active") while every write silently degraded to unsigned. The probe
+    # runs in a subshell and prints nothing — key bytes never reach output
+    # or this shell's state.
+    if ( k="$(cat "$secret" 2>/dev/null)" && [ -n "$k" ] ); then
       echo "active"
+    elif [[ ! -r "$secret" ]]; then
+      echo "degraded: secret file ($secret) is not readable by this user"
     else
       echo "degraded: secret file ($secret) is empty"
     fi
@@ -1168,6 +1183,17 @@ doctor() {
 
 # ------------------------------------------------------------------------ main
 
+# The dispatch lives in one brace group with the cleanup trap as its first
+# statement. Bash must parse the entire group before executing any of it, so
+# on a truncated `curl | bash` stream the trap is never armed and the parse
+# error keeps its nonzero exit (armed earlier, bash 3.2 reports rc=0 — see
+# the note above cleanup() in 00-preamble.sh). Residual gap, accepted: a
+# stream that truncates exactly at a statement boundary before this group
+# still exits 0 having installed nothing — no trap arrangement can catch
+# that; only checksum verification of the fetched script would.
+{
+trap cleanup EXIT
+
 if [[ "$mode" == doctor ]]; then
   doctor
 elif [[ "$mode" == install ]]; then
@@ -1248,3 +1274,4 @@ else
   echo
   echo "done. the repo at $repo_root is untouched."
 fi
+}

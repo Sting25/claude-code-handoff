@@ -12,6 +12,7 @@
 #      note; a jq-less plain install REFUSES up front (0.9.0 behavior —
 #      jq is a hard runtime dependency, so installing would ship a
 #      silently-dead system)
+#   G. a truncated piped install stream exits nonzero and installs nothing
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 echo "install.sh native-integration wiring (PreCompact/PostCompact/statusLine)"
@@ -91,8 +92,11 @@ run_install __ABSENT__
 printf '#!/bin/sh\necho mine\n' > "$HOME_DIR/bin/my-own-script.sh"
 src3b="$(mktemp -d)"; cp "$REPO_ROOT/install.sh" "$src3b/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src3b/"
 CLAUDE_HOME="$HOME_DIR" bash "$src3b/install.sh" --uninstall >/dev/null 2>&1
+rc3b=$?
+check "uninstall: exit 0 with foreign file present" 0  "$rc3b"
+check "uninstall: ours still removed (foreign file)" no "$([[ -e "$HOME_DIR/bin/write_handoff.sh" ]] && echo yes || echo no)"
 check "uninstall: non-empty bin/ dir kept"         yes "$([[ -d "$HOME_DIR/bin" ]] && echo yes || echo no)"
-check "uninstall: user's own bin file untouched"   yes "$([[ -f "$HOME_DIR/bin/my-own-script.sh" ]] && echo yes || echo no)"
+check "uninstall: user's own bin file untouched"   "echo mine" "$(tail -1 "$HOME_DIR/bin/my-own-script.sh" 2>/dev/null)"
 rm -rf "$HOME_DIR" "$src3b"
 
 # D2: a user's own statusLine + a co-located PreCompact user command survive.
@@ -166,5 +170,26 @@ out="$(PATH="$nojq" CLAUDE_HOME="$HOME_DIR6" bash "$src6/install.sh" 2>&1)" && r
 check "no-jq: plain install refuses (rc!=0)" yes "$([ "$rc" -ne 0 ] && echo yes || echo no)"
 check "no-jq: names jq as the reason"        yes "$(has "$out" 'jq not found')"
 rm -rf "$src6" "$HOME_DIR6" "$nojq"
+
+# --- G. truncated piped install stream fails loudly (v0.14.1) ----------------
+# On bash 3.2, set -e + an already-armed EXIT trap swallow a stream parse
+# error's status: a download truncated after `trap ... EXIT` exited 0 as if
+# the install succeeded. The fix arms the trap inside the final dispatch
+# group, so truncation can never coexist with an armed trap. Cut points:
+# just past the trap line (the exact regression), and inside the dispatch
+# tail. Both must exit nonzero and install nothing.
+tg_home="$(mktemp -d)"
+tg_total="$(wc -l < "$REPO_ROOT/install.sh" | tr -d ' ')"
+tg_trap="$(grep -n '^trap cleanup EXIT$' "$REPO_ROOT/install.sh" | head -1 | cut -d: -f1)"
+check "truncation guard: trap armed in dispatch group, not preamble" yes \
+  "$([ -n "$tg_trap" ] && [ "$tg_trap" -gt $((tg_total / 2)) ] && echo yes || echo no)"
+for tg_cut in $((tg_trap + 1)) $((tg_total - 10)); do
+  head -n "$tg_cut" "$REPO_ROOT/install.sh" | CLAUDE_HOME="$tg_home" bash >/dev/null 2>&1
+  rc=$?
+  check "truncated at line $tg_cut/$tg_total: nonzero exit" yes "$([ "$rc" -ne 0 ] && echo yes || echo no)"
+done
+check "truncated: nothing installed (no bin/)" no "$([[ -d "$tg_home/bin" ]] && echo yes || echo no)"
+check "truncated: no settings.json created"    no "$([[ -f "$tg_home/settings.json" ]] && echo yes || echo no)"
+rm -rf "$tg_home"
 
 finish

@@ -256,8 +256,16 @@ signing_status_reason() {
   elif [[ -L "$secret" ]]; then
     echo "degraded: secret file ($secret) is a symlink — the signer refuses it"
   elif [[ -f "$secret" ]]; then
-    if [[ -s "$secret" ]]; then
+    # Probe with the signer's own load, not -s: handoff_mac_compute requires
+    # `cat` to succeed AND the key to be non-empty after $() strips trailing
+    # newlines, so an unreadable or newline-only secret passed -f/-s here
+    # ("active") while every write silently degraded to unsigned. The probe
+    # runs in a subshell and prints nothing — key bytes never reach output
+    # or this shell's state.
+    if ( k="$(cat "$secret" 2>/dev/null)" && [ -n "$k" ] ); then
       echo "active"
+    elif [[ ! -r "$secret" ]]; then
+      echo "degraded: secret file ($secret) is not readable by this user"
     else
       echo "degraded: secret file ($secret) is empty"
     fi
