@@ -40,10 +40,11 @@ before each new write.
    If the directory is missing or empty, check whether that's "no
    history yet" or "toolchain never installed". Script installs put
    the scripts under `~/.claude/bin/`; plugin installs put them under
-   the plugin's `bin/`, whose location `CLAUDE_PLUGIN_ROOT` gives when
-   set — but that env var's visibility to skill-driven Bash calls is
-   unverified, so fall back to the legacy path and then a cache-glob
-   before giving up:
+   the plugin's `bin/`. `CLAUDE_PLUGIN_ROOT` would name that location,
+   but measurement (2026-08-11, plugin-enabled headless session) shows
+   the CLI does NOT export it to model-driven Bash calls — the env-var
+   check stays only as cheap future-proofing, and in plugin mode the
+   cache-glob is the branch that actually resolves:
    ```bash
    hb=""
    if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
