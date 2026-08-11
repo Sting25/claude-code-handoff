@@ -542,8 +542,21 @@ handoff_skeleton() {  # <file, or stdin>
     -v notes_h="$HANDOFF_NOTES_HEADING" '
     # Drop the two machine trailer lines (well-formed only), exactly as
     # handoff_mac_compute strips the HMAC one — a stamp must never cover itself.
-    /^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$/ { next }
-    /^<!-- HANDOFF_SKEL_HMAC: [0-9a-f]{64} -->[[:space:]]*$/ { next }
+    # Portability: this is awk context, and classic BSD one-true-awk (macOS
+    # <=10.14) treats ERE interval braces {64} as LITERAL characters, so a
+    # {64} count silently fails to match a real trailer there. Match the frame
+    # with an interval-free [0-9a-f]+ and enforce the exact 64-hex length with
+    # awk length() — identical behavior on old and new awk, and a malformed
+    # (non-64) trailer still falls through to the skeleton so it changes the
+    # digest (fail-closed) instead of being stripped.
+    /^<!-- HANDOFF_HMAC: [0-9a-f]+ -->[[:space:]]*$/ {
+      h = $0; sub(/^<!-- HANDOFF_HMAC: /, "", h); sub(/ -->[[:space:]]*$/, "", h)
+      if (length(h) == 64) next
+    }
+    /^<!-- HANDOFF_SKEL_HMAC: [0-9a-f]+ -->[[:space:]]*$/ {
+      h = $0; sub(/^<!-- HANDOFF_SKEL_HMAC: /, "", h); sub(/ -->[[:space:]]*$/, "", h)
+      if (length(h) == 64) next
+    }
     # Past the Notes heading everything is the model-authored Notes body (Notes
     # is the last section): emit ONE sentinel, drop the rest.
     notes_done { next }

@@ -87,4 +87,35 @@ grep -v '^[[:space:]]*#' "$REPO_ROOT/bin/handoff_provenance.sh" \
   | grep -q -- '-hmac "\$(cat' && exposed=yes
 check "no -hmac \"\$(cat …)\" argv shape in lib" no "$exposed"
 
+# --- handoff_skeleton trailer strip: exact-64 AND awk-interval-free ---------
+# The strip must (a) drop a well-formed 64-hex machine trailer so a stamp never
+# covers itself, (b) KEEP a malformed (non-64) look-alike so it lands in the
+# skeleton and changes the digest (fail-closed), and (c) use no awk ERE
+# interval braces {64} — classic BSD one-true-awk (macOS <=10.14) treats those
+# as literal characters, silently failing to strip a real trailer. (a)+(b)
+# together pin the exact-64 semantics that the interval-free form preserves.
+real64="$(printf '%064d' 0 | tr '0' 'a')"   # 64 lowercase-hex chars
+sk="$td/skel_doc"
+{
+  printf '# doc\n'
+  printf 'a body line\n'
+  printf '<!-- HANDOFF_HMAC: %s -->\n' "$real64"
+  printf '<!-- HANDOFF_SKEL_HMAC: %s -->\n' "$real64"
+  printf '<!-- HANDOFF_HMAC: dead -->\n'   # malformed: MUST survive into skeleton
+} > "$sk"
+skel_out="$(handoff_skeleton "$sk")"
+n_real="$(printf '%s\n' "$skel_out" | grep -c -- "HANDOFF_HMAC: $real64" || true)"
+n_skel="$(printf '%s\n' "$skel_out" | grep -c -- "HANDOFF_SKEL_HMAC: $real64" || true)"
+n_bad="$(printf '%s\n'  "$skel_out" | grep -c -- 'HANDOFF_HMAC: dead' || true)"
+check "skeleton strips a well-formed HMAC trailer"      0 "$n_real"
+check "skeleton strips a well-formed SKEL_HMAC trailer" 0 "$n_skel"
+check "skeleton KEEPS a malformed (non-64) trailer"     1 "$n_bad"
+# Static regression guard: the strip rules inside handoff_skeleton must not
+# reintroduce an awk interval. Scope to the function body so the legitimate
+# {64} intervals in grep -E / sed contexts elsewhere in the lib don't trip it.
+skel_fn="$(sed -n '/^handoff_skeleton()/,/^}/p' "$REPO_ROOT/bin/handoff_provenance.sh")"
+interval_in_skel=no
+printf '%s\n' "$skel_fn" | grep -qE 'HANDOFF_(SKEL_)?HMAC: \[0-9a-f\]\{[0-9]+\}' && interval_in_skel=yes
+check "handoff_skeleton uses no awk interval braces" no "$interval_in_skel"
+
 finish
