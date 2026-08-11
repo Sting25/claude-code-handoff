@@ -204,17 +204,20 @@ unpatch_settings() {
 }
 
 # Locate an installed plugin form of this tool (v0.14.0+ ships one), if any.
-# Plugin installs live under $HOME/.claude/plugins/cache/<marketplace>/
-# claude-code-handoff/<version>/ — NOTE: this is ALWAYS under $HOME, never
-# under a CLAUDE_HOME override, since the plugin loader has no concept of
-# this installer's CLAUDE_HOME convention. Bash 3.2 has no nullglob, so a
+# Plugin installs live under $CLAUDE_CONFIG_DIR/plugins/cache/<marketplace>/
+# claude-code-handoff/<version>/, falling back to $HOME/.claude when
+# CLAUDE_CONFIG_DIR is unset — that's Claude Code's OWN env var for where it
+# keeps its config/cache, unrelated to this installer's CLAUDE_HOME
+# convention. NOTE: this is never under a CLAUDE_HOME override — the plugin
+# loader has no concept of this installer's CLAUDE_HOME convention, only of
+# Claude Code's own CLAUDE_CONFIG_DIR. Bash 3.2 has no nullglob, so a
 # non-matching glob expands to its own literal (unexpanded) pattern text; the
 # `-d` test below simply never passes for that literal string, which is what
 # makes this safe without nullglob or an array/compgen dependency. Echoes the
 # first matching directory on stdout and returns 0, or returns 1 if none.
 find_plugin_cache_dir() {
   local pd
-  for pd in "$HOME"/.claude/plugins/cache/*/claude-code-handoff; do
+  for pd in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff; do
     if [[ -d "$pd" ]]; then
       printf '%s\n' "$pd"
       return 0
@@ -223,13 +226,55 @@ find_plugin_cache_dir() {
   return 1
 }
 
+# Single source of truth for "will the next handoff be HMAC-signed" — reused
+# by doctor() (detailed per-item report, below) and the installer's
+# first-run summary (install.d/40-main.sh). Mirrors the EXACT preconditions
+# bin/handoff_provenance.sh's handoff_mac_compute checks, in the same order
+# it checks them:
+#   1. openssl on PATH — handoff_mac_compute's very first line
+#      (`command -v openssl >/dev/null 2>&1 || return 1`); required for every
+#      call regardless of secret state, since HMAC-SHA256 is built from two
+#      openssl digest passes. No openssl => degraded, full stop.
+#   2. the secret file (handoff_secret_path: $HANDOFF_SECRET_FILE, else
+#      $claude_home/handoff_secret) must be usable: not a symlink (the
+#      signer refuses one outright — handoff_ensure_secret/handoff_mac_compute
+#      both `return 1`), and — for an EXISTING path — a regular, non-empty
+#      file (handoff_mac_compute's verify branch requires `-f` AND `-s`;
+#      `key="$(cat "$sf")"` then `[ -n "$key" ]` guards the empty case again).
+#      A path that exists but isn't a regular file can't be read as a key.
+#   3. absent entirely is NOT degraded: handoff_ensure_secret mints one
+#      lazily on the first signed write (openssl rand, or /dev/urandom via od
+#      as fallback) — reported as its own distinct state, not lumped with
+#      "active" or "degraded", since nothing has actually signed yet.
+# Echoes one of: "active", "degraded: <reason>", or
+# "pending: <reason>" (not yet signed, but will self-heal on first write).
+# Never touches `broken` — callers decide what (if anything) that means.
+signing_status_reason() {
+  local secret="${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}"
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "degraded: openssl not found on PATH"
+  elif [[ -L "$secret" ]]; then
+    echo "degraded: secret file ($secret) is a symlink — the signer refuses it"
+  elif [[ -f "$secret" ]]; then
+    if [[ -s "$secret" ]]; then
+      echo "active"
+    else
+      echo "degraded: secret file ($secret) is empty"
+    fi
+  elif [[ -e "$secret" ]]; then
+    echo "degraded: secret path ($secret) exists but is not a regular file"
+  else
+    echo "pending: no secret yet — one is generated on the first signed write"
+  fi
+}
+
 # Self-check: verify each installed hook script under $claude_home/bin actually
 # resolves. A dangling symlink (e.g. installed from a temp checkout that was
 # later cleaned up) makes the corresponding hook no-op silently, so surface it
 # loudly here. Exit non-zero if anything is broken so CI / a wrapper can detect
 # it. (issue #21)
 doctor() {
-  local broken=0 dst tgt name mdl secret smode plugin_dir script_hooks_present
+  local broken=0 dst tgt name mdl secret smode plugin_dir script_hooks_present sign_reason
   echo "doctor: checking installed handoff hooks under $claude_home/bin"
   # jq is a RUNTIME dependency of the Stop hook (payload parsing), the ctx
   # nudge, and the /handoff-recover tail rescue — a resolving script link is
@@ -296,6 +341,24 @@ doctor() {
   else
     echo "  note    $secret absent — generated on first signed write (not an error)"
   fi
+  # Signing status — one-line summary answering "will the next handoff be
+  # HMAC-signed", consolidating the openssl/secret checks above (which say
+  # WHY per-artifact) into the single yes/no-and-why question a user actually
+  # asks. Never counts toward `broken` itself — the checks above already
+  # flip that for cases the signer can't recover from (a symlinked or
+  # non-regular secret); this line would just double-count them.
+  sign_reason="$(signing_status_reason)"
+  case "$sign_reason" in
+    active)
+      echo "  ok      handoff signing: active"
+      ;;
+    degraded:*)
+      echo "  note    handoff signing: ${sign_reason#degraded: }"
+      ;;
+    pending:*)
+      echo "  note    handoff signing: ${sign_reason#pending: }"
+      ;;
+  esac
   echo
   # statusLine wiring report — informational only, never counts toward
   # `broken`: an unwired or user-owned statusLine is a legitimate state (we

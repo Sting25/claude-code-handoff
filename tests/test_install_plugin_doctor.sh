@@ -6,13 +6,19 @@
 #   B. --doctor: plugin cache present, no script hooks -> informational note
 #   C. --doctor: no plugin cache -> no plugin mention at all (negative control)
 #   D. plain install: plugin cache present -> a heads-up note before "done."
+#   F. find_plugin_cache_dir honors CLAUDE_CONFIG_DIR (falls back to
+#      $HOME/.claude when unset; a cache under the old default location is
+#      NOT found once CLAUDE_CONFIG_DIR points elsewhere — negative control)
 #
-# Plugin installs live under $HOME/.claude/plugins/cache/<marketplace>/
-# claude-code-handoff/<version>/ — ALWAYS under real $HOME, never under a
-# CLAUDE_HOME override (install.sh's find_plugin_cache_dir uses $HOME
-# directly). So unlike most install.sh tests, which only sandbox CLAUDE_HOME,
-# this file sandboxes HOME too and lets CLAUDE_HOME default from it
-# ($HOME/.claude) — never touching the real $HOME.
+# Plugin installs live under $CLAUDE_CONFIG_DIR/plugins/cache/<marketplace>/
+# claude-code-handoff/<version>/, falling back to $HOME/.claude/plugins/cache
+# when CLAUDE_CONFIG_DIR is unset — that's Claude Code's OWN env var for
+# where it keeps its config/cache, unrelated to this installer's CLAUDE_HOME
+# convention (find_plugin_cache_dir never looks under a CLAUDE_HOME
+# override — the plugin loader has no concept of it). So unlike most
+# install.sh tests, which only sandbox CLAUDE_HOME, tests A-D here sandbox
+# HOME too and let CLAUDE_HOME default from it ($HOME/.claude) — never
+# touching the real $HOME. Test F additionally sandboxes CLAUDE_CONFIG_DIR.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 echo "install.sh plugin/script coexistence detection"
@@ -97,5 +103,36 @@ iout="$(HOME="$home" bash "$src/install.sh" 2>&1)"; irc=$?
 check "install no plugin: exit 0"                 0   "$irc"
 check "install no plugin: no plugin note"         no  "$(has "$iout" "plugin install")"
 rm -rf "$src" "$home"
+
+# --- F. find_plugin_cache_dir honors CLAUDE_CONFIG_DIR -----------------------
+# CLAUDE_CONFIG_DIR is Claude Code's OWN env var for where it keeps its
+# config/cache (unrelated to this installer's CLAUDE_HOME convention); the
+# real plugin cache moves with it. mk_plugin_cache_at takes the CONFIG dir
+# itself (no "/.claude" suffix — that suffix is only the $HOME fallback's).
+mk_plugin_cache_at() {  # <config_dir>
+  must mkdir -p "$1/plugins/cache/somemkt/claude-code-handoff/0.14.0"
+}
+
+# F1: cache under a CLAUDE_CONFIG_DIR override (nowhere near $HOME) -> found.
+read -r src home <<<"$(mk_sandbox)"
+cfg="$(mktemp -d)"
+HOME="$home" bash "$src/install.sh" >/dev/null 2>&1
+mk_plugin_cache_at "$cfg"
+dout="$(HOME="$home" CLAUDE_CONFIG_DIR="$cfg" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
+check "CLAUDE_CONFIG_DIR cache: doctor exit 0"        0   "$drc"
+check "CLAUDE_CONFIG_DIR cache: plugin detected"      yes "$(has "$dout" "plugin install detected ($cfg/plugins/cache/somemkt/claude-code-handoff)")"
+rm -rf "$src" "$home" "$cfg"
+
+# F2: a cache at the OLD default ($HOME/.claude) is NOT found once
+# CLAUDE_CONFIG_DIR points elsewhere — proves the override wins outright
+# rather than the doctor checking both locations.
+read -r src home <<<"$(mk_sandbox)"
+cfg="$(mktemp -d)"
+HOME="$home" bash "$src/install.sh" >/dev/null 2>&1
+mk_plugin_cache "$home"
+dout="$(HOME="$home" CLAUDE_CONFIG_DIR="$cfg" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
+check "CLAUDE_CONFIG_DIR set, old-location cache: doctor exit 0" 0  "$drc"
+check "CLAUDE_CONFIG_DIR set, old-location cache: not detected"  no "$(has "$dout" "plugin install")"
+rm -rf "$src" "$home" "$cfg"
 
 finish

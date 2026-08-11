@@ -212,6 +212,19 @@ uninstall_symlinks() {
   unlink_if_ours "$claude_home/skills/handoff/README.md"         "$repo_root/skills/handoff/README.md"
   unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$repo_root/skills/handoff-more/SKILL.md"
   unlink_if_ours "$claude_home/skills/handoff-recover/SKILL.md"  "$repo_root/skills/handoff-recover/SKILL.md"
+  # Tidy up now-empty leaf dirs we created. `rmdir` only removes a directory
+  # that is ALREADY empty (fails harmlessly otherwise) — never `rm -r` — so
+  # this can never touch a dir the user left files in (their own script
+  # dropped alongside ours, a co-located skill, etc.). Order matters: each
+  # skills/<name>/ dir first, then skills/ itself (which only empties out
+  # once its subdirs are gone), then bin/. Best-effort and silent: rmdir's
+  # own semantics ("empty or untouched") already say everything worth saying.
+  local d
+  for d in "$claude_home/skills/handoff" "$claude_home/skills/handoff-more" \
+           "$claude_home/skills/handoff-recover" "$claude_home/skills" \
+           "$claude_home/bin"; do
+    rmdir "$d" 2>/dev/null || true
+  done
 }
 
 # Remove the per-machine HMAC secret that write_handoff.sh generates on first

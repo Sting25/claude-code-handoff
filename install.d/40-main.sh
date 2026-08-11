@@ -44,6 +44,21 @@ elif [[ "$mode" == install ]]; then
     echo
   fi
   echo "done. start a new Claude Code session — /handoff is available now."
+  # First-run signing note — one line pointing at --doctor for the detailed
+  # per-item report (secret-file hygiene, openssl presence). Uses the same
+  # signing_status_reason() doctor() reports from, so the two can never drift.
+  sign_reason="$(signing_status_reason)"
+  case "$sign_reason" in
+    active)
+      echo "note: handoff signing is active — new handoffs are HMAC-signed (./install.sh --doctor for detail)."
+      ;;
+    pending:*)
+      echo "note: handoff signing ${sign_reason#pending: } (./install.sh --doctor for detail)."
+      ;;
+    degraded:*)
+      echo "note: handoff signing degraded (${sign_reason#degraded: }) (./install.sh --doctor for detail)."
+      ;;
+  esac
   if [[ "$COPIED_ANY" == "1" ]]; then
     echo
     echo "note: files were COPIED into $claude_home (copy mode or symlinks"
