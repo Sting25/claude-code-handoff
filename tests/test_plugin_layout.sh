@@ -110,6 +110,15 @@ ss_rc=0
      bash "$plugin_root/bin/handoff_session_start.sh" </dev/null >/dev/null 2>&1 ) || ss_rc=$?
 check "session_start from relocated plugin root -> exit 0" 0 "$ss_rc"
 
+# Record the real repo's handoff doc state BEFORE the writer runs. The file
+# legitimately exists in a working checkout (this repo dogfoods its own tool),
+# so asserting absence would false-fail everywhere except a fresh worktree/CI
+# checkout — escape detection is "byte-identical before and after", with
+# "absent" a valid stable state of its own.
+real_doc="$REPO_ROOT/.claude/handoff_current.md"
+doc_state() { if [[ -f "$real_doc" ]]; then cksum < "$real_doc"; else echo absent; fi; }
+before_state="$(doc_state)"
+
 # Writer hook (SessionEnd command shape), same relocation + sandbox.
 wh_rc=0
 ( cd "$sandbox_project" \
@@ -119,7 +128,7 @@ wh_rc=0
 check "writer from relocated plugin root -> exit 0" 0 "$wh_rc"
 check "handoff doc written under sandbox project (not real repo)" yes \
   "$([[ -f "$sandbox_project/.claude/handoff_current.md" ]] && echo yes || echo no)"
-check "real repo's own .claude/ untouched by relocated writer" no \
-  "$([[ -f "$REPO_ROOT/.claude/handoff_current.md" ]] && echo yes || echo no)"
+check "real repo's own handoff doc unchanged by relocated writer" \
+  "$before_state" "$(doc_state)"
 
 finish
