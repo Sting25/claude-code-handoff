@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+# GENERATED FILE — do not edit directly.
+#
+# This is the concatenation of install.d/*.sh, produced by
+# tools/build-install.sh. To change installer behavior, edit the relevant
+# module under install.d/, then regenerate with:
+#
+#   bash tools/build-install.sh
+#
+# CI's install-drift job rebuilds this file into a temp path and diffs it
+# against the committed copy below; a stale install.sh fails that gate.
+# SOURCE-SHA256: 30e0b0b0c94b40ce5d111522f2200f914f5da01b717fc11964a1f83ab1b7309f
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -10,9 +21,10 @@ set -euo pipefail
 
 # Usage text for --help / -h. A heredoc (not a self-read of this file's
 # comments) so it works no matter how the script's bytes arrived: piped in
-# via `curl ... | bash -s -- --help`, BASH_SOURCE[0] is "bash" (there is no
-# real path to sed), so a self-read prints nothing. A heredoc is parsed out
-# of the script text itself and needs no path or working stdin.
+# via `curl ... | bash -s -- --help`  # scaffold-allow: prose example, not an executed pipe
+# — BASH_SOURCE[0] is "bash" (there is no real path to sed), so a self-read
+# prints nothing. A heredoc is parsed out of the script text itself and
+# needs no path or working stdin.
 usage() {
   cat <<'USAGE'
 install.sh — wire this repo's handoff skill into ~/.claude/.

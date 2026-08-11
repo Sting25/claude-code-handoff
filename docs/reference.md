@@ -603,9 +603,19 @@ is preserved; uninstall only removes entries it can prove are its own.
 │       └── SKILL.md               # /handoff-recover slash command: retroactively compose Notes when the previous session crashed
 ├── docs/
 │   ├── handoff-pattern.md         # design philosophy: the WRITE/READ discipline behind the tool
+│   ├── install-split-v0.14-design.md  # design note: install.sh as a generated build artifact
 │   └── reference.md               # this file
+├── install.d/                     # install.sh SOURCE — contiguous slices, concatenated by tools/build-install.sh
+│   ├── 00-preamble.sh
+│   ├── 10-symlinks.sh
+│   ├── 20-settings-patch.sh
+│   ├── 30-settings-unpatch-doctor.sh
+│   └── 40-main.sh
+├── tools/
+│   └── build-install.sh           # concatenates install.d/*.sh -> install.sh + install.sh.sha256
 ├── tests/                         # dependency-free bash test suite (./tests/run.sh)
-├── install.sh                     # symlink + settings.json patcher
+├── install.sh                     # GENERATED: symlink + settings.json patcher (built from install.d/*.sh — do not edit directly)
+├── install.sh.sha256              # GENERATED: sha256 of install.sh, for a future curl|bash consumer to verify
 ├── CHANGELOG.md
 ├── LICENSE                        # MIT
 └── README.md

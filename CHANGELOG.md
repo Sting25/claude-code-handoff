@@ -90,6 +90,32 @@ are appended).
   claims in "How it works" and "Updating, doctor, uninstall" to
   qualify by install mode.
 
+### Added — install.sh build split
+- **`install.sh` is now a GENERATED artifact.** Its source lives in
+  `install.d/*.sh` as exact contiguous slices of the previous single
+  file (`00-preamble.sh`, `10-symlinks.sh`, `20-settings-patch.sh`,
+  `30-settings-unpatch-doctor.sh`, `40-main.sh`), each well under the
+  500-line default file-size cap. `tools/build-install.sh` reads an
+  explicit ordered array of module filenames (not a glob, so a stray
+  file in `install.d/` can't silently get spliced into a security-
+  relevant script) and concatenates them into the committed
+  `install.sh`, prefixed with a generated-file banner and a
+  `SOURCE-SHA256` provenance line. The build is deterministic (no
+  timestamps) and portable to both bash 3.2/BSD (macOS) and bash
+  5/GNU (Linux) — it prefers `shasum -a 256`, falling back to
+  `sha256sum`. It also writes `install.sh.sha256` alongside, for a
+  future `curl | bash` consumer to verify before piping. No behavior
+  change: `install.sh` still ships at the repo root, at the same path,
+  and `git clone` + `./install.sh` is unaffected.
+- **New required CI job `install-drift`** rebuilds `install.sh` from
+  `install.d/*.sh` in a scratch copy and diffs it against the
+  committed `install.sh` + `install.sh.sha256`, failing the build if
+  a contributor edited a module and forgot to regenerate the artifact.
+  `tests/test_install_build_drift.sh` gives the same check local
+  coverage via `./tests/run.sh`, before a PR ever reaches CI.
+- See `docs/install-split-v0.14-design.md` for the full design
+  rationale and landing-order notes.
+
 ## [0.13.0] — 2026-08-11
 
 ### Fixed — the handoff-lookup bug (user-reported)
