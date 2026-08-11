@@ -12,6 +12,8 @@ are appended).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-11
+
 ### Fixed — the handoff-lookup bug (user-reported)
 - **Unified root resolution across all seven scripts.** The writers anchored
   on the process cwd (bare `git rev-parse`) while the SessionStart loader
@@ -61,7 +63,19 @@ are appended).
   leaving the document byte-identical so its rules load as reference data
   (re-run `/handoff` to regenerate). A model authoring fences inside its
   own Rules region still binds — that zone is sanctioned and excluded from
-  the skeleton; the boundary defended is everything *outside* it.
+  the skeleton; the boundary defended is everything *outside* it. The
+  skeleton's trailer strip is awk-interval-free (no `{64}`), so it behaves
+  identically on pre-2018 BSD one-true-awk, which treats interval braces as
+  literal characters.
+- **A NUL byte in the document is refused before `--restamp` signs it.**
+  BSD/macOS awk truncates a line at an embedded NUL, so the skeleton filter
+  would otherwise sign a silently-shortened document; the restamp now
+  detects a NUL and refuses, leaving the file byte-identical.
+- **`HANDOFF_SECRET_FILE` pointing at a directory now fails loudly.**
+  `mv tmp "$dir"` moved a fresh key file *into* the directory and reported
+  success, so every signed write stranded another key and signing never
+  converged on one; it now degrades to unsigned with a message naming the
+  path.
 - **Symlinked `.claude/handoff_history` exfiltrated session prose (HIGH).**
   Rotation `mv`s the outgoing document into it, so a repo shipping the
   directory as a symlink sent every snapshot outside the repo with nothing
@@ -140,7 +154,9 @@ are appended).
   moves the file *into* the directory and succeeds, so the atomic-claim
   loop read it as a win; the following `chmod 600` then stripped the
   directory's traverse bit and sealed the curated snapshot somewhere no
-  `-type f` consumer could reach.
+  `-type f` consumer could reach. The 50-attempt exhaustion fallback
+  likewise refuses to overwrite an existing archive rather than clobbering
+  it with a bare `mv`.
 - **`recover_tail` picks the newest transcript, not the lexically first.**
   The same session id can exist under two project slugs after a rename or
   move; the stale copy silently outranked the live one and the script
@@ -159,8 +175,11 @@ are appended).
   `CLAUDE_CODE_ENTRYPOINT`: terminal sessions get the Ctrl+D wording,
   desktop-app sessions get "start a New Session" wording, unknown gets
   both — no more impossible instructions in the desktop app.
-- `install.sh --help` prints the complete usage block (was truncated at
-  line 28); ctx-check gained the same `umask 077` as its siblings; CI
+- `install.sh --help` prints the complete usage block from a heredoc, so it
+  works even when the script is piped in (`curl … | bash -s -- --help`,
+  where a self-read of `$0` printed nothing) — superseding the earlier fix
+  for the block being truncated at line 28; ctx-check gained the same
+  `umask 077` as its siblings; CI
   installs shellcheck explicitly; exec bits committed on the two scripts
   that lacked them (installs no longer dirty the source tree).
 - README drift corrected (jq hard requirement, KEEP=0 semantics, platform
