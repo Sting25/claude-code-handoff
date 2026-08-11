@@ -8,7 +8,12 @@
     {
       "name": "claude-code-handoff",
       "source": "./",
-      "description": "Session-state handoff between Claude Code sessions via hooks (auto-snapshot on SessionEnd/PreCompact, auto-load on SessionStart) with HMAC-verified provenance."
+      "description": "Session-state handoff between Claude Code sessions via hooks (auto-snapshot on SessionEnd/PreCompact, auto-load on SessionStart) with HMAC-verified provenance.",
+      "author": {
+        "name": "Christopher Chadwick",
+        "url": "https://github.com/Sting25"
+      },
+      "homepage": "https://github.com/Sting25/claude-code-handoff"
     }
   ]
 }
