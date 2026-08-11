@@ -420,9 +420,11 @@ gitignore_lock=""
 gitignore_lock_held=0
 handoff_tmp=""
 restamp_tmp=""
+restamp_src=""
 cleanup() {
   if [[ -n "${handoff_tmp:-}" ]]; then rm -f "$handoff_tmp" 2>/dev/null || true; fi
   if [[ -n "${restamp_tmp:-}" ]]; then rm -f "$restamp_tmp" 2>/dev/null || true; fi
+  if [[ -n "${restamp_src:-}" ]]; then rm -f "$restamp_src" 2>/dev/null || true; fi
   if (( ${write_lock_held:-0} )); then rmdir "$write_lock_dir" 2>/dev/null || true; fi
   if (( ${gitignore_lock_held:-0} )); then rmdir "$gitignore_lock" 2>/dev/null || true; fi
   return 0
@@ -505,22 +507,45 @@ if (( RESTAMP )); then
   # vouches for them. Signing the on-disk bytes first would stamp whatever the
   # editor left, including a BIND marker pair smuggled into the Notes block.
   restamp_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
-  {
-    # Strip only a well-formed trailer (matching handoff_mac_compute), so a
-    # prose line that merely starts with the prefix is preserved and stays
-    # covered by the digest. `|| true`: grep -v exits 1 on an all-stripped
-    # (empty) doc, which under set -e/pipefail would abort the restamp.
-    LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$handoff_path" || true
-  } | if type handoff_guard_bind_regions >/dev/null 2>&1; then
-        handoff_guard_bind_regions
-      else
-        # Stale lib (a copy-mode ~/.claude/bin predating the guard). Pass the
-        # body through unchanged rather than emptying the document; the result
-        # is the pre-guard behavior, so warn that this restamp can promote
-        # edited content into the binding tier.
-        echo "write_handoff.sh: --restamp: installed handoff_provenance.sh predates the bind-region guard; re-run install.sh to restore it." >&2
-        cat
-      fi > "$restamp_tmp"
+  restamp_src="$(mktemp "$handoff_dir/.handoff_pre.XXXXXX")"
+  # Strip only a well-formed trailer (matching handoff_mac_compute), so a
+  # prose line that merely starts with the prefix is preserved and stays
+  # covered by the digest. `|| true`: grep -v exits 1 on an all-stripped
+  # (empty) doc, which under set -e/pipefail would abort the restamp.
+  LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' \
+    "$handoff_path" > "$restamp_src" || true
+  guard_ok=1
+  if type handoff_guard_bind_regions >/dev/null 2>&1; then
+    handoff_guard_bind_regions < "$restamp_src" > "$restamp_tmp" || guard_ok=0
+  else
+    # Stale lib (a copy-mode ~/.claude/bin predating the guard). Pass the body
+    # through unchanged rather than emptying the document; the result is the
+    # pre-guard behavior, so warn that this restamp can promote edited content
+    # into the binding tier.
+    echo "write_handoff.sh: --restamp: installed handoff_provenance.sh predates the bind-region guard; re-run install.sh to restore it." >&2
+    cat "$restamp_src" > "$restamp_tmp" || guard_ok=0
+  fi
+  # The guard REWRITES marker lines in place and never adds or removes one, so
+  # equal line counts is an exact invariant, not a heuristic — and it is the
+  # check that makes a partial filter failure impossible to publish. Without
+  # it, an awk that dies mid-stream (absent, OOM-killed, non-zero on a
+  # pathological line) yields a truncated body that this path then SIGNS and
+  # moves over the curated handoff: permanent loss, no history copy (restamp
+  # does not rotate), a valid fresh MAC so it verifies as authentic, and rc=0
+  # reported to the user as success. Refuse rather than publish; the document
+  # on disk is still correct, merely carrying a stale signature.
+  src_lines="$(LC_ALL=C wc -l < "$restamp_src" | tr -d ' ')"
+  out_lines="$(LC_ALL=C wc -l < "$restamp_tmp" | tr -d ' ')"
+  if (( ! guard_ok )) || [[ "$src_lines" != "$out_lines" ]]; then
+    echo "write_handoff.sh: --restamp: the bind-region guard did not return the document intact (${src_lines} lines in, ${out_lines} out); refusing to publish. $handoff_relpath is unchanged and keeps its previous signature — its rules load as reference data, not binding. Check that awk is on PATH, then re-run /handoff." >&2
+    rm -f "$restamp_src"; restamp_src=""
+    if (( write_lock_held )); then
+      rmdir "$write_lock_dir" 2>/dev/null || true
+      write_lock_held=0
+    fi
+    exit 0
+  fi
+  rm -f "$restamp_src"; restamp_src=""
   chmod 600 "$restamp_tmp" 2>/dev/null || true
   restamp_signed=0
   if mac="$(handoff_mac_compute "$restamp_tmp" ensure)"; then

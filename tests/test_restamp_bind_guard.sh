@@ -112,4 +112,34 @@ if ( . "$REPO_ROOT/bin/handoff_provenance.sh" && handoff_mac_verify "$doc" ); th
 fi
 check "restamped document's MAC covers the guarded body" yes "$verified"
 
+# --- 5. A failing guard filter must never publish over the curated doc ------
+# The guard filter used to carry a `|| echo "…guard failed…"` fallback, which
+# is right for an embedded SECTION of a document under construction and
+# catastrophic here, where its output IS the whole document and this path
+# signs and publishes it: a dead awk replaced the curated handoff with a
+# single warning line, carrying a valid fresh MAC so it verified as authentic,
+# with no history copy (restamp does not rotate) and rc=0 reported as success.
+proj5="$(mk_repo)" || exit 1
+cleanup_on_exit "$proj5"
+( cd "$proj5" && CLAUDE_PROJECT_DIR="$proj5" bash "$REPO_ROOT/bin/write_handoff.sh" \
+    >/dev/null 2>&1 </dev/null )
+doc5="$proj5/.claude/handoff_current.md"
+must test -f "$doc5"
+must bash -c "printf '%s\n' 'CURATED_PROSE_WORTH_KEEPING' > '$proj5/notes_body'"
+must rewrite_notes "$doc5" "$proj5/notes_body"
+before5="$(LC_ALL=C wc -l < "$doc5" | tr -d ' ')"
+# A stub awk that always fails, on a PATH ahead of the real one.
+shim5="$proj5/shim"
+must mkdir -p "$shim5"
+must bash -c "printf '#!/bin/sh\nexit 1\n' > '$shim5/awk'"
+must chmod +x "$shim5/awk"
+out5="$( cd "$proj5" && PATH="$shim5:$PATH" CLAUDE_PROJECT_DIR="$proj5" \
+    bash "$REPO_ROOT/bin/write_handoff.sh" --restamp </dev/null 2>/dev/null )"; rc5=$?
+after5="$(LC_ALL=C wc -l < "$doc5" | tr -d ' ')"
+check "guard failure: document not truncated"        "$before5" "$after5"
+check "guard failure: curated prose survives"        yes \
+  "$(grep -q CURATED_PROSE_WORTH_KEEPING "$doc5" && echo yes || echo no)"
+check "guard failure: no success path on stdout"     ""  "$out5"
+check "guard failure: still exits 0 (best-effort)"   0   "$rc5"
+
 finish

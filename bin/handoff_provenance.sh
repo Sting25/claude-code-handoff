@@ -474,7 +474,19 @@ handoff_guard_bind_regions() {
       print
     }
     END { if (held) print begin_d }
-  ' || echo "⚠️  handoff: bind-region guard failed — content above may be truncated"
+  '
+  # NO `|| echo …` fallback here, unlike handoff_sanitize_markers. That idiom
+  # is right where the output is one embedded SECTION of a document being
+  # built — a truncation warning in place beats aborting the whole write. It
+  # is catastrophic here, where the output IS the entire document and the
+  # caller signs and publishes it over the curated original: a failing awk
+  # would replace the handoff with a single warning line, carrying a valid
+  # fresh MAC so it verifies as authentic, with no history copy (restamp does
+  # not rotate) and rc=0 reported to the user as success. Let the failure
+  # propagate; write_handoff.sh's restamp path checks it and publishes
+  # nothing. Same reasoning as the deliberate `pin_body="$(cat …)"` capture in
+  # write_handoff.sh, which exists so a read error aborts the build rather
+  # than publishing a truncated document.
 }
 
 # Extract the BIND-marked regions (marker lines excluded, single-line
