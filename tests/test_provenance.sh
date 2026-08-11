@@ -165,6 +165,77 @@ out="$(run_doctor)"
 check "doctor: absent secret -> note, no error"  yes "$(has "$out" "note    $dsec absent")"
 check "doctor: absent secret -> not BROKEN"      no  "$(has "$out" "BROKEN  $dsec")"
 
+# --- install.sh --doctor: consolidated "handoff signing:" status line -------
+# signing_status_reason() (install.d/30-settings-unpatch-doctor.sh) answers
+# "will the next handoff be HMAC-signed" in one line, derived from the exact
+# preconditions handoff_mac_compute checks (see its own header comment).
+# Covers: active, and every degraded/pending reason it can report.
+must cp "$sf" "$dsec"
+must chmod 600 "$dsec"
+out="$(run_doctor)"
+check "doctor: healthy secret -> signing active"      yes "$(has "$out" "ok      handoff signing: active")"
+check "doctor: healthy secret -> no degraded line"    no  "$(has "$out" "handoff signing: degraded")"
+
+must rm "$dsec"
+out="$(run_doctor)"
+check "doctor: absent secret -> signing pending"      yes \
+  "$(has "$out" "note    handoff signing: no secret yet — one is generated on the first signed write")"
+
+must ln -s "$work/link/target" "$dsec"
+out="$(run_doctor)"
+check "doctor: symlink secret -> signing degraded"    yes \
+  "$(has "$out" "note    handoff signing: secret file ($dsec) is a symlink")"
+must rm "$dsec"
+
+: > "$dsec"
+must chmod 600 "$dsec"
+out="$(run_doctor)"
+check "doctor: empty secret -> signing degraded"      yes \
+  "$(has "$out" "note    handoff signing: secret file ($dsec) is empty")"
+# The existing per-item hygiene check above only tests -f, not -s, so an
+# empty secret was previously reported "ok" there even though signing would
+# actually fail on it (handoff_mac_compute's `[ -n "$key" ]` guard) — pin
+# that the consolidated line catches what the per-item one misses.
+check "doctor: empty secret -> per-item check still says ok" yes \
+  "$(has "$out" "ok      $dsec (regular file")"
+must rm "$dsec"
+
+must mkdir -p "$dsec"
+out="$(run_doctor)"
+check "doctor: dir at secret path -> signing degraded" yes \
+  "$(has "$out" "note    handoff signing: secret path ($dsec) exists but is not a regular file")"
+must rmdir "$dsec"
+
+# openssl absent -> degraded regardless of secret state (handoff_mac_compute's
+# very first check). Same PATH-shim helper as test_jq_missing.sh/
+# test_portability.sh/test_trusted_rules.sh.
+path_without() {
+  local drop="$1" shim d f b
+  shim="$(mktemp -d)"
+  for d in ${PATH//:/ }; do
+    [[ -d "$d" ]] || continue
+    for f in "$d"/*; do
+      b="$(basename "$f")"
+      [[ "$b" == "$drop" ]] && continue
+      [[ -e "$shim/$b" ]] || ln -s "$f" "$shim/$b" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$shim"
+}
+if command -v openssl >/dev/null 2>&1; then
+  nossl="$(path_without openssl)"
+  check "openssl really absent on shim PATH" absent \
+    "$(PATH="$nossl" command -v openssl >/dev/null 2>&1 && echo present || echo absent)"
+  must cp "$sf" "$dsec"
+  must chmod 600 "$dsec"
+  out="$(env -u HANDOFF_SECRET_FILE PATH="$nossl" CLAUDE_HOME="$home" bash "$INSTALL" --doctor 2>&1)"
+  check "doctor: no openssl -> signing degraded"      yes \
+    "$(has "$out" "note    handoff signing: openssl not found on PATH")"
+  must rm "$dsec"
+else
+  skip "openssl not installed — no-openssl signing-status case skipped"
+fi
+
 # --- handoff_secret_path honors CLAUDE_HOME (SEC-3) --------------------------
 # handoff_secret_path used to hardcode $HOME/.claude/handoff_secret and ignore
 # CLAUDE_HOME entirely, while install.sh's own doctor check (above) and
