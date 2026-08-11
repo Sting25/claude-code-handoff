@@ -11,6 +11,7 @@ on:
   pull_request:
   push:
     branches: [main]
+    tags: ['v*']
 
 jobs:
   tests-linux:
@@ -63,3 +64,49 @@ jobs:
         run: |
           shellcheck --version
           shellcheck bin/*.sh tests/*.sh install.sh
+
+  # v0.14.0: closes the missed-tag/missing-version failure mode. VERSION is
+  # the single source of truth; plugin.json's own "version" field is only
+  # free-standing JSON, so nothing stops it drifting from VERSION on a normal
+  # commit. On a release tag the check goes further: the tag itself must
+  # match VERSION, and CHANGELOG.md must already document the release — a
+  # tag pushed without either is exactly how a "shipped" version ends up
+  # undocumented or mismatched with what the plugin manifest advertises.
+  plugin-version-sync:
+    name: plugin version sync — required
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate plugin manifests + VERSION sync
+        run: |
+          set -euo pipefail
+
+          version="$(tr -d '[:space:]' < VERSION)"
+          echo "VERSION file: $version"
+
+          for f in .claude-plugin/plugin.json hooks/hooks.json .claude-plugin/marketplace.json; do
+            jq . "$f" >/dev/null || { echo "::error::$f does not parse as JSON"; exit 1; }
+          done
+
+          plugin_version="$(jq -r '.version' .claude-plugin/plugin.json)"
+          if [[ "$plugin_version" != "$version" ]]; then
+            echo "::error::.claude-plugin/plugin.json version ($plugin_version) != VERSION ($version)"
+            exit 1
+          fi
+
+          # Tag builds only: refs/tags/vX.Y.Z must match VERSION, and
+          # CHANGELOG.md must carry the matching "## [X.Y.Z]" heading.
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              tag_version="${GITHUB_REF#refs/tags/v}"
+              if [[ "$tag_version" != "$version" ]]; then
+                echo "::error::tag v$tag_version does not match VERSION ($version)"
+                exit 1
+              fi
+              if ! grep -qF "## [$version]" CHANGELOG.md; then
+                echo "::error::CHANGELOG.md has no '## [$version]' heading for the tagged release"
+                exit 1
+              fi
+              echo "tag v$tag_version matches VERSION and CHANGELOG.md"
+              ;;
+          esac

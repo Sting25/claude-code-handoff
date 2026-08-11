@@ -1,0 +1,20 @@
+{
+  "name": "claude-code-handoff",
+  "displayName": "Claude Code Handoff",
+  "version": "0.14.0",
+  "description": "Session-state handoff between Claude Code sessions via hooks (auto-snapshot on SessionEnd/PreCompact, auto-load on SessionStart) with HMAC-verified provenance.",
+  "author": {
+    "name": "Christopher Chadwick",
+    "url": "https://github.com/Sting25"
+  },
+  "repository": "https://github.com/Sting25/claude-code-handoff",
+  "license": "MIT",
+  "keywords": [
+    "handoff",
+    "session",
+    "context",
+    "hooks",
+    "provenance"
+  ],
+  "hooks": "./hooks/hooks.json"
+}
