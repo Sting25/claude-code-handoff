@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: eb9b64cda6ddca0dd6d9b73376a1c2e36c738f05e61379132b54ffb3d4c823fe
+# SOURCE-SHA256: b72aee4a5e94a847b104e322d43ca6da31b474e61dbb03e474e6329d0a7b52e3
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the

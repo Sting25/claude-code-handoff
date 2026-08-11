@@ -40,6 +40,22 @@ for m in "${modules[@]}"; do
   module_paths+=("$f")
 done
 
+# Inverse guard: a slice on disk that is NOT in the list would build green,
+# pass the CI drift gate (which rebuilds with this same list), and simply
+# never ship — the one drift the rebuild-and-diff can't see. Fail the build
+# instead of silently excluding it.
+for f in "$install_d"/*.sh; do
+  b="${f##*/}"
+  listed=0
+  for m in "${modules[@]}"; do
+    [[ "$m" == "$b" ]] && { listed=1; break; }
+  done
+  if [[ "$listed" -eq 0 ]]; then
+    echo "build-install: $f exists but is not in the modules list — register it (or delete the file)" >&2
+    exit 1
+  fi
+done
+
 # Hash of stdin, portable across macOS/BSD (shasum) and Linux (sha256sum) —
 # no bash-4-only features, no assumption about which one is on PATH.
 sha256_of() {
