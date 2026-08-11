@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 56fcb984398b876e1a6e917fa9918775a3e31ace3254e6a156af855c51975e93
+# SOURCE-SHA256: eb9b64cda6ddca0dd6d9b73376a1c2e36c738f05e61379132b54ffb3d4c823fe
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1009,8 +1009,16 @@ signing_status_reason() {
   elif [[ -L "$secret" ]]; then
     echo "degraded: secret file ($secret) is a symlink — the signer refuses it"
   elif [[ -f "$secret" ]]; then
-    if [[ -s "$secret" ]]; then
+    # Probe with the signer's own load, not -s: handoff_mac_compute requires
+    # `cat` to succeed AND the key to be non-empty after $() strips trailing
+    # newlines, so an unreadable or newline-only secret passed -f/-s here
+    # ("active") while every write silently degraded to unsigned. The probe
+    # runs in a subshell and prints nothing — key bytes never reach output
+    # or this shell's state.
+    if ( k="$(cat "$secret" 2>/dev/null)" && [ -n "$k" ] ); then
       echo "active"
+    elif [[ ! -r "$secret" ]]; then
+      echo "degraded: secret file ($secret) is not readable by this user"
     else
       echo "degraded: secret file ($secret) is empty"
     fi
