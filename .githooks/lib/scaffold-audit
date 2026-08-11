@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# .githooks/lib/scaffold-audit — list every active rule override recorded in the
+# repo-root `.scaffold.toml`, in one readable block. Run it locally to review a
+# project's deviations; the CI guardrails job runs it too, so every relaxed or
+# disabled rule is visible in the build log (a `severity = "warn"` downgrade is
+# never silent).
+#
+# Informational only: always exits 0. Pure bash + awk, same TOML subset as
+# lib/scaffold-config (the parser of record — this is a reporting view of it).
+#
+# Output: a heading plus one stanza per [size] cap and per [rules."..."] entry.
+
+set -euo pipefail
+
+CONFIG=".scaffold.toml"
+
+if [ ! -f "$CONFIG" ]; then
+  echo "scaffold-audit: no .scaffold.toml — all rules at scaffold defaults."
+  exit 0
+fi
+
+# awk walks the same subset scaffold-config parses and renders each override.
+# It counts emitted stanzas so an empty/all-comments config reports cleanly.
+out=$(awk '
+  function trim(s){ sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s); return s }
+  function unq(s){ if (s ~ /^".*"$/) s=substr(s,2,length(s)-2); return s }
+  function flush(){
+    if (cur=="") return
+    if (cur=="size") return            # [size] entries print inline as parsed
+    line="  rule \"" rid "\""
+    if (disabled) line=line "  — DISABLED"
+    else if (sev!="") line=line "  — severity=" sev
+    else line=line "  — (recorded, no enforcement change)"
+    print line
+    if (reason!="") print "      reason: " reason
+    if (by!="")     print "      by:     " by
+    count++
+  }
+  BEGIN { cur=""; rid=""; disabled=0; sev=""; reason=""; by=""; sizehdr=0; count=0 }
+  {
+    t=$0; sub(/\r$/,"",t); t=trim(t)
+    if (t=="" || t ~ /^#/) next
+    if (t ~ /^\[/) {
+      flush()
+      disabled=0; sev=""; reason=""; by=""
+      sec=t; sub(/^\[/,"",sec); sub(/\]$/,"",sec)
+      if (sec=="size") { cur="size"; rid="" }
+      else if (sec ~ /^rules\./) { cur="rule"; rid=unq(substr(sec,7)) }
+      else { cur="" }            # unknown section — ignored, like the reader
+      next
+    }
+    if (cur=="") next
+    eq=index(t,"="); if (eq==0) next
+    key=unq(trim(substr(t,1,eq-1))); val=unq(trim(substr(t,eq+1)))
+    if (cur=="size") {
+      if (!sizehdr) { print "  [size] caps:"; sizehdr=1 }
+      print "      " key " = " val
+      count++
+      next
+    }
+    if (key=="disabled" && val=="true") disabled=1
+    else if (key=="severity") sev=val
+    else if (key=="reason") reason=val
+    else if (key=="by") by=val
+  }
+  END { flush(); if (count==0) print "  (no overrides — empty or comments only)" }
+' "$CONFIG")
+
+echo "scaffold-audit: active rule overrides in $CONFIG"
+printf '%s\n' "$out"

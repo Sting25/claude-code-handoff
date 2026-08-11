@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# .githooks/lib/check-filenames — block committed credentials by filename.
+# Reads NUL-separated file paths on stdin (produced by `git ... -z`), so
+# filenames containing newlines, tabs, or quotes can't split the list and slip
+# past the check. Rejects .env (allowing .env.example/.sample/.template),
+# *.pem, and SSH private key names.
+#
+# Output: human-readable on tty; ::error file=...:: when --ci is passed.
+# Exit:   0 if all OK, 1 if any violation.
+
+set -euo pipefail
+
+CI_MODE=0
+[ "${1:-}" = "--ci" ] && CI_MODE=1
+
+# Escape a value for a GitHub workflow command (see check-secrets): %, CR, LF
+# always; : and , for property values (file=). A filename is attacker-controlled
+# in a PR, so escaping it stops a crafted name forging/truncating the annotation.
+ghesc() {
+  local s=$2
+  s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}
+  if [ "$1" = prop ]; then s=${s//:/%3A}; s=${s//,/%2C}; fi
+  printf '%s' "$s"
+}
+
+emit() {
+  local file=$1 message=$2
+  if [ "$CI_MODE" -eq 1 ]; then
+    echo "::error file=$(ghesc prop "$file")::$(ghesc data "$message")"
+  else
+    echo "✗ $file: $message"
+  fi
+}
+
+FAILED=0
+while IFS= read -r -d '' file; do
+  [ -z "$file" ] && continue
+  case "$file" in
+    *.pem)
+      emit "$file" "PEM file (likely private key) — rotate and use a secret manager"
+      FAILED=1
+      continue
+      ;;
+  esac
+  # `basename -- "$file"` so a path/name beginning with `-` is treated as data,
+  # not an option.
+  name=$(basename -- "$file")
+  case "$name" in
+    .env.example|.env.sample|.env.template) ;;
+    .env|.env.*)
+      emit "$file" "environment file — use .env.example for shared config, keep secrets in env vars"
+      FAILED=1
+      ;;
+    id_rsa|id_ed25519|id_ecdsa|id_dsa)
+      emit "$file" "SSH private key — rotate it and use a secret manager"
+      FAILED=1
+      ;;
+  esac
+done
+
+exit $FAILED

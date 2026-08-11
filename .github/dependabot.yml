@@ -1,0 +1,39 @@
+# Copy to your project as `.github/dependabot.yml`. Keeps the SHA-pinned GitHub
+# Actions in your workflows (lint.yml, gitleaks.yml) fresh — SHA pins are a
+# supply-chain best practice but don't auto-update, so without this they rot.
+# Dependabot reads a `uses: owner/action@<sha>  # vX.Y.Z` pin natively and bumps
+# the SHA + the trailing version comment together in one grouped weekly PR.
+#
+# Generates PRs — if you don't want that, don't install this file (it's the one
+# piece of the scaffold that adds outbound automation). Renovate users: enable
+# the `helpers:pinGitHubActionDigests` preset for the equivalent.
+#
+# Add `npm` / `pip` ecosystem blocks below if you also want dependency PRs.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait 7 days before proposing a new release — long enough that a
+    # compromised-and-yanked version (chalk/debug, Shai-Hulud) is gone before you
+    # ever see the PR. Security updates bypass the cooldown. (Dependabot-native
+    # since 2025-07.)
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+  # Example npm block with the same cooldown — uncomment if you want dependency
+  # PRs. For MANUAL installs (not Dependabot), npm >= 11.10 supports
+  # `min-release-age` in .npmrc for the equivalent quarantine window.
+  # - package-ecosystem: npm
+  #   directory: /
+  #   schedule:
+  #     interval: weekly
+  #   cooldown:
+  #     default-days: 7
+  #   commit-message:
+  #     prefix: deps

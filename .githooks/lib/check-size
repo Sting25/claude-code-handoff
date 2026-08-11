@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# .githooks/lib/check-size — file-size cap.
+# Reads NUL-separated file paths on stdin (produced by `git ... -z`). Reports
+# any source file whose STAGED BLOB exceeds MAX_LINES (default 500). Counts the
+# committed blob (`git show ":0:<path>"`) rather than the working-tree file, so
+# the count reflects exactly what will be committed. Skips docs, data, and
+# binary types.
+#
+# Per-project overrides (lib/scaffold-config, .scaffold.toml): a per-path
+# `[size]` glob raises the cap for matching files, and `[rules.size]` can
+# disable the whole check or downgrade it to a non-failing warning. Absent or
+# unparseable config → the MAX_LINES default, fully enforced (fail safe).
+#
+# Output: human-readable on tty; ::error file=...:: when --ci is passed.
+# Exit:   0 if all OK, 1 if any violation.
+
+set -euo pipefail
+
+MAX_LINES=${MAX_LINES:-500}
+case "$MAX_LINES" in
+  ''|*[!0-9]*)
+    echo "error: MAX_LINES must be a positive integer, got: $MAX_LINES" >&2
+    exit 2
+    ;;
+esac
+[ "$MAX_LINES" -gt 0 ] || { echo "error: MAX_LINES must be > 0" >&2; exit 2; }
+
+CI_MODE=0
+[ "${1:-}" = "--ci" ] && CI_MODE=1
+
+# Escape a value for a GitHub workflow command (see check-secrets). `prop` mode
+# (file=) escapes %, CR, LF, : and , so a crafted filename can't forge or
+# truncate the annotation. The message body here is fixed text, so only file=
+# needs escaping.
+ghesc() {
+  local s=$2
+  s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}
+  if [ "$1" = prop ]; then s=${s//:/%3A}; s=${s//,/%2C}; fi
+  printf '%s' "$s"
+}
+
+# Per-project overrides live in .scaffold.toml, read via the sibling
+# scaffold-config helper. `cfg` fails open to empty output if the helper is
+# missing (older install) — callers then fall back to the built-in defaults.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_BIN="$SELF_DIR/scaffold-config"
+cfg() { [ -x "$CONFIG_BIN" ] || return 0; "$CONFIG_BIN" "$@" 2>/dev/null || true; }
+
+# Whole-check state: `disabled` skips the size cap, `warn` reports without
+# failing. Default `error`.
+SIZE_STATE=$(cfg rule-state size); [ -n "$SIZE_STATE" ] || SIZE_STATE=error
+[ "$SIZE_STATE" = disabled ] && exit 0
+
+# Emit a finding at the resolved severity. `warn` prints but does not fail the
+# build (a deliberate, audited downgrade); `error` fails as usual.
+FAILED=0
+emit() {
+  local file=$1 message=$2
+  if [ "$SIZE_STATE" = warn ]; then
+    if [ "$CI_MODE" -eq 1 ]; then echo "::warning file=$(ghesc prop "$file")::$(ghesc data "$message")"
+    else echo "! $file: $message (warn — .scaffold.toml override)"; fi
+  else
+    if [ "$CI_MODE" -eq 1 ]; then echo "::error file=$(ghesc prop "$file")::$(ghesc data "$message")"
+    else echo "✗ $file: $message"; fi
+    FAILED=1
+  fi
+}
+
+while IFS= read -r -d '' file; do
+  [ -z "$file" ] && continue
+  case "$file" in
+    *.md|*.json|*.toml|*.yaml|*.yml|*.lock|*.txt|*.csv|*.sql) continue ;;
+    *.svg|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.pdf) continue ;;
+  esac
+  # Per-path cap from .scaffold.toml [size], else the global MAX_LINES. A junk
+  # value can't slip through: scaffold-config only emits an integer.
+  cap=$(cfg size-cap "$file")
+  case "$cap" in ''|*[!0-9]*) cap=$MAX_LINES ;; esac
+  # `grep -c ''` counts every line, including a trailing line without a
+  # final newline (which `wc -l` would silently miss). -a keeps grep in text
+  # mode so an embedded NUL byte can't abort the count.
+  lines=$(git show ":0:$file" 2>/dev/null | grep -ac '' || true)
+  if [ "$lines" -gt "$cap" ]; then
+    emit "$file" "$lines lines (max $cap) — extract a module"
+  fi
+done
+
+exit $FAILED

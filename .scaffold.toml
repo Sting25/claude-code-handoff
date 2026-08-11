@@ -1,0 +1,83 @@
+# .scaffold.toml — per-project rule overrides for the ai-coding-rules-scaffold
+# guardrails. EVERYTHING here is committed and auditable: it is the single place
+# a team records a deliberate, signed-off deviation from the scaffold defaults.
+# Run `.githooks/lib/scaffold-audit` to list every active override at a glance.
+#
+# This file is OPTIONAL and ships empty (all examples commented out) — with no
+# uncommented entries it changes nothing. Uncomment and edit only what you mean
+# to override, and leave a `reason` + `by` so the next person knows why.
+#
+# Format is a strict TOML subset (see .githooks/lib/scaffold-config for the
+# exact grammar): [section] headers, bare or "quoted" keys, and integer /
+# true,false / "string" values. No arrays, inline tables, or trailing comments.
+#
+# SECURITY BOUNDARY — what you CANNOT override here:
+#   The secret scanner (check-secrets) and the credential-filename check
+#   (check-filenames) ignore this file entirely. Secret and key-file blocking is
+#   non-negotiable and cannot be disabled or downgraded per-project. Overrides
+#   below apply ONLY to forbidden-pattern rules, the file-size cap, and the
+#   repo-hygiene rules. A `severity = "warn"` downgrade still EMITS the finding
+#   (as a CI ::warning::), so a relaxed rule stays visible — it just stops
+#   failing the build.
+
+# ── File-size cap ───────────────────────────────────────────────────────────
+# The default cap is 500 lines (or whatever MAX_LINES is set to). Override it
+# globally or per glob. The most-specific matching glob wins (longest pattern).
+# Globs use shell `[[ == ]]` matching, where `*` also spans `/`.
+#
+# [size]
+# default            = 800        # raise the project-wide cap
+# "legacy/**"        = 2000       # generated/legacy trees you can't split yet
+# "db/migrations/*"  = 5000
+
+# ── Per-rule overrides ────────────────────────────────────────────────────────
+# Key a forbidden-pattern rule by "<patternfile-stem>/<description>", where the
+# description is the text after the TAB in the .forbidden-patterns/<lang>.txt
+# rule. Hygiene rules use the bare ids `conflict-marker`, `case-collision`, and
+# `hidden-unicode`. The size cap as a whole uses the id `size`.
+#
+# Each [rules."..."] table accepts:
+#   disabled = true            # turn the rule off entirely (still auditable)
+#   severity = "warn"          # error (default) -> warn: emit but don't fail
+#   reason   = "..."           # why — surfaced by scaffold-audit
+#   by       = "name + date"   # who signed off
+#
+# To MODIFY a forbidden-pattern's regex or description, edit the rule directly in
+# .forbidden-patterns/<lang>.txt (you own that file after install); git history
+# is the audit trail for those edits. This file owns disable + severity only, so
+# a regex never has to live in two places.
+#
+# [rules."php/var_dump( or print_r( left in code"]
+# disabled = true
+# reason   = "legacy reporting module, tracked in JIRA-1234"
+# by       = "alex 2026-06-11"
+#
+# [rules."frontend/console.log left in code"]
+# severity = "warn"
+# reason   = "debug logging allowed in the spike branch"
+# by       = "sam 2026-06-11"
+#
+# [rules.case-collision]
+# severity = "warn"
+# reason   = "monorepo intentionally ships Readme.md beside README.md"
+# by       = "jo 2026-06-11"
+#
+# [rules.hidden-unicode]
+# severity = "warn"
+# reason   = "this repo legitimately ships RTL/bidi content in localized docs"
+# by       = "rî 2026-06-11"
+
+# ── Active overrides for this repo ──────────────────────────────────────────
+# File-size caps. User decision (chris, 2026-08-10): the handoff writer is NOT
+# to be split — bin/write_handoff.sh stays a single file by design, so it gets
+# a permanent raised cap. install.sh is a curl|bash single-stream installer and
+# cannot source sibling files; splitting it means a concat build step, designed
+# for v0.14.0. The three mid-size bin/ scripts are legacy-over-cap, frozen at
+# roughly current size + headroom so growth still trips the guard.
+
+[size]
+"bin/write_handoff.sh"      = 2000
+"install.sh"                = 1400
+"bin/handoff_turn_append.sh" = 800
+"bin/handoff_provenance.sh"  = 900
+"bin/handoff_ctx_check.sh"   = 700

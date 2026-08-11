@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# .githooks/lib/scaffold-config — read per-project rule overrides from the
+# repo-root `.scaffold.toml`. This is the single place every guardrail consults
+# for "the dev overrode this rule" decisions, so the override state lives in one
+# committed, greppable, auditable file (see lib/scaffold-audit).
+#
+# It parses a strict TOML *subset*, in pure bash + awk (NO python/jq), so the
+# core guardrails keep working on a bare machine:
+#   - `[section]` headers, including dotted/quoted ones: [rules."php/foo bar"]
+#   - bare or "quoted" keys:  default = 800   "src/**" = 1200   disabled = true
+#   - values: integers, true/false, and "double-quoted strings"
+#   - `#` comments on their own line, and blank lines
+# Arrays, inline tables, multiline strings, and trailing comments are NOT
+# supported. Anything it cannot parse is simply ignored — so a malformed config
+# FAILS SAFE: an entry only ever takes effect when it parses cleanly, and the
+# scanners stay fully enforced otherwise. A config can only make checks weaker
+# through an explicit, well-formed entry that a reviewer can see in the diff.
+#
+# SECURITY BOUNDARY: check-secrets and check-filenames deliberately never call
+# this. Secret/credential-file blocking is non-negotiable and cannot be disabled
+# or downgraded per-project — a malicious PR cannot add a `.scaffold.toml` that
+# neuters them. Overrides apply only to: forbidden-pattern rules, the size cap,
+# and the hygiene rules.
+#
+# Subcommands:
+#   size-cap <path>   Print the effective max-lines for <path>: the most-specific
+#                     matching [size] glob (longest pattern wins), else
+#                     [size].default, else nothing (caller keeps its own default).
+#                     Globs use bash `[[ == ]]` semantics, where `*` also spans `/`.
+#   rule-state <id>   Print exactly one of: disabled | warn | error (default
+#                     error). `disabled` wins over `severity`.
+#
+# Rule ids:
+#   "<patternfile-stem>/<description>"  forbidden-pattern rules (quote in TOML)
+#   conflict-marker | case-collision    hygiene rules
+#   size                                 the file-size cap (whole check)
+#
+# Exit: 0 always for the two queries (prints the answer to stdout); 2 on misuse.
+
+set -euo pipefail
+
+CONFIG=".scaffold.toml"
+cmd=${1:-}
+
+# No config → defaults everywhere. size-cap prints nothing; rule-state is error.
+if [ ! -f "$CONFIG" ]; then
+  case "$cmd" in
+    size-cap)   exit 0 ;;
+    rule-state) echo "error"; exit 0 ;;
+    *)          echo "usage: scaffold-config {size-cap <path>|rule-state <id>}" >&2; exit 2 ;;
+  esac
+fi
+
+case "$cmd" in
+  size-cap)
+    path=${2:-}
+    [ -n "$path" ] || exit 0
+    # awk emits the [size] table: "D<TAB>val" for default, "G<TAB>glob<TAB>val"
+    # per glob. Glob-matching needs shell semantics, so it's done in bash below.
+    dump=$(awk '
+      function trim(s){ sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s); return s }
+      function unq(s){ if (s ~ /^".*"$/) s=substr(s,2,length(s)-2); return s }
+      {
+        line=$0; sub(/\r$/,"",line); t=trim(line)
+        if (t=="" || t ~ /^#/) next
+        if (t ~ /^\[/) { sec=t; sub(/^\[/,"",sec); sub(/\]$/,"",sec); insize=(sec=="size"); next }
+        if (!insize) next
+        eq=index(t,"="); if (eq==0) next
+        key=unq(trim(substr(t,1,eq-1))); val=unq(trim(substr(t,eq+1)))
+        if (key=="default") print "D\t" val
+        else print "G\t" key "\t" val
+      }
+    ' "$CONFIG")
+
+    best=""; bestlen=-1; default=""
+    while IFS=$'\t' read -r tag a b; do
+      case "$tag" in
+        D) default=$a ;;
+        G)
+          # Only an integer cap is honoured; a junk value fails safe (ignored).
+          case "$b" in ''|*[!0-9]*) continue ;; esac
+          # shellcheck disable=SC2053  # intentional glob match of $path against $a
+          if [[ "$path" == $a ]] && [ "${#a}" -gt "$bestlen" ]; then
+            best=$b; bestlen=${#a}
+          fi
+          ;;
+      esac
+    done <<<"$dump"
+
+    if [ -n "$best" ]; then
+      printf '%s\n' "$best"
+    else
+      case "$default" in ''|*[!0-9]*) : ;; *) printf '%s\n' "$default" ;; esac
+    fi
+    ;;
+
+  rule-state)
+    id=${2:-}
+    [ -n "$id" ] || { echo "error"; exit 0; }
+    awk -v target="$id" '
+      function trim(s){ sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s); return s }
+      function unq(s){ if (s ~ /^".*"$/) s=substr(s,2,length(s)-2); return s }
+      BEGIN { match_=0; disabled=0; sev="error" }
+      {
+        line=$0; sub(/\r$/,"",line); t=trim(line)
+        if (t=="" || t ~ /^#/) next
+        if (t ~ /^\[/) {
+          sec=t; sub(/^\[/,"",sec); sub(/\]$/,"",sec)
+          if (sec ~ /^rules\./) { match_ = (unq(substr(sec,7))==target) }
+          else { match_=0 }
+          next
+        }
+        if (!match_) next
+        eq=index(t,"="); if (eq==0) next
+        key=unq(trim(substr(t,1,eq-1))); val=unq(trim(substr(t,eq+1)))
+        if (key=="disabled" && val=="true") disabled=1
+        else if (key=="severity") sev=val
+      }
+      END {
+        if (disabled) print "disabled"
+        else if (sev=="warn") print "warn"
+        else print "error"
+      }
+    ' "$CONFIG"
+    ;;
+
+  *)
+    echo "usage: scaffold-config {size-cap <path>|rule-state <id>}" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# Pre-commit hook orchestrator — calls the four check scripts in lib/.
+# Each lib/check-* script is independently runnable; the CI workflow
+# invokes the same scripts so the hook and CI can never drift.
+#
+# Install (from project root) — install.sh handles all of this:
+#   .githooks/pre-commit
+#   .githooks/lib/{check-size,check-patterns,check-filenames,check-secrets}
+#   git config core.hooksPath .githooks
+#
+# Patterns are read from:
+#   .forbidden-patterns/backend.txt   (regex<TAB>description; *.py)
+#   .forbidden-patterns/frontend.txt  (regex<TAB>description; *.ts,*.tsx,*.js,*.jsx)
+#   .forbidden-patterns/shell.txt     (regex<TAB>description; *.sh,*.bash)
+#   .forbidden-patterns/secrets.txt   (regex<TAB>description; all text files)
+#
+# Lines starting with # in those files are comments.
+#
+# The lib/check-* scripts scan the STAGED BLOB (`git show ":0:<path>"`), not the
+# working tree, so symlinks, embedded NUL bytes, and post-stage working-tree
+# edits cannot hide content from the scan.
+
+set -euo pipefail
+
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+LIB="$HOOK_DIR/lib"
+
+# Enumerate staged files NUL-delimited (-z) so a filename containing a newline,
+# tab, or quote can't split the list and slip a file past every scanner. A
+# shell variable cannot hold NUL bytes, so the list goes to a temp file and each
+# check is fed from it. (core.quotepath is irrelevant under -z, which never
+# C-quotes; kept only for defence in depth.)
+# Refuse to let a commit silently disable the scanners by deleting their config.
+# A staged deletion of a .forbidden-patterns/*.txt makes the matching check find
+# no config and exit 0 — a one-commit way to land a secret AND neuter the scan.
+# Checked BEFORE the empty-staged-list exit, since a delete-only commit has an
+# empty ACMR list. Use `git commit --no-verify` if a removal is intended (uninstall).
+DELETED_CONFIG=$(git diff --cached -z --name-only --diff-filter=D | tr '\0' '\n' | grep -E '^\.forbidden-patterns/.+\.txt$' || true)
+if [ -n "$DELETED_CONFIG" ]; then
+  echo "error: this commit deletes forbidden-pattern config, disabling the scanner:" >&2
+  printf '%s\n' "$DELETED_CONFIG" | sed 's/^/       /' >&2
+  echo "       Refusing — re-add it, or use 'git commit --no-verify' if intended." >&2
+  exit 1
+fi
+
+STAGED_LIST=$(mktemp)
+git -c core.quotepath=off diff --cached -z --name-only --diff-filter=ACMR >"$STAGED_LIST"
+if [ ! -s "$STAGED_LIST" ]; then
+  rm -f "$STAGED_LIST"
+  exit 0
+fi
+
+# Make the working tree match the staged content for the duration of the run.
+# The guardrail checks read the index blob directly and so do not depend on this
+# — but the optional ruff/eslint feedback step below lints working-tree files,
+# and stashing keeps it honest. Skipped during merge/rebase, where stash is
+# unsafe.
+NEED_RESTORE=0
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null || echo .git)
+if [ ! -e "$GIT_DIR/MERGE_HEAD" ] && [ ! -e "$GIT_DIR/REBASE_HEAD" ]; then
+  if ! git diff --quiet 2>/dev/null; then
+    if git stash push --keep-index --quiet --message "pre-commit-hook" 2>/dev/null; then
+      NEED_RESTORE=1
+    else
+      echo "error: pre-commit hook could not stash unstaged changes." >&2
+      echo "       Refusing to proceed — commit or stash your changes manually first." >&2
+      rm -f "$STAGED_LIST"
+      exit 1
+    fi
+  fi
+fi
+
+# shellcheck disable=SC2317,SC2329  # invoked via the EXIT trap below
+cleanup() {
+  if [ "$NEED_RESTORE" -eq 1 ]; then
+    # Do NOT silently swallow a failed pop: on a conflicted restore the user's
+    # unstaged work is stranded in the stash, and `|| true` would hide that.
+    if ! git stash pop --quiet 2>/dev/null; then
+      echo "" >&2
+      echo "error: pre-commit could not automatically restore your unstaged changes." >&2
+      echo "       They are SAFE in the stash. Recover with:" >&2
+      echo "         git stash list      # find the 'pre-commit-hook' entry" >&2
+      echo "         git stash pop       # resolve conflicts, or:" >&2
+      echo "         git checkout stash@{0} -- <file>" >&2
+    fi
+  fi
+  rm -f "$STAGED_LIST"
+}
+trap cleanup EXIT
+
+FAILED=0
+"$LIB/check-size"      <"$STAGED_LIST" || FAILED=1
+"$LIB/check-patterns"  <"$STAGED_LIST" || FAILED=1
+"$LIB/check-filenames" <"$STAGED_LIST" || FAILED=1
+"$LIB/check-secrets"   <"$STAGED_LIST" || FAILED=1
+"$LIB/check-hygiene"   <"$STAGED_LIST" || FAILED=1
+# Opt-in only: present iff installed with `install.sh --gitleaks-hook`. The
+# existence guard is the opt-in switch — a project that didn't opt in has no
+# such file and skips it entirely.
+if [ -x "$LIB/check-gitleaks" ]; then
+  "$LIB/check-gitleaks" <"$STAGED_LIST" || FAILED=1
+fi
+
+# Lint staged files with ruff / eslint when configs exist and the tool is
+# installed. CI is the source of truth — running here just shortens the
+# feedback loop. Silently skipped if a tool isn't on PATH so the hook
+# stays usable on machines that haven't run `pip install ruff` yet.
+STAGED_PY=()
+STAGED_JS=()
+STAGED_PHP=()
+while IFS= read -r -d '' f; do
+  [ -z "$f" ] && continue
+  case "$f" in
+    *.py)                  STAGED_PY+=("$f") ;;
+    *.ts|*.tsx|*.js|*.jsx|*.vue) STAGED_JS+=("$f") ;;
+    *.php|*.phtml)         STAGED_PHP+=("$f") ;;
+  esac
+done <"$STAGED_LIST"
+
+# Config detection mirrors `lint.yml`'s `hashFiles(...)` predicate so the
+# hook fires in the same projects where CI does.
+if [ ${#STAGED_PY[@]} -gt 0 ] \
+   && { [ -f ruff.toml ] || [ -f pyproject.toml ]; } \
+   && command -v ruff >/dev/null 2>&1; then
+  ruff check -- "${STAGED_PY[@]}" || FAILED=1
+fi
+
+if [ ${#STAGED_JS[@]} -gt 0 ] \
+   && { [ -f eslint.config.js ] || [ -f package.json ]; } \
+   && command -v npx >/dev/null 2>&1 \
+   && npx --no-install eslint --version >/dev/null 2>&1; then
+  npx --no-install eslint -- "${STAGED_JS[@]}" || FAILED=1
+fi
+
+# Type-check with tsc when a tsconfig.json exists and TypeScript is installed.
+# Run PROJECT-WIDE (no file args) — passing individual files makes tsc ignore
+# tsconfig.json and its compiler options. Silently skipped when absent, like
+# the linters above; CI is the authoritative backstop.
+if [ ${#STAGED_JS[@]} -gt 0 ] \
+   && [ -f tsconfig.json ] \
+   && command -v npx >/dev/null 2>&1 \
+   && npx --no-install tsc --version >/dev/null 2>&1; then
+  npx --no-install tsc --noEmit || FAILED=1
+fi
+
+# PHP: zero-config syntax check (`php -l`) on each staged file when php is on
+# PATH, plus phpcs when a ruleset/composer project is present and phpcs is
+# installed. Silently skipped otherwise, like the linters above.
+if [ ${#STAGED_PHP[@]} -gt 0 ] && command -v php >/dev/null 2>&1; then
+  for f in "${STAGED_PHP[@]}"; do
+    php -l "$f" >/dev/null 2>&1 || { echo "✗ $f: PHP syntax error (php -l)"; FAILED=1; }
+  done
+fi
+if [ ${#STAGED_PHP[@]} -gt 0 ] \
+   && { [ -f phpcs.xml ] || [ -f phpcs.xml.dist ] || [ -f composer.json ]; } \
+   && command -v phpcs >/dev/null 2>&1; then
+  phpcs -- "${STAGED_PHP[@]}" || FAILED=1
+fi
+
+if [ "$FAILED" -ne 0 ]; then
+  echo ""
+  echo "Pre-commit failed. Fix the issues above or use 'git commit --no-verify' to skip (don't)."
+  exit 1
+fi
+
+exit 0

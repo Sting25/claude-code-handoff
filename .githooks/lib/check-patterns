@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# .githooks/lib/check-patterns — forbidden-pattern scan for source files.
+# Reads NUL-separated file paths on stdin (produced by `git ... -z`). Auto-
+# discovers every `.forbidden-patterns/*.txt` (except secrets.txt, which is
+# check-secrets' domain) and scans the files whose extension the pattern file
+# claims. A pattern file declares its extensions with a header line:
+#   # scaffold-extensions: py
+#   # scaffold-extensions: ts tsx js jsx vue
+# so a new language is added by dropping `<lang>.txt` with that header — no edit
+# to this script. backend.txt / frontend.txt / shell.txt have a built-in
+# fallback mapping for backward compatibility.
+# Pattern format: <regex><TAB><description>
+# (TAB is the field separator so regex can use literal `|` alternation.)
+#
+# Like check-secrets, this scans the STAGED/INDEXED BLOB via
+# `git show ":0:<path>"` rather than the working-tree file, so symlinks, NUL
+# bytes, and post-stage edits cannot hide content from the scan. Every grep
+# passes -a/--text for the same reason.
+#
+# A `scaffold-allow` marker exempts a line, but ONLY after a comment leader
+# (`#`, `//`, `/*`, `<!--`, `--`) — like `# noqa`. Use sparingly.
+#
+# Output: human-readable on tty; ::error file=...:: when --ci is passed.
+# Exit:   0 if all OK, 1 if any violation.
+
+set -euo pipefail
+
+CI_MODE=0
+[ "${1:-}" = "--ci" ] && CI_MODE=1
+
+# Escape a value for a GitHub workflow command (see check-secrets). `data` mode
+# escapes %, CR, LF; `prop` mode (file=) additionally escapes : and , so a
+# crafted filename/description can't forge or truncate the annotation.
+ghesc() {
+  local s=$2
+  s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}
+  if [ "$1" = prop ]; then s=${s//:/%3A}; s=${s//,/%2C}; fi
+  printf '%s' "$s"
+}
+
+# Per-project overrides (.scaffold.toml via the sibling scaffold-config helper).
+# `cfg` fails open to empty output when the helper is missing (older install);
+# the caller then treats every rule as fully enforced (fail safe).
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_BIN="$SELF_DIR/scaffold-config"
+cfg() { [ -x "$CONFIG_BIN" ] || return 0; "$CONFIG_BIN" "$@" 2>/dev/null || true; }
+
+# Emit one finding at the resolved severity. `warn` reports without failing the
+# build (a deliberate, audited downgrade); `error` fails. FAILED is the global
+# set below; this is only ever called after it exists.
+report() {
+  local state=$1 file=$2 desc=$3 matches=$4
+  if [ "$state" = warn ]; then
+    if [ "$CI_MODE" -eq 1 ]; then
+      echo "::warning file=$(ghesc prop "$file")::$(ghesc data "$desc")"
+    else
+      echo "! $file: $desc (warn — .scaffold.toml override)"
+      printf '%s\n' "$matches" | head -3 | sed 's/^/    /' || true
+    fi
+  else
+    if [ "$CI_MODE" -eq 1 ]; then
+      echo "::error file=$(ghesc prop "$file")::$(ghesc data "$desc")"
+    else
+      echo "✗ $file: $desc"
+      printf '%s\n' "$matches" | head -3 | sed 's/^/    /' || true
+    fi
+    FAILED=1
+  fi
+}
+
+# Cap the maximum scanned LINE length (see check-secrets): one very long line
+# can make the combined ERE hang the hook/CI. Over-long lines are dropped with
+# a warning. Linear awk length check; the ERE on a long line is not linear.
+MAX_LINE_LENGTH=${MAX_LINE_LENGTH:-50000}
+case "$MAX_LINE_LENGTH" in
+  ''|*[!0-9]*) echo "error: MAX_LINE_LENGTH must be a positive integer, got: $MAX_LINE_LENGTH" >&2; exit 2 ;;
+esac
+[ "$MAX_LINE_LENGTH" -gt 0 ] || { echo "error: MAX_LINE_LENGTH must be > 0" >&2; exit 2; }
+
+FILES=()
+while IFS= read -r -d '' f; do
+  [ -n "$f" ] && FILES+=("$f")
+done
+
+scan() {
+  local config=$1
+  shift
+  local exts=("$@")
+  [ -f "$config" ] || return 0
+  [ ${#FILES[@]} -eq 0 ] && return 0
+
+  # Rule-id prefix for .scaffold.toml lookups: the pattern file's stem, e.g.
+  # `php` for php.txt. A rule's full id is "<stem>/<description>".
+  local stem
+  stem=$(basename "$config" .txt)
+
+  local raw_patterns=() raw_descs=()
+  local line pattern description
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    [ -z "$line" ] && continue
+    case "$line" in \#*) continue ;; esac
+    # Require a real TAB separator (see check-secrets): a line without one would
+    # become a whole-line pattern with an empty description. Skip + warn.
+    case "$line" in
+      *$'\t'*) ;;
+      *) echo "warning: $config: line has no TAB separator, skipped: $line" >&2; continue ;;
+    esac
+    pattern=${line%%$'\t'*}
+    description=${line#*$'\t'}
+    [ -z "$pattern" ] && continue
+    raw_patterns+=("$pattern")
+    raw_descs+=("$description")
+  done <"$config"
+
+  [ ${#raw_patterns[@]} -eq 0 ] && return 0
+
+  # Validate each pattern up-front. An invalid ERE here would otherwise
+  # poison the combined regex (silently dropping every file) and produce
+  # cryptic per-file grep errors. `printf '' | grep -E p` returns 1
+  # (no match) for valid patterns and writes to stderr for invalid ones —
+  # so empty stderr means valid.
+  local patterns=() descriptions=()
+  local i p_err
+  for i in "${!raw_patterns[@]}"; do
+    p_err=$(printf '' | grep -E -- "${raw_patterns[$i]}" 2>&1 1>/dev/null || true)
+    if [ -n "$p_err" ]; then
+      echo "warning: $config: invalid pattern dropped: ${raw_patterns[$i]} — $p_err" >&2
+      continue
+    fi
+    patterns+=("${raw_patterns[$i]}")
+    descriptions+=("${raw_descs[$i]}")
+  done
+
+  [ ${#patterns[@]} -eq 0 ] && return 0
+
+  # Combine all patterns into one ERE so a single grep call per file decides
+  # whether to drop into the per-pattern attribution loop. Cuts grep calls
+  # from O(P*F) to F + matching_files*P — large repos see a big speedup.
+  local combined=""
+  local p
+  for p in "${patterns[@]}"; do
+    if [ -z "$combined" ]; then
+      combined="(${p})"
+    else
+      combined="${combined}|(${p})"
+    fi
+  done
+
+  # Validate the COMBINED regex. If individually-valid patterns form an invalid
+  # combined ERE, FAIL CLOSED: skip the pre-filter and scan every file
+  # per-pattern, rather than letting a grep error be swallowed as "no match".
+  local use_prefilter=1 c_err
+  c_err=$(printf '' | grep -E -- "$combined" 2>&1 1>/dev/null || true)
+  if [ -n "$c_err" ]; then
+    echo "warning: $config: combined pattern invalid, scanning per-pattern (fail-closed): $c_err" >&2
+    use_prefilter=0
+  fi
+
+  local file ext keep content cap_rc pat desc m
+  for file in "${FILES[@]}"; do
+    keep=0
+    for ext in "${exts[@]}"; do
+      case "$file" in *."$ext") keep=1; break ;; esac
+    done
+    [ "$keep" -eq 1 ] || continue
+
+    # Scan the staged blob, not the working-tree path (see header). awk (linear)
+    # drops over-long lines so the combined ERE never sees them (ReDoS guard).
+    cap_rc=0
+    content=$(git show ":0:$file" 2>/dev/null | awk -v n="$MAX_LINE_LENGTH" 'length > n { d=1; next } { print } END { exit (d ? 9 : 0) }') || cap_rc=$?
+    if [ "$cap_rc" -eq 9 ]; then
+      echo "warning: $file: line(s) over $MAX_LINE_LENGTH chars dropped from the scan (minified/generated?)" >&2
+    fi
+    [ -n "$content" ] || continue
+
+    if [ "$use_prefilter" -eq 1 ]; then
+      # -anE (NOT -i): backend/frontend/shell patterns are case-SENSITIVE, so
+      # identifiers like `Alert(`, `Console.log`, `Print(` are not false matches.
+      # -a keeps grep in text mode; check-secrets is the case-insensitive one.
+      grep -anE -- "$combined" <<<"$content" >/dev/null 2>&1 || continue
+    fi
+
+    for i in "${!patterns[@]}"; do
+      pat="${patterns[$i]}"
+      desc="${descriptions[$i]}"
+      # Exempt only a comment-anchored marker (see check-secrets).
+      m=$(grep -anE -- "$pat" <<<"$content" | grep -ivE '(#|//|/\*|<!--|--)[[:space:]]*scaffold-allow' || true)
+      [ -n "$m" ] || continue
+      # Per-rule override: `disabled` skips the rule, `warn` reports without
+      # failing, anything else (incl. missing config) enforces as `error`.
+      local state
+      state=$(cfg rule-state "$stem/$desc"); [ -n "$state" ] || state=error
+      [ "$state" = disabled ] && continue
+      report "$state" "$file" "$desc" "$m"
+    done
+  done
+}
+
+# Resolve which file extensions a pattern file applies to. An explicit
+#   # scaffold-extensions: ext1 ext2 ...
+# header (first matching comment line) wins, so a new language is added by just
+# dropping a `<lang>.txt` with that header — no edit to this script. The three
+# original files have a built-in fallback so an older copy without the header
+# keeps working.
+exts_for() {
+  local cfg=$1 hdr
+  hdr=$(grep -m1 -E '^#[[:space:]]*scaffold-extensions:' "$cfg" 2>/dev/null \
+          | sed -E 's/^#[[:space:]]*scaffold-extensions:[[:space:]]*//; s/[[:space:]]+$//')
+  if [ -n "$hdr" ]; then printf '%s' "$hdr"; return; fi
+  case "$(basename "$cfg")" in
+    backend.txt)  printf 'py' ;;
+    frontend.txt) printf 'ts tsx js jsx vue' ;;
+    shell.txt)    printf 'sh bash' ;;
+    *)            printf '' ;;
+  esac
+}
+
+FAILED=0
+# Auto-discover every pattern file. secrets.txt is check-secrets' domain (it
+# scans all files, not by extension), so skip it here.
+for cfg in .forbidden-patterns/*.txt; do
+  [ -e "$cfg" ] || continue   # no glob match → literal string; skip
+  case "$(basename "$cfg")" in secrets.txt) continue ;; esac
+  cfg_exts=$(exts_for "$cfg")
+  if [ -z "$cfg_exts" ]; then
+    echo "warning: $cfg: no '# scaffold-extensions:' header and no built-in mapping — skipped" >&2
+    continue
+  fi
+  # shellcheck disable=SC2086  # word-splitting $cfg_exts into separate args is intentional
+  scan "$cfg" $cfg_exts
+done
+
+exit $FAILED
