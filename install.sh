@@ -1,35 +1,51 @@
 #!/usr/bin/env bash
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
-# What it does:
-#   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
-#      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
-#   2. Patches ~/.claude/settings.json to add six hooks
-#      (SessionStart / SessionEnd / PreCompact / PostCompact / Stop /
-#      UserPromptSubmit), six permission entries, and — only when you
-#      don't already have one — a statusLine command (never overwrites
-#      an existing statusLine; prints the manual step instead).
-#      Requires jq; falls back to printing the snippet if jq is missing.
-#
-# Idempotent. Existing files at symlink targets are backed up to
-# <path>.bak.<timestamp> before being replaced. Existing settings.json
-# is backed up the same way before any patch. Re-runs are safe and only
-# touch what's actually missing.
-#
-# Installing from a volatile path (a /tmp worktree, git-archive extract, CI
-# scratch) auto-switches to copy mode, since symlinks into it would dangle once
-# it's cleaned up and the hooks would then fail silently. Override with --link.
-#
-# Usage:
-#   ./install.sh              # install (symlink from a persistent clone, else copy)
-#   ./install.sh --copy       # force copy mode (good for ephemeral sources)
-#   ./install.sh --link       # force symlinks even from a volatile path
-#   ./install.sh --model 'opus[1m]'  # also pin "model" in settings.json (env: HANDOFF_MODEL)
-#   ./install.sh --doctor     # report any dangling/missing installed hooks
-#   ./install.sh --uninstall  # remove symlinks + strip patched entries
-#   ./install.sh --help
+# Full behavior/usage summary lives in usage() below — that heredoc is the
+# single source of truth for `install.sh --help`, so it stays in sync with
+# reality by construction instead of by discipline. Read it there, or just
+# run `./install.sh --help`.
 
 set -euo pipefail
+
+# Usage text for --help / -h. A heredoc (not a self-read of this file's
+# comments) so it works no matter how the script's bytes arrived: piped in
+# via `curl ... | bash -s -- --help`, BASH_SOURCE[0] is "bash" (there is no
+# real path to sed), so a self-read prints nothing. A heredoc is parsed out
+# of the script text itself and needs no path or working stdin.
+usage() {
+  cat <<'USAGE'
+install.sh — wire this repo's handoff skill into ~/.claude/.
+
+What it does:
+  1. Symlinks (or copies, where symlinks aren't available — e.g. Git
+     Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
+  2. Patches ~/.claude/settings.json to add six hooks
+     (SessionStart / SessionEnd / PreCompact / PostCompact / Stop /
+     UserPromptSubmit), six permission entries, and — only when you
+     don't already have one — a statusLine command (never overwrites
+     an existing statusLine; prints the manual step instead).
+     Requires jq; falls back to printing the snippet if jq is missing.
+
+Idempotent. Existing files at symlink targets are backed up to
+<path>.bak.<timestamp> before being replaced. Existing settings.json
+is backed up the same way before any patch. Re-runs are safe and only
+touch what's actually missing.
+
+Installing from a volatile path (a /tmp worktree, git-archive extract, CI
+scratch) auto-switches to copy mode, since symlinks into it would dangle once
+it's cleaned up and the hooks would then fail silently. Override with --link.
+
+Usage:
+  ./install.sh              # install (symlink from a persistent clone, else copy)
+  ./install.sh --copy       # force copy mode (good for ephemeral sources)
+  ./install.sh --link       # force symlinks even from a volatile path
+  ./install.sh --model 'opus[1m]'  # also pin "model" in settings.json (env: HANDOFF_MODEL)
+  ./install.sh --doctor     # report any dangling/missing installed hooks
+  ./install.sh --uninstall  # remove symlinks + strip patched entries
+  ./install.sh --help
+USAGE
+}
 
 # Everything this installer creates under $claude_home — settings.json and its
 # backups, the bin/skills copies (copy-mode installs), and the dirs themselves —
@@ -133,7 +149,7 @@ while [[ $# -gt 0 ]]; do
       model_pin="$2"; shift ;;
     --model=*)   model_pin="${1#--model=}" ;;
     --help|-h)
-      sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      usage
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -508,6 +524,35 @@ numbers, call our script from your existing statusline command instead.
 EOF
 }
 
+# Install $settings.tmp over $settings — the ONE place every maybe_install_*/
+# maybe_uninstall_*/migrate_* function below lands its jq output, instead of
+# each calling `mv` directly. ensure_settings_json validates $settings once,
+# up front, but every one of these functions re-reads whatever the PREVIOUS
+# step's `mv` just installed — so that one up-front check does not cover the
+# rest of the chain. jq on empty/unreadable input still exits 0 and prints
+# nothing (a crashed jq, a disk full mid-write, anything that truncates the
+# pipe): a bare `mv` of that nothing would blank settings.json with a
+# false-success exit code, and because rc==0 the EXIT trap's rollback (see
+# cleanup() near the top of the file) would never fire — the script would
+# print "done" over a wiped config. handoff_statusline.sh's write_cache
+# already guards precisely this pattern ("never install the tmp unless printf
+# succeeded") for a far less valuable file; this is the same discipline
+# applied to the one file every hook depends on.
+#
+# Every call site here runs inside patch_settings() or unpatch_settings(),
+# which arm patch_in_progress and take the pre-patch backup BEFORE calling
+# any of these — so `exit 1` on a bad tmp both aborts the run AND is the
+# rollback: cleanup() sees patch_in_progress=1 and a non-zero rc and restores
+# $settings from $settings_backup. No caller needs to check a return value.
+commit_settings_tmp() {
+  if [[ ! -s "$settings.tmp" ]] || ! jq -e . "$settings.tmp" >/dev/null 2>&1; then
+    echo "  ERROR   jq produced empty or invalid JSON while patching $settings — aborting." >&2
+    echo "          $settings is unmodified; restoring from the pre-patch backup." >&2
+    exit 1
+  fi
+  mv "$settings.tmp" "$settings"
+}
+
 # Install-or-reconcile one hook. Three cases per event:
 #   - marker absent            -> append the canonical command (fresh install)
 #   - marker present, current  -> ok (idempotent re-run)
@@ -550,7 +595,7 @@ maybe_install_hook() {
         | map(select((.hooks // []) | length > 0))
       )
     ' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  UPDATE  hook $event — stale command from an older install rewritten:"
     while IFS= read -r _old; do
       echo "          old: $_old"
@@ -563,7 +608,7 @@ maybe_install_hook() {
     .hooks //= {}
     | .hooks[$e] = ((.hooks[$e] // []) + [{"hooks": [{"type": "command", "command": $c}]}])
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  add     hook $event"
 }
 
@@ -578,7 +623,7 @@ maybe_install_perm() {
     .permissions //= {}
     | .permissions.allow = ((.permissions.allow // []) + [$p])
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  add     permission: $perm"
 }
 
@@ -592,7 +637,7 @@ maybe_install_model() {
   cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
   if [[ -z "$cur" ]]; then
     jq --arg m "$model_pin" '.model = $m' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     printf '%s\n' "$model_pin" > "$model_pin_record"
     echo "  add     model: $model_pin (recorded for uninstall)"
   elif [[ "$cur" == "$model_pin" ]]; then
@@ -613,7 +658,7 @@ maybe_uninstall_model() {
   cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
   if [[ -n "$rec" && "$cur" == "$rec" ]]; then
     jq 'del(.model)' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  remove  model: $rec (this installer set it, unchanged since)"
   else
     echo "  keep    model '$cur' (differs from the recorded pin '$rec' — you changed"
@@ -636,7 +681,7 @@ maybe_install_statusline() {
   if jq -e '(.statusLine // null) == null' "$settings" >/dev/null 2>&1; then
     jq --arg c "$sl_cmd" '.statusLine = {"type": "command", "command": $c}' \
       "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  add     statusLine"
     return
   fi
@@ -649,7 +694,7 @@ maybe_install_statusline() {
       return
     fi
     jq --arg c "$sl_cmd" '.statusLine.command = $c' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  UPDATE  statusLine — stale command from an older install rewritten:"
     echo "          old: $cur_sl"
     echo "          new: $sl_cmd"
@@ -665,7 +710,7 @@ maybe_uninstall_statusline() {
   if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
        "$settings" >/dev/null 2>&1; then
     jq 'del(.statusLine)' "$settings" > "$settings.tmp"
-    mv "$settings.tmp" "$settings"
+    commit_settings_tmp
     echo "  remove  statusLine"
   elif jq -e '(.statusLine // null) != null' "$settings" >/dev/null 2>&1; then
     echo "  ok      statusLine (not ours; leaving alone)"
@@ -693,7 +738,7 @@ maybe_uninstall_hook() {
     )
     | if ((.hooks[$e] // []) | length) == 0 then del(.hooks[$e]) else . end
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  remove  hook $event"
 }
 
@@ -707,7 +752,7 @@ maybe_uninstall_perm() {
   jq --arg p "$perm" '
     .permissions.allow |= (map(select(. != $p)))
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  remove  permission: $perm"
 }
 
@@ -730,7 +775,7 @@ migrate_legacy_ss_hook() {
     )
     | if ((.hooks.SessionStart // []) | length) == 0 then del(.hooks.SessionStart) else . end
   ' "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  commit_settings_tmp
   echo "  migrate legacy SessionStart inline command removed (pre-0.3.0)"
 }
 
@@ -885,7 +930,7 @@ unpatch_settings() {
 # loudly here. Exit non-zero if anything is broken so CI / a wrapper can detect
 # it. (issue #21)
 doctor() {
-  local broken=0 dst tgt name mdl
+  local broken=0 dst tgt name mdl secret smode
   echo "doctor: checking installed handoff hooks under $claude_home/bin"
   # jq is a RUNTIME dependency of the Stop hook (payload parsing), the ctx
   # nudge, and the /handoff-recover tail rescue — a resolving script link is
@@ -920,6 +965,38 @@ doctor() {
       broken=$((broken + 1))
     fi
   done
+  # Secret-file hygiene. The per-machine HMAC secret is what makes a
+  # handoff's rules layer load as BINDING (issue #42): group/other-readable,
+  # any local reader can forge the trailer; a symlink at the path could be
+  # planted to point key generation somewhere attacker-readable (the signer
+  # refuses it, silently degrading to unsigned). Same effective path as the
+  # runtime and remove_secret_if_ours: the HANDOFF_SECRET_FILE override wins
+  # over the default under $claude_home — doctor is read-only, so unlike
+  # uninstall it can safely inspect an overridden location. Absent is NOT an
+  # error: the secret is minted lazily on the first signed write.
+  secret="${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}"
+  if [[ -L "$secret" ]]; then
+    echo "  BROKEN  $secret is a symlink (possibly planted) — the signer refuses it;"
+    echo "          remove the link: rm '$secret' (a fresh secret is generated on the next signed write)"
+    broken=$((broken + 1))
+  elif [[ -f "$secret" ]]; then
+    # Portable mode read: GNU stat -c %a with BSD stat -f %Lp fallback.
+    smode="$(stat -c %a "$secret" 2>/dev/null || stat -f %Lp "$secret" 2>/dev/null)" || smode=""
+    if [[ "$smode" =~ ^[0-7]+$ ]] && (( 8#$smode & 8#77 )); then
+      echo "  BROKEN  $secret is group/other-readable (mode $smode) — the HMAC key is"
+      echo "          exposed to other local users; run: chmod 600 '$secret'"
+      broken=$((broken + 1))
+    else
+      echo "  ok      $secret (regular file, mode ${smode:-unreadable}, no group/other access)"
+    fi
+  elif [[ -e "$secret" ]]; then
+    # Exists but is not a regular file (directory, fifo, ...): the signer
+    # can't use it, so signing is silently disabled — that's breakage.
+    echo "  BROKEN  $secret exists but is not a regular file — signing is silently disabled"
+    broken=$((broken + 1))
+  else
+    echo "  note    $secret absent — generated on first signed write (not an error)"
+  fi
   echo
   # statusLine wiring report — informational only, never counts toward
   # `broken`: an unwired or user-owned statusLine is a legitimate state (we

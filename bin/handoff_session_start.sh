@@ -24,20 +24,6 @@
 
 set -euo pipefail
 
-# Anchor on the git worktree top, matching the writer hooks (write_handoff.sh,
-# handoff_turn_append.sh, and handoff_ctx_check.sh all resolve their root via
-# `git rev-parse --show-toplevel`). Reading CLAUDE_PROJECT_DIR/$PWD directly broke
-# when Claude Code was launched from a SUBDIRECTORY of the repo: the writers put
-# the handoff at <toplevel>/.claude but this hook looked under <subdir>/.claude,
-# found nothing, and silently no-op'd. Resolve the top from the project dir; fall
-# back to that dir when it is not a git worktree.
-start_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
-repo="$(git -C "$start_dir" rev-parse --show-toplevel 2>/dev/null || true)"
-[ -n "$repo" ] || repo="$start_dir"
-current="$repo/.claude/handoff_current.md"
-current_relpath=".claude/handoff_current.md"
-history_dir="$repo/.claude/handoff_history"
-
 # --- Hook payload. SessionStart hooks receive JSON on stdin, including a
 # "source" field ("startup" | "resume" | "clear" | "compact"). We branch on it
 # in-script rather than via a settings.json matcher, so one installed hook
@@ -46,7 +32,8 @@ history_dir="$repo/.claude/handoff_history"
 # startup behavior, exactly as before). The `-t 0` guard skips the read when
 # stdin is a terminal (manual runs, some test invocations) so `cat` can't
 # block. No jq: this script stays dependency-light by contract, and the field
-# is a fixed lowercase enum, so a sed extraction is exact enough.
+# is a fixed lowercase enum, so a sed extraction is exact enough. Read before
+# root resolution below because the payload's "cwd" feeds the resolver.
 payload=""
 if [ ! -t 0 ]; then
   payload="$(cat 2>/dev/null || true)"
@@ -54,6 +41,75 @@ fi
 hook_source="$(printf '%s' "$payload" \
   | LC_ALL=C sed -nE 's/.*"source"[[:space:]]*:[[:space:]]*"([a-z]+)".*/\1/p' \
   | head -n 1 || true)"
+# Payload "cwd" — same no-jq sed style as "source" above, but cwd values
+# contain slashes, so the capture is "any run of non-quote characters" rather
+# than a fixed enum: permissive enough for real paths, and it cannot run past
+# the JSON string's closing quote. Anything surprising (embedded escapes, a
+# deleted dir) is discarded by the -d validation below rather than trusted.
+hook_cwd="$(printf '%s' "$payload" \
+  | LC_ALL=C sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+  | head -n 1 || true)"
+[ -n "$hook_cwd" ] && [ -d "$hook_cwd" ] || hook_cwd=""
+
+# --- Project root. Shared resolver (bin/handoff_provenance.sh):
+# CLAUDE_PROJECT_DIR (validated -d) -> payload cwd -> $PWD, then the git
+# toplevel of that anchor. This loader always anchored on the project dir,
+# but the WRITER hooks used a bare `git rev-parse --show-toplevel` anchored
+# on the hook process's cwd — so with cwd != CLAUDE_PROJECT_DIR (worktrees,
+# submodules, a mid-session `cd`) the handoff was written where this loader
+# never looked and the load silently no-op'd. The subdirectory-launch fix
+# (resolve the git top from the project dir, fall back to the dir itself
+# off-git) is preserved inside the resolver. The lib also serves prov_ok
+# below; when it is absent the inline fallback keeps this script standalone.
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if [ -n "$prov_dir" ] && [ -f "$prov_dir/handoff_provenance.sh" ]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+fi
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$hook_cwd"
+  repo="$HANDOFF_ROOT"
+  in_git="$HANDOFF_ROOT_IN_GIT"
+else
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [ -d "$anchor" ] || anchor="$PWD"
+  repo="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  in_git=1
+  if [ -z "$repo" ]; then
+    in_git=0
+    repo="$anchor"
+  fi
+fi
+current="$repo/.claude/handoff_current.md"
+current_relpath=".claude/handoff_current.md"
+history_dir="$repo/.claude/handoff_history"
+
+# Symlink read guard — the read-side twin of write_handoff.sh's write guard.
+# Every read below (`[ -f ]`, sed, cat) FOLLOWS a symlink, and this file is
+# emitted verbatim into the next session's MODEL CONTEXT — so a malicious
+# cloned repo can COMMIT .claude/handoff_current.md as a symlink to a victim
+# file outside the repo (~/.ssh/id_rsa, ~/.claude/settings.json) and the first
+# SessionStart in the clone would load the target's content into the model.
+# The write side has refused planted symlinks since the paths#1/#4 fix; the
+# read side needs the matching refusal. Warn visibly (SessionStart output is
+# the one place the user reliably sees) and treat the handoff as ABSENT so the
+# miss-visibility / recover logic below proceeds exactly as for a fresh repo —
+# never crash the hook.
+# The check is DIRECTORY-AWARE, matching write_handoff.sh:313: a leaf-only
+# `-L "$current"` test is false when `.claude` ITSELF is the symlink, because
+# the leaf is then a real file at the target — so committing `.claude` as a
+# link bypassed the guard entirely and the target's content still reached the
+# model. Both components are refused for the same reason.
+current_is_symlink=0
+if [ -L "$repo/.claude" ]; then
+  current_is_symlink=1
+  echo "⚠️  handoff: $repo/.claude is a symlink — refusing to read through it (a cloned repo could point it at a directory outside the repo, so every file under it is attacker-chosen). Treating the handoff as absent; replace the symlink with a real directory to restore loading."
+  echo
+elif [ -L "$current" ]; then
+  current_is_symlink=1
+  echo "⚠️  handoff: $current is a symlink — refusing to read through it (a cloned repo could point it at a file outside the repo, e.g. a key or dotfile). Treating the handoff as absent; replace the symlink with a regular file to restore loading."
+  echo
+fi
 
 # Untrusted-content safety. handoff_current.md and the history snapshots are cat
 # verbatim into the next session's MODEL CONTEXT, and in a cloned/downloaded repo
@@ -84,7 +140,7 @@ defang_untrusted() {  # <file, or stdin when no arg> -> defanged content on stdo
   # (Keep this pattern in sync with handoff_defang in handoff_provenance.sh —
   # this copy is deliberately self-contained because the defang is security-
   # critical and must not depend on the optional lib being installed.)
-  LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' "$@" \
+  LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout|local-command-stderr)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' "$@" \
     || echo "⚠️  handoff: defang filter failed — handoff content above may be truncated"
 }
 emit_untrusted() {  # <file> -> caveat + defanged content
@@ -106,10 +162,11 @@ emit_untrusted() {  # <file> -> caveat + defanged content
 # no openssl, no/stale MAC, tracked file, HANDOFF_TRUST_DISABLE=1 — keeps
 # TODAY'S treatment exactly: the whole file under data framing.
 prov_ok=0
-prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
-if [ -n "$prov_dir" ] && [ -f "$prov_dir/handoff_provenance.sh" ] && [ -f "$current" ]; then
-  # shellcheck source=bin/handoff_provenance.sh
-  . "$prov_dir/handoff_provenance.sh"
+# (The lib was already sourced — if present — by the root-resolution block
+# above; gate on the function rather than re-sourcing. The symlink guard above
+# also gates here: even the HMAC computation would read through the link.)
+if type handoff_provenance_ok >/dev/null 2>&1 \
+   && [ "$current_is_symlink" = "0" ] && [ -f "$current" ]; then
   if handoff_provenance_ok "$current" "$repo" "$current_relpath" \
      && handoff_bind_has_content "$current"; then
     prov_ok=1
@@ -192,7 +249,74 @@ if ! command -v jq >/dev/null 2>&1; then
   echo
 fi
 
-[ -f "$current" ] || exit 0
+# Miss visibility: no handoff_current.md is NORMAL for a fresh project (stay
+# silent — never spam every new repo), but when the history dir or a raw dump
+# already exist, handoffs HAVE been written here before, and a silent no-op is
+# exactly how the root-resolution asymmetry bug hid: the writers used one
+# .claude/, this loader looked at another, and nobody saw anything. Name the
+# path we looked at so a miss is diagnosable. A refused symlink (guard above)
+# is treated as absent here — the warning already named it.
+#
+# The backups-dir probe is scoped to `handoff_raw_*.md` — the dump file the
+# Stop hook (handoff_turn_append.sh) writes on its first fire — NOT "any file
+# in the directory". handoff_backups/ also holds dot-prefixed bookkeeping
+# sidecars (.ctx_<sid>, .ctx_sl_<sid>, .ctx_tokens_<sid>, .ctx_model_<sid>,
+# .ctx_flagged_<sid>, .handoff_raw_<sid>.cursor/.lock, .fences_<sid>) that
+# handoff_ctx_check.sh and handoff_statusline.sh drop there on a project's
+# FIRST session — .ctx_sl_<sid> in particular is written by the statusline
+# renderer on every prompt, independent of any Stop-hook fire — long before
+# any handoff exists. A whole-directory `find -type f` treated that bookkeeping
+# as evidence of "prior handoff artifacts" and fired the warning (and its
+# "run /handoff-more or /handoff-recover" instruction) on session #2 of any
+# fresh project whose first session ended via a skipped SessionEnd reason
+# (e.g. the default-skipped `resume`) — a false positive on a legitimately
+# blank project. `handoff_raw_*.md` is written unconditionally at the START of
+# the Stop hook's first real fire (before any of those sidecars), so it is
+# both necessary and sufficient evidence that a handoff was actually written
+# here, with no false-negative trade-off.
+# Leftover write lock. write_handoff.sh now warns on stderr when a held lock
+# makes it skip a safety-net write, but the INSTALLED SessionEnd and PreCompact
+# hooks are wired as `… >/dev/null 2>&1 || true` (install.sh), so that warning
+# reaches no one in the default configuration — and a session that ends without
+# writing is precisely the case where nobody is watching. SessionStart is where
+# the user does look, so report the cause here. No writer should be running at
+# session start, so a lock present now was left by one that died before its
+# EXIT trap (SIGKILL, OOM, power loss); until it ages past
+# HANDOFF_LOCK_STALE_SECS every safety-net write in this repo is being dropped.
+# Advisory only — the next writer reclaims a stale lock on its own, and this
+# must never block loading.
+if [ -d "$repo/.claude/.handoff_write.lock" ]; then
+  echo "⚠️  handoff: a write lock is left over at .claude/.handoff_write.lock — a previous writer was killed before it could release it. Until it ages out (HANDOFF_LOCK_STALE_SECS, default 300s), SessionEnd/PreCompact safety-net writes in this repo are being SKIPPED, so the handoff can go stale without any sign. If no writer is running now: rmdir '$repo/.claude/.handoff_write.lock'"
+  echo
+fi
+
+if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ]; then
+  if [ -n "$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | head -n 1 || true)" ] \
+     || [ -n "$(find "$repo/.claude/handoff_backups" -maxdepth 1 -name 'handoff_raw_*.md' -type f 2>/dev/null | head -n 1 || true)" ]; then
+    echo "⚠️  handoff: no handoff to load at $current — but this project has prior handoff artifacts (.claude/handoff_history/ or .claude/handoff_backups/), so one may have been expected. Run /handoff-more or /handoff-recover to inspect what exists."
+  fi
+  exit 0
+fi
+
+# Root-consistency check against the doc's own resolution record (written by
+# write_handoff.sh as '<!-- HANDOFF_ROOT: <root> in_git=<0|1> -->'). Older
+# docs have no such line — every extraction below tolerates absence and stays
+# silent. Both sides are compared in physical form (pwd -P) so a mere symlink
+# alias (/var vs /private/var on macOS) can't fake a mismatch.
+recorded_root="$(LC_ALL=C sed -nE 's/^<!-- HANDOFF_ROOT: (.*) in_git=[01] -->[[:space:]]*$/\1/p' "$current" 2>/dev/null | head -n 1 || true)"
+recorded_in_git="$(LC_ALL=C sed -nE 's/^<!-- HANDOFF_ROOT: .* in_git=([01]) -->[[:space:]]*$/\1/p' "$current" 2>/dev/null | head -n 1 || true)"
+if [ -n "$recorded_root" ]; then
+  recorded_phys="$(cd "$recorded_root" 2>/dev/null && pwd -P || printf '%s' "$recorded_root")"
+  repo_phys="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
+  if [ "$recorded_phys" != "$repo_phys" ]; then
+    echo "⚠️  handoff: this doc was written for '$recorded_root' but is loading at '$repo' — likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
+    echo
+  fi
+fi
+if [ "$recorded_in_git" = "0" ] && [ "${in_git:-0}" = "1" ]; then
+  echo "⚠️  handoff: this handoff predates this directory becoming a git repo; its snapshot may be stale (written before git init / clone)."
+  echo
+fi
 
 echo "## Auto-loaded handoff from previous session"
 echo
@@ -255,7 +379,27 @@ fi
 prev=""
 if [ "$is_placeholder" = "1" ] \
    && [ "${HANDOFF_SS_DISABLE_FALLBACK:-0}" != "1" ]; then
-  prev="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | sort -r | head -1 || true)"
+  # LC_ALL=C: "newest first" here is a LEXICAL claim about the rotation names
+  # (handoff_<stamp>.md, with a _<N> suffix on same-second collisions), and it
+  # only holds under byte collation, where `_` (0x5F) > `.` (0x2E) sorts
+  # handoff_<stamp>_2.md — the newer file — ahead of handoff_<stamp>.md.
+  # UTF-8 locale collation weighs punctuation differently and flips exactly
+  # that pair (measured on macOS en_US.UTF-8), silently picking the OLDER of
+  # two same-second snapshots. (Lexical _<N> still misorders _10 vs _9 — ten
+  # rotations inside one second — which byte collation can't fix; accepted.)
+  # `-type f` excludes symlinks, so a link planted in handoff_history/ is
+  # never selected for the cat below — this is the history-side symmetry of
+  # the handoff_current.md symlink read guard near the top of this script.
+  # The name filter matches write_handoff.sh's prune (the emitted shape
+  # handoff_<YYYY-MM-DD>_<HHMMSS>[_<N>].md) rather than a bare `handoff_*.md`.
+  # Prune restricts to that shape deliberately, so a user's hand-preserved file
+  # in handoff_history/ is never deleted (#46) — but this selector matched
+  # anything, so a kept file like handoff_zzz_IMPORTANT.md sorted first under
+  # `sort -r` and got loaded as "the most recent handoff". The two ends of the
+  # same retention contract should use one filter.
+  prev="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
+    | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
+    | LC_ALL=C sort -r | head -1 || true)"
   if [ -n "$prev" ] && [ -f "$prev" ]; then
     echo
     echo "---"

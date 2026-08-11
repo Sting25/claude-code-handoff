@@ -45,8 +45,11 @@ nothing gets lost across the restart boundary.
 
 1. Check the script is installed, then run it via Bash:
    ```bash
-   test -f ~/.claude/bin/write_handoff.sh && bash ~/.claude/bin/write_handoff.sh \
-     || echo "MISSING: write_handoff.sh not installed"
+   test -f ~/.claude/bin/write_handoff.sh || echo "MISSING: write_handoff.sh not installed"
+   ```
+   Then, if it did not print MISSING, run it:
+   ```bash
+   bash ~/.claude/bin/write_handoff.sh
    ```
    If it prints MISSING, **stop here** — tell the user to clone
    https://github.com/Sting25/claude-code-handoff and run `./install.sh`,
@@ -55,6 +58,14 @@ nothing gets lost across the restart boundary.
    and a hand-rolled snapshot breaks the HMAC/rotation contract.
    Otherwise, the script outputs the absolute path of the written handoff
    (`<repo-root>/.claude/handoff_current.md`).
+
+   Keep the check and the run as two separate commands. Chaining them as
+   `test -f X && bash X || echo MISSING` makes **any** non-zero exit from
+   the script print MISSING — including real installed-but-blocked
+   conditions like a symlinked `.claude` — which would send the user off
+   to re-install an already-correct install while the actual cause goes
+   unaddressed. `test -f X || echo MISSING` (the shape `/handoff-more`
+   and `/handoff-recover` use) tests installation and nothing else.
 
 2. Read the file you just wrote. Then Edit it to **replace the
    placeholder block** under `## Notes from this session` with curated
@@ -115,6 +126,14 @@ nothing gets lost across the restart boundary.
    move the markers, and do not put narrative inside them — every line
    there will be treated as a standing rule.
 
+   Writing fences *inside* the existing Rules markers is the sanctioned
+   edit — that region is the one place model-authored rules are meant to
+   bind. But **do not add, move, or duplicate the markers themselves, or
+   the headings, or reorder sections.** The re-sign step (Step 3) records
+   the document's structure and refuses to vouch for a document whose
+   marker/heading/section shape changed outside the Notes and Rules bodies;
+   if that happens your rules silently drop to reference data.
+
    **Write state claims as checks, not verdicts.** When a Note asserts
    something the next session will rely on ("the migration is done", "X
    is wired up"), phrase it as the check that *proves* it, not the
@@ -124,9 +143,10 @@ nothing gets lost across the restart boundary.
    already proves (HEAD, branch, pushed commits) lives in the snapshot
    above — don't restate it as a verdict here.
 
-3. **Re-sign the edited doc.** Your Edit invalidated the HMAC stamp
-   `write_handoff.sh` put on the file at write time (the trailer line
-   `<!-- HANDOFF_HMAC: … -->` — leave it alone; it gets replaced). Run:
+3. **Re-sign the edited doc.** Your Edit invalidated the two stamp
+   trailers `write_handoff.sh` put on the file at write time (the
+   `<!-- HANDOFF_HMAC: … -->` and `<!-- HANDOFF_SKEL_HMAC: … -->` lines —
+   leave both alone; they get replaced). Run:
    ```bash
    bash ~/.claude/bin/write_handoff.sh --restamp
    ```
@@ -135,6 +155,20 @@ nothing gets lost across the restart boundary.
    Best-effort: if it warns (no openssl, older install), continue — the
    handoff still works, the rules just load as reference data.
 
+   **What re-signing will and won't vouch for.** `--restamp` only re-signs
+   as binding when the document's *structure* is unchanged since it was
+   written — the same structure it recorded in the `HANDOFF_SKEL_HMAC`
+   stamp. You are meant to edit exactly two zones: the **Notes body** and
+   the content **inside the writer's own `## Rules` region** (replacing the
+   `HANDOFF_RULES_PLACEHOLDER` comment with fences). Editing only those is
+   what a normal curation does, and it re-signs cleanly. If instead a
+   `HANDOFF_BIND_BEGIN`/`END` marker, a section heading, or a whole section
+   has been added, moved, or deleted *outside* those zones, `--restamp`
+   refuses and leaves the file byte-identical (its rules then load as
+   reference data). If you see that refusal, do **not** try to hand-fix the
+   markers — re-run `write_handoff.sh` to regenerate a fresh, structurally-
+   stamped document and curate that.
+
 4. **Verify the raw dump.** The `Stop` hook has been appending to
    `<repo-root>/.claude/handoff_backups/handoff_raw_<session_id>.md`
    throughout the session. Run `ls -la <repo-root>/.claude/handoff_backups/`
@@ -142,8 +176,22 @@ nothing gets lost across the restart boundary.
    pruning (3 newest) — no action needed from you in the normal path.
    If the file is **missing**, fall through to "Raw dump fallback" below.
 
-5. Print the banner verbatim. Do NOT skip, soften, or shrink this. Use
-   the exact format below — the borders are deliberate width:
+5. Determine how this session is running, so the banner tells the user
+   an action they can actually take (the CLI's "Ctrl+D, then `claude`"
+   is meaningless in the desktop app, and vice versa):
+
+   ```bash
+   printf '%s\n' "${CLAUDE_CODE_ENTRYPOINT:-unknown}"
+   ```
+
+   Then print the banner verbatim. Do NOT skip, soften, or shrink it.
+   Use the exact format below — the borders are deliberate width — and
+   substitute the `action:` block for the detected mode:
+
+   - Output `cli` → use the **terminal** action block.
+   - Any other value (or empty/unknown, or the check failed) → print
+     **both** action blocks, desktop first. Wrong-mode advice is the
+     failure to avoid; two extra lines is the acceptable cost.
 
    ```
    -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-
@@ -153,11 +201,18 @@ nothing gets lost across the restart boundary.
    handoff written to: <path the script printed>
    raw dump written to: <path of the raw-dump file>
 
-   action:  hit Ctrl+D to exit, then run `claude` to start a fresh
-            session. The SessionStart hook in ~/.claude/settings.json
-            auto-loads the handoff. Do NOT use `claude --continue` —
-            that resumes this same saturated context, which defeats
-            the purpose of the handoff.
+   action:  [terminal] hit Ctrl+D to exit, then run `claude` to start
+            a fresh session. Do NOT use `claude --continue` — that
+            resumes this same saturated context, which defeats the
+            purpose of the handoff.
+
+   action:  [desktop app] start a New Session (new-session button or
+            Cmd/Ctrl+N) in this same project folder. Do NOT continue
+            or resume this conversation — that reopens the saturated
+            context the handoff exists to retire.
+
+   (Either way, the SessionStart hook in ~/.claude/settings.json
+   auto-loads the handoff into the fresh session.)
 
    -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-
    ```
@@ -226,8 +281,13 @@ write it to `<repo-root>/.claude/handoff_backups/handoff_raw_<timestamp>.md`
 ```bash
 ls -t <repo-root>/.claude/handoff_backups/handoff_raw_*.md 2>/dev/null \
   | tail -n +4 \
-  | xargs -r rm
+  | while IFS= read -r f; do rm -f "$f"; done
 ```
+
+(`xargs -r` would be the obvious spelling, but `-r` is a GNU extension:
+BSD/macOS `xargs` rejects it with `illegal option`, so the prune would
+fail silently on the platform this tool is developed on. The `while
+read` loop is empty-input-safe everywhere.)
 
 If the directory doesn't exist yet, create it. Make sure
 `.claude/handoff_backups/` is in the project `.gitignore` (the hook

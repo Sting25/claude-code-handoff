@@ -134,4 +134,39 @@ check "mid-patch fail: backup retained"   yes     "$(ls "$HOME_DIR"/settings.jso
 check "mid-patch fail: no stray .tmp"     no      "$(stray_tmp)"
 rm -rf "$src" "$shim" "$HOME_DIR"
 
+# --- F. a jq call that exits 0 with EMPTY output must also roll back (M-6) ---
+# jq on empty/unreadable input prints nothing and still exits 0 — a real crash
+# mode, not just a hypothetical (see ensure_settings_json's own comment on the
+# hazard). Unlike case E (nonzero rc), THIS jq claims success. Before
+# commit_settings_tmp existed, `mv "$settings.tmp" "$settings"` would install
+# the empty file unconditionally, blank settings.json, and — because rc==0 —
+# the EXIT trap's rollback would never arm: the script would print "done" over
+# a wiped config. Shim jq to go silent (rc 0, no stdout) for the
+# UserPromptSubmit hook write, same call site as case E, so the two tests
+# isolate exit-code-failure vs silent-empty-success as separate hazards.
+src="$(mktemp -d)"; HOME_DIR="$(mktemp -d)"
+cp "$REPO_ROOT/install.sh" "$src/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src/"
+orig='{"permissions":{"allow":["Bash(ls:*)"]},"_sentinel":"KEEPME"}'
+printf '%s' "$orig" > "$HOME_DIR/settings.json"
+shim="$(mktemp -d)"; REAL_JQ="$(command -v jq)"
+cat > "$shim/jq" <<EOF
+#!/usr/bin/env bash
+# Detection/validation calls carry -e -> pass straight through.
+for a in "\$@"; do [[ "\$a" == "-e" ]] && exec "$REAL_JQ" "\$@"; done
+# The UserPromptSubmit WRITE carries the event name but no -e -> "succeed"
+# with rc 0 and zero bytes of output, exactly what jq on empty input does.
+case " \$* " in *" UserPromptSubmit "*) exit 0 ;; esac
+exec "$REAL_JQ" "\$@"
+EOF
+chmod +x "$shim/jq"
+( cd "$src" && PATH="$shim:$PATH" CLAUDE_HOME="$HOME_DIR" bash install.sh >/dev/null 2>&1 ); rc=$?
+restored="$(cat "$HOME_DIR/settings.json")"
+check "silent-empty jq: nonzero exit"      nonzero "$(nonzero "$rc")"
+check "silent-empty jq: settings restored" yes     "$([[ "$restored" == "$orig" ]] && echo yes || echo no)"
+check "silent-empty jq: not blanked"       yes     "$([[ -n "$restored" ]] && echo yes || echo no)"
+check "silent-empty jq: valid JSON"        yes     "$(valid_json)"
+check "silent-empty jq: backup retained"   yes     "$(ls "$HOME_DIR"/settings.json.bak.* >/dev/null 2>&1 && echo yes || echo no)"
+check "silent-empty jq: no stray .tmp"     no      "$(stray_tmp)"
+rm -rf "$src" "$shim" "$HOME_DIR"
+
 finish

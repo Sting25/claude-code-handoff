@@ -21,8 +21,9 @@
 #      non-git project there is no clone-delivery vector via git, so the
 #      check passes trivially (the HMAC below still gates).
 #   2. A valid HMAC-SHA256 trailer, written by write_handoff.sh with a
-#      per-machine secret under ~/.claude/ (0600, auto-generated, never
-#      in any repo). A cloned/tarball repo cannot forge it.
+#      per-machine secret under ~/.claude/ (or $CLAUDE_HOME, see
+#      handoff_secret_path below; 0600, auto-generated, never in any
+#      repo). A cloned/tarball repo cannot forge it.
 #
 # Zero hard dependencies: openssl is OPTIONAL. When it is absent,
 # signing is skipped and verification fails closed — the handoff loads
@@ -30,13 +31,18 @@
 # here returns non-zero for "cannot establish trust" rather than
 # erroring, so `set -e` callers must invoke them inside a condition.
 #
-# Threat-model note on `openssl dgst -hmac <key>`: the key appears in
-# the process argument list for the duration of the call. The secret
-# only defends against repo-DELIVERED content (clones, tarballs); a
-# local same-user process could read ~/.claude/handoff_secret directly
-# anyway, so ps exposure does not extend the attack surface this design
-# cares about. `-hmac` is used because it is the one form both GNU
-# openssl and macOS LibreSSL support.
+# Threat-model note on the HMAC construction: the obvious
+# `openssl dgst -hmac <key>` puts the key in the process argument list,
+# and argv is readable by OTHER users via ps on a multi-user host —
+# unlike the 0600 secret file itself. (An earlier revision accepted the
+# exposure on the grounds that a same-user process could read the file
+# anyway; that rationale ignored the cross-user ps window, and signing
+# fires on every SessionEnd/PreCompact.) So handoff_mac_compute builds
+# HMAC-SHA256 from its definition instead — two openssl digest passes
+# over stdin, with the ipad/opad key blocks emitted by the printf
+# BUILTIN (no separate process, no argv) — and openssl only ever sees
+# data on stdin. Digest-identical to `-hmac` for the same key bytes,
+# so docs signed by older versions keep verifying.
 # shellcheck shell=bash
 
 # Marker lines. write_handoff.sh emits them around the pinned section
@@ -48,9 +54,195 @@ HANDOFF_BIND_BEGIN='<!-- HANDOFF_BIND_BEGIN -->'
 # shellcheck disable=SC2034
 HANDOFF_BIND_END='<!-- HANDOFF_BIND_END -->'
 HANDOFF_MAC_PREFIX='<!-- HANDOFF_HMAC: '
+# The out-of-band SKELETON stamp (H-A). A second keyed trailer, computed over
+# the document's STRUCTURE minus the two sanctioned edit zones (see
+# handoff_skeleton). It rides inline like the HMAC trailer — unforgeable because
+# it is keyed with the same per-machine secret — and is excluded from its own
+# input and from the main HMAC's meaning the same way HANDOFF_HMAC is.
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+HANDOFF_SKEL_PREFIX='<!-- HANDOFF_SKEL_HMAC: '
 
+# The section headings write_handoff.sh emits IMMEDIATELY after each of its
+# own BIND_BEGIN lines. They are the shape that tells a legitimate,
+# writer-opened region apart from one a later editor introduced — see
+# handoff_guard_bind_regions. Defined here (and defaulted in write_handoff.sh
+# for the lib-absent install) so the emitter and the guard can never drift.
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+HANDOFF_PIN_HEADING='## 📌 Pinned — carried forward every handoff'
+# shellcheck disable=SC2034
+HANDOFF_RULES_HEADING='## Rules (fences — carried into the next session)'
+# shellcheck disable=SC2034
+HANDOFF_NOTES_HEADING='## Notes from this session'
+
+# Mirrors install.sh's claude_home="${CLAUDE_HOME:-$HOME/.claude}" EXACTLY.
+# This used to hardcode $HOME/.claude/handoff_secret, ignoring CLAUDE_HOME —
+# the one holdout after install.sh's doctor check and remove_secret_if_ours
+# were already CLAUDE_HOME-aware. Result: --doctor could say "ok" about
+# $CLAUDE_HOME/handoff_secret while this file's callers actually signed under
+# $HOME/.claude/handoff_secret — a false clean on the exposure doctor exists
+# to catch. Following install.sh (vs. hardcoding doctor back) is also the
+# back-compat-safe direction: CLAUDE_HOME is undocumented/test-only (never in
+# the README), so ${CLAUDE_HOME:-$HOME/.claude} == $HOME/.claude for every
+# real install — a no-op change, not a relocation — whereas the alternative
+# would make remove_secret_if_ours (already claude_home-based) target a file
+# signing never used whenever CLAUDE_HOME is set.
 handoff_secret_path() {
-  printf '%s\n' "${HANDOFF_SECRET_FILE:-$HOME/.claude/handoff_secret}"
+  printf '%s\n' "${HANDOFF_SECRET_FILE:-${CLAUDE_HOME:-$HOME/.claude}/handoff_secret}"
+}
+
+# ---------------------------------------------------------------------------
+# Root resolution — the ONE way every handoff script picks its project root.
+#
+# Before this existed the seven bin/ scripts resolved "repo root" three
+# different ways: the writer hooks used a bare `git rev-parse --show-toplevel`
+# (anchored on the hook process's CWD), the SessionStart loader used
+# `git -C "$CLAUDE_PROJECT_DIR"`, and the statusline trusted its payload dir.
+# Whenever cwd != CLAUDE_PROJECT_DIR — worktrees, submodules, a `cd` during
+# the session — the writers and the loader disagreed on where `.claude/`
+# lives: the handoff was written under one root and loaded (or not) from
+# another, silently. This resolver gives them all the same answer.
+#
+# Usage:   handoff_resolve_root [payload_cwd]
+# Sets (namespaced globals; never echoes, so `set -e` callers can call it
+# bare):
+#   HANDOFF_ROOT         resolved project root
+#   HANDOFF_ROOT_IN_GIT  1 when the root is a git worktree top, else 0
+#   HANDOFF_ROOT_ANCHOR  the anchor dir the resolution started from
+#   HANDOFF_ROOT_VIA     which precedence rung chose the anchor:
+#                        project_dir | payload_cwd | pwd
+#
+# Anchor precedence (first hit wins):
+#   1. $CLAUDE_PROJECT_DIR — set AND an existing directory. Claude Code
+#      exports it for every hook; it names the LAUNCH project regardless of
+#      what the session later cd'd to, so it must beat the process cwd.
+#      Validated with -d (it never was before): a stale/garbage value must
+#      not become the root.
+#   2. $1 (payload_cwd) — non-empty AND an existing directory. Hook payloads
+#      carry a `cwd` field; the statusline passes its authoritative
+#      `workspace.project_dir` here. Callers pass "" when they have none.
+#   3. $PWD — matches the historical behavior of skill-invoked runs, where
+#      the Bash tool env has no CLAUDE_PROJECT_DIR.
+#
+# The root is then `git -C "$anchor" rev-parse --show-toplevel` — NEVER a
+# bare `git rev-parse`, which silently re-anchors on the process cwd. A
+# non-git anchor is its own root (in_git=0).
+#
+# Anchored INSIDE a `.git` dir (e.g. the user cd'd into it), --show-toplevel
+# fails outright; without a rescue the root would become the .git dir itself
+# and the handoff would land at `.git/.claude`. Recover the enclosing repo
+# via the common dir's parent.
+#
+# Worktree opt-in (HANDOFF_ANCHOR=common): resolve the root to the MAIN
+# repo (parent of `git rev-parse --git-common-dir`), so every linked
+# worktree shares one `.claude/` and handoffs survive `git worktree remove`.
+# The DEFAULT stays per-worktree toplevel, deliberately: flipping it would
+# silently relocate every existing user's handoff files on upgrade — worse
+# than the (documented, opt-in-fixable) worktree-deletion hazard. Unset or
+# HANDOFF_ANCHOR=toplevel keeps current behavior.
+#
+# HANDOFF_DEBUG=1 prints a one-line trace to stderr.
+
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+HANDOFF_ROOT=""
+# shellcheck disable=SC2034
+HANDOFF_ROOT_IN_GIT=0
+# shellcheck disable=SC2034
+HANDOFF_ROOT_ANCHOR=""
+# shellcheck disable=SC2034
+HANDOFF_ROOT_VIA=""
+
+handoff_resolve_root() {  # [payload_cwd]
+  local anchor via toplevel common common_phys parent
+  if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
+    anchor="$CLAUDE_PROJECT_DIR" via="project_dir"
+  elif [ -n "${1:-}" ] && [ -d "${1:-}" ]; then
+    anchor="$1" via="payload_cwd"
+  else
+    anchor="$PWD" via="pwd"
+  fi
+  # Absolutize the anchor. `-d` passes for a RELATIVE value (`.`, `..`, a
+  # subdir name), and off-git the anchor becomes HANDOFF_ROOT verbatim — so a
+  # relative CLAUDE_PROJECT_DIR made every downstream path `./.claude/…`,
+  # resolved against whatever cwd each hook happened to have. It also made the
+  # doc's recorded root disagree with handoff_session_start.sh's own
+  # comparison, which resolves via `pwd -P`, producing a spurious
+  # moved-project warning. `pwd -P` here matches that comparison exactly; if
+  # the cd fails the original value is kept rather than losing the anchor.
+  anchor="$(cd "$anchor" 2>/dev/null && pwd -P)" || anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [ -n "$anchor" ] || anchor="$PWD"
+  HANDOFF_ROOT_ANCHOR="$anchor"
+  HANDOFF_ROOT_VIA="$via"
+  HANDOFF_ROOT="$anchor"
+  HANDOFF_ROOT_IN_GIT=0
+
+  toplevel="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null)" || toplevel=""
+  if [ -n "$toplevel" ]; then
+    HANDOFF_ROOT="$toplevel"
+    HANDOFF_ROOT_IN_GIT=1
+    if [ "${HANDOFF_ANCHOR:-toplevel}" = "common" ]; then
+      # Main-repo root = parent of the common git dir. --git-common-dir may
+      # print a RELATIVE path (relative to the git process cwd, i.e. our
+      # anchor — from a main-repo toplevel it is just ".git"), so prefix the
+      # anchor before walking up. Any failure falls back to the toplevel
+      # already set above.
+      common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || common=""
+      case "$common" in
+        ""|/*) : ;;
+        *) common="$anchor/$common" ;;
+      esac
+      if [ -n "$common" ] && parent="$(cd "$common/.." 2>/dev/null && pwd -P)" \
+         && [ -d "$parent" ]; then
+        HANDOFF_ROOT="$parent"
+      fi
+    fi
+  elif [ "$(git -C "$anchor" rev-parse --is-inside-git-dir 2>/dev/null)" = "true" ]; then
+    # Anchored inside .git itself: --show-toplevel fails here, and treating
+    # the anchor as a non-git root would put the handoff at `.git/.claude`.
+    # The common dir resolves even from in here ("." when the anchor IS the
+    # main .git dir); its physical parent is the repo root — but only claim
+    # that when the dir is actually named ".git" (a bare repo has no
+    # worktree to anchor on, so it keeps the non-git fallback).
+    common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || common=""
+    case "$common" in
+      ""|/*) : ;;
+      *) common="$anchor/$common" ;;
+    esac
+    if [ -n "$common" ] && common_phys="$(cd "$common" 2>/dev/null && pwd -P)" \
+       && [ "${common_phys##*/}" = ".git" ] && [ -d "${common_phys%/.git}" ]; then
+      HANDOFF_ROOT="${common_phys%/.git}"
+      HANDOFF_ROOT_IN_GIT=1
+    fi
+  fi
+
+  if [ "${HANDOFF_DEBUG:-0}" = "1" ]; then
+    printf 'handoff: root=%s in_git=%s anchor=%s via=%s\n' \
+      "$HANDOFF_ROOT" "$HANDOFF_ROOT_IN_GIT" "$anchor" "$via" >&2
+  fi
+  return 0
+}
+
+# Repair a secret file whose mode has group/other bits. The existing-file
+# fast paths below (ensure + verify) would otherwise use a 0644 secret
+# silently forever — and a group/other-readable HMAC key lets any local
+# reader forge the binding-rules trailer. Loose modes arrive from outside
+# our writers: a backup restore, a dotfiles sync, or an earlier version
+# generating under a permissive umask. chmod 600 on sight; when the chmod
+# fails (e.g. file owned by another user), warn on stderr — one line —
+# and CONTINUE: degrading signing over a perms warning would be worse
+# than the exposure the warning flags. Portable mode read: GNU `stat -c
+# %a` with BSD `stat -f %Lp` fallback (the repo-wide dual idiom). Always
+# returns 0 so bare calls are safe under a sourcing script's `set -e`.
+handoff_secret_tighten() {  # <file>
+  local m
+  m="$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null)" || m=""
+  # Unreadable/odd mode string: nothing actionable (a chmod would likely
+  # fail for the same reason), so leave it to the read that follows.
+  case "$m" in "" | *[!0-7]*) return 0 ;; esac
+  if (( 8#$m & 8#77 )); then
+    chmod 600 "$1" 2>/dev/null \
+      || printf 'handoff: warning: secret %s is group/other-accessible (mode %s) and chmod 600 failed — fix it manually\n' "$1" "$m" >&2
+  fi
+  return 0
 }
 
 # Generate the per-machine secret if it doesn't exist yet (WRITE path
@@ -58,16 +250,32 @@ handoff_secret_path() {
 # openssl rand, falling back to /dev/urandom via od. mktemp+mv keeps the
 # write atomic; the caller's umask 077 (write_handoff.sh) plus the
 # explicit chmod make it 0600. Refuses a planted symlink at the path.
+# An EXISTING secret gets its mode checked/repaired (handoff_secret_tighten)
+# before being returned — never trusted to still be 0600.
 # Echoes the secret path on success; non-zero when generation isn't
 # possible (callers degrade to unsigned).
 handoff_ensure_secret() {
   local sf dir tmp
   sf="$(handoff_secret_path)"
   if [ ! -L "$sf" ] && [ -f "$sf" ] && [ -s "$sf" ]; then
+    handoff_secret_tighten "$sf"
     printf '%s\n' "$sf"
     return 0
   fi
   [ -L "$sf" ] && return 1
+  # Resolved path exists but is not a regular file (most commonly a
+  # directory — e.g. a mistyped/misconfigured HANDOFF_SECRET_FILE pointing at
+  # an existing dir). `mv tmp "$sf"` below would otherwise MOVE THE TMP INTO
+  # the directory (mv's into-a-directory semantics) and report success —
+  # stranding a fresh key file inside it on every signed write, with signing
+  # and verification never converging on one key. Fail loudly instead of
+  # silently misfiring: the caller (write_handoff.sh) already degrades to an
+  # unsigned write whenever this function returns non-zero, the same as the
+  # no-openssl / HANDOFF_TRUST_DISABLE path.
+  if [ -e "$sf" ] && [ ! -f "$sf" ]; then
+    echo "handoff: HANDOFF_SECRET_FILE ('$sf') exists but is not a regular file (looks like a directory) — refusing to sign through it. Point HANDOFF_SECRET_FILE at a plain file path (or remove/rename what's currently there) and retry; the handoff will be written unsigned until then." >&2
+    return 1
+  fi
   dir="$(dirname "$sf")"
   mkdir -p "$dir" 2>/dev/null || return 1
   tmp="$(mktemp "$dir/.handoff_secret.XXXXXX" 2>/dev/null)" || return 1
@@ -104,15 +312,63 @@ handoff_mac_compute() {  # <file> [ensure]
   else
     sf="$(handoff_secret_path)"
     { [ ! -L "$sf" ] && [ -f "$sf" ] && [ -s "$sf" ]; } || return 1
+    # Verify path accepts an existing secret without going through ensure,
+    # so it needs the same mode check/repair (see handoff_secret_tighten).
+    handoff_secret_tighten "$sf"
   fi
-  # Strip only a WELL-FORMED trailer line (prefix + 64 hex + " -->"), not any
-  # line that merely starts with the prefix — a prose line beginning "<!--
-  # HANDOFF_HMAC: ..." must stay in the digest (and must not be deleted by
-  # --restamp, which strips with the same pattern). `|| true`: grep -v exits 1
+  # HMAC-SHA256 from the definition — H((K'⊕opad) ‖ H((K'⊕ipad) ‖ m)) —
+  # instead of `openssl dgst -hmac "$key"`, so the key NEVER appears in a
+  # process argument list (see the threat-model note in the header). The
+  # key bytes here are the literal file content minus trailing newlines,
+  # exactly what `-hmac "$(cat "$sf")"` used before, so the digests are
+  # bit-identical and older signed docs keep verifying.
+  local key kb pad_i='' pad_o='' x b i inner
+  key="$(cat "$sf" 2>/dev/null)" || return 1
+  [ -n "$key" ] || return 1
+  # Key block K': hex of the key bytes; >64-byte keys are first hashed
+  # (per RFC 2104), then zero-padded to the 64-byte SHA-256 block size.
+  # od (POSIX) renders the bytes; the generated secret is 64 ASCII hex
+  # chars = exactly one block, so both branches are rare in practice.
+  # -v is MANDATORY: without it od replaces any run of identical input
+  # lines with a single "*", so a key containing repeated 16-byte blocks
+  # would be silently truncated — collapsing distinct keys onto one MAC
+  # and breaking cross-version verification for that key class.
+  kb="$(printf '%s' "$key" | od -An -v -tx1 2>/dev/null | tr -d ' \n')"
+  [ -n "$kb" ] || return 1
+  if [ "${#kb}" -gt 128 ]; then
+    kb="$(printf '%s' "$key" | openssl dgst -sha256 -binary 2>/dev/null \
+      | od -An -v -tx1 2>/dev/null | tr -d ' \n')"
+    [ "${#kb}" = 64 ] || return 1
+  fi
+  while [ "${#kb}" -lt 128 ]; do kb="${kb}00"; done
+  # ipad/opad blocks as \xHH escape strings, built with the printf
+  # BUILTIN (printf -v spawns no process, so no argv for ps to see).
+  for ((i = 0; i < 128; i += 2)); do
+    b=$((16#${kb:i:2}))
+    printf -v x '\\x%02x' $((b ^ 0x36)); pad_i+=$x
+    printf -v x '\\x%02x' $((b ^ 0x5c)); pad_o+=$x
+  done
+  # Inner pass: ipad block, then the doc minus any WELL-FORMED trailer
+  # line (prefix + 64 hex + " -->") — not any line that merely starts
+  # with the prefix; a prose line beginning "<!-- HANDOFF_HMAC: ..."
+  # must stay in the digest (and must not be deleted by --restamp,
+  # which strips with the same pattern). `|| true`: grep -v exits 1
   # when it selects nothing (an empty document), which under a caller's
-  # pipefail would abort — the hex-regex check below is the real validity gate.
-  out="$({ LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$file" 2>/dev/null || true; } \
-    | openssl dgst -sha256 -hmac "$(cat "$sf")" 2>/dev/null)" || return 1
+  # pipefail would abort — the hex-regex check below is the real gate.
+  # shellcheck disable=SC2059  # deliberate: the format IS the \xHH data
+  inner="$({ printf "$pad_i"
+             LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$file" 2>/dev/null || true
+           } | openssl dgst -sha256 -binary 2>/dev/null \
+             | od -An -v -tx1 2>/dev/null | tr -d ' \n')" || return 1
+  [ "${#inner}" = 64 ] || return 1
+  # Outer pass: opad block plus the inner digest bytes. The inner hex is
+  # machine-generated [0-9a-f], so sed turning it into \xHH escapes for
+  # the printf builtin is injection-safe; it reaches sed via stdin, not
+  # argv.
+  # shellcheck disable=SC2059  # deliberate: the format IS the \xHH data
+  out="$({ printf "$pad_o"
+           printf "$(printf '%s' "$inner" | sed 's/../\\x&/g')"
+         } | openssl dgst -sha256 2>/dev/null)" || return 1
   # Output shape varies ("(stdin)= <hex>", "SHA2-256(stdin)= <hex>");
   # the digest is always the last whitespace-separated field.
   out="${out##* }"
@@ -191,6 +447,179 @@ handoff_sanitize_markers() {
     || echo "⚠️  handoff: marker-sanitize filter failed — embedded content above may be truncated"
 }
 
+# Re-establish "only the writer may open a bind region" over a document that
+# has been EDITED since it was built, then re-signed (`write_handoff.sh
+# --restamp`). handoff_sanitize_markers protects content the writer embeds at
+# build time; this protects the whole document at restamp time, which is the
+# other half of the same invariant.
+#
+# Why it is needed: the /handoff skill has the model rewrite the Notes block
+# and then restamps. Restamp signs whatever bytes are on disk, so a matched
+# BIND_BEGIN/END pair written into Notes — by a model steered by prompt
+# injection in anything it read this session — would be signed here, pass
+# provenance, and load into the NEXT session as verified binding rules.
+#
+# The rule: a BEGIN is kept only when the very next line is one of the
+# writer's own section headings (the writer always emits the heading directly
+# after the marker), an END only when a kept region is open, and NOTHING is
+# kept at or after the Notes heading — the region below it is model-authored
+# by design and must stay on the data tier. Everything else is rewritten to
+# the same visibly-defanged form handoff_sanitize_markers uses. Reads stdin,
+# writes stdout.
+handoff_guard_bind_regions() {
+  LC_ALL=C awk \
+    -v begin_m="$HANDOFF_BIND_BEGIN" \
+    -v end_m="$HANDOFF_BIND_END" \
+    -v pin_h="$HANDOFF_PIN_HEADING" \
+    -v rules_h="$HANDOFF_RULES_HEADING" \
+    -v notes_h="$HANDOFF_NOTES_HEADING" \
+    -v begin_d='«HANDOFF_BIND_BEGIN» (defanged: only write_handoff.sh may open a rules region)' \
+    -v end_d='«HANDOFF_BIND_END» (defanged: only write_handoff.sh may close a rules region)' '
+    {
+      # A BEGIN is held for one line so its successor can be inspected.
+      if (held) {
+        held = 0
+        if ($0 == pin_h || $0 == rules_h) { print begin_m; inside = 1 }
+        else { print begin_d }
+      }
+      if ($0 == notes_h) { untrusted = 1 }
+      if ($0 == begin_m) {
+        if (untrusted || inside) print begin_d; else held = 1
+        next
+      }
+      if ($0 == end_m) {
+        if (untrusted || !inside) print end_d; else { print end_m; inside = 0 }
+        next
+      }
+      print
+    }
+    END { if (held) print begin_d }
+  '
+  # NO `|| echo …` fallback here, unlike handoff_sanitize_markers. That idiom
+  # is right where the output is one embedded SECTION of a document being
+  # built — a truncation warning in place beats aborting the whole write. It
+  # is catastrophic here, where the output IS the entire document and the
+  # caller signs and publishes it over the curated original: a failing awk
+  # would replace the handoff with a single warning line, carrying a valid
+  # fresh MAC so it verifies as authentic, with no history copy (restamp does
+  # not rotate) and rc=0 reported to the user as success. Let the failure
+  # propagate; write_handoff.sh's restamp path checks it and publishes
+  # nothing. Same reasoning as the deliberate `pin_body="$(cat …)"` capture in
+  # write_handoff.sh, which exists so a read error aborts the build rather
+  # than publishing a truncated document.
+}
+
+# --- Out-of-band skeleton stamp (H-A) ---------------------------------------
+# handoff_guard_bind_regions can only tell a writer-authored bind region from
+# an editor-authored one by an IN-BAND heuristic (does a BEGIN's next line equal
+# a published heading?). But those headings are printed in every handoff and the
+# attacker IS the model editing the document, so the heuristic is bypassable:
+# duplicate the Rules/Pinned heading above Notes, forge a region at the top, or
+# delete the Notes heading, and the smuggled region reads as writer-owned.
+#
+# The fix is provenance for STRUCTURE, keyed with the same per-machine secret.
+# handoff_skeleton emits the document with its two SANCTIONED edit zones blanked
+# to fixed sentinels — the Notes block body, and the writer's own Rules-region
+# body (the fences /handoff invites the model to author). Everything else — the
+# preamble, the git snapshot, every section heading, the pin region, and every
+# BIND marker POSITION — is emitted verbatim. An HMAC over this output therefore
+# authenticates the document's shape while ignoring the edits /handoff makes
+# legitimately. write_handoff.sh records it at build time and, on --restamp,
+# recomputes it and refuses to publish a binding-capable signature when it has
+# changed (a new/moved/duplicated marker, a forged heading above Notes, a
+# deleted Notes heading). No IN-BAND unauthenticated token decides trust; the
+# keyed record does.
+#
+# Reads a file arg (or stdin). Strips the two machine trailers so the skeleton
+# never depends on them, and returns awk's status so a failed filter (missing/
+# OOM-killed awk, or a NUL byte BSD awk would truncate at) propagates as a
+# refusal rather than a short skeleton that spuriously matches.
+handoff_skeleton() {  # <file, or stdin>
+  LC_ALL=C awk \
+    -v begin_m="$HANDOFF_BIND_BEGIN" \
+    -v end_m="$HANDOFF_BIND_END" \
+    -v rules_h="$HANDOFF_RULES_HEADING" \
+    -v notes_h="$HANDOFF_NOTES_HEADING" '
+    # Drop the two machine trailer lines (well-formed only), exactly as
+    # handoff_mac_compute strips the HMAC one — a stamp must never cover itself.
+    # Portability: this is awk context, and classic BSD one-true-awk (macOS
+    # <=10.14) treats ERE interval braces {64} as LITERAL characters, so a
+    # {64} count silently fails to match a real trailer there. Match the frame
+    # with an interval-free [0-9a-f]+ and enforce the exact 64-hex length with
+    # awk length() — identical behavior on old and new awk, and a malformed
+    # (non-64) trailer still falls through to the skeleton so it changes the
+    # digest (fail-closed) instead of being stripped.
+    /^<!-- HANDOFF_HMAC: [0-9a-f]+ -->[[:space:]]*$/ {
+      h = $0; sub(/^<!-- HANDOFF_HMAC: /, "", h); sub(/ -->[[:space:]]*$/, "", h)
+      if (length(h) == 64) next
+    }
+    /^<!-- HANDOFF_SKEL_HMAC: [0-9a-f]+ -->[[:space:]]*$/ {
+      h = $0; sub(/^<!-- HANDOFF_SKEL_HMAC: /, "", h); sub(/ -->[[:space:]]*$/, "", h)
+      if (length(h) == 64) next
+    }
+    # Past the Notes heading everything is the model-authored Notes body (Notes
+    # is the last section): emit ONE sentinel, drop the rest.
+    notes_done { next }
+    $0 == notes_h { print; print "<<SKEL-NOTES-BODY>>"; notes_done = 1; next }
+    # Inside the writer Rules-region body: drop lines to the END marker.
+    rules_skip { if ($0 == end_m) { print; rules_skip = 0 } next }
+    # A BEGIN whose NEXT line is the Rules heading opens the writer fences zone
+    # (the only in-doc edit zone besides Notes): emit BEGIN + heading + ONE
+    # sentinel, then skip the body to END. The PIN region (BEGIN + pin heading)
+    # is deliberately NOT redacted — /handoff never edits it in the document, so
+    # its body is authenticated structure. A duplicate "BEGIN + Rules heading"
+    # region an attacker adds is redacted here too, but its extra BEGIN/heading/
+    # END lines still land in the skeleton and change the digest.
+    $0 == begin_m {
+      if ((getline nxt) > 0) {
+        print begin_m
+        if (nxt == rules_h) { print nxt; print "<<SKEL-RULES-BODY>>"; rules_skip = 1 }
+        else { print nxt }
+        next
+      }
+      print begin_m; next
+    }
+    { print }
+  ' "$@"
+}
+
+# HMAC-SHA256 the skeleton of <file> with the per-machine secret. Echoes 64 hex
+# chars; non-zero when the skeleton filter fails or signing is unavailable.
+# $2 selects the secret source, same as handoff_mac_compute: "ensure" (write
+# path) or anything else (verify path). Reuses handoff_mac_compute over a temp
+# holding the skeleton bytes rather than re-implementing the RFC 2104
+# construction — the skeleton carries no trailers, so mac_compute's trailer
+# strip is a harmless no-op over it.
+handoff_skel_compute() {  # <file> [ensure]
+  local file="$1" mode="${2:-verify}" tmp out
+  tmp="$(mktemp "$(dirname "$file")/.handoff_skel.XXXXXX" 2>/dev/null)" \
+    || tmp="$(mktemp 2>/dev/null)" || return 1
+  if ! handoff_skeleton "$file" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; return 1
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  if out="$(handoff_mac_compute "$tmp" "$mode")"; then
+    rm -f "$tmp"
+    printf '%s\n' "$out"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Read the recorded skeleton stamp from a document (the last well-formed
+# HANDOFF_SKEL_HMAC line). Echoes 64 hex chars; non-zero when absent or
+# malformed (a legacy doc built before this stamp existed, or a tampered line).
+handoff_skel_read() {  # <file>
+  local file="$1" stored hexre='^[0-9a-f]{64}$'
+  [ -f "$file" ] || return 1
+  stored="$(LC_ALL=C grep "^${HANDOFF_SKEL_PREFIX}" "$file" 2>/dev/null \
+    | tail -n 1 \
+    | sed -E 's/^<!-- HANDOFF_SKEL_HMAC: ([0-9a-f]+) -->[[:space:]]*$/\1/')"
+  [[ "$stored" =~ $hexre ]] || return 1
+  printf '%s\n' "$stored"
+}
+
 # Extract the BIND-marked regions (marker lines excluded, single-line
 # HTML comments stripped — the Rules placeholder comment is scaffolding,
 # not a rule). Multiple regions concatenate in file order.
@@ -219,6 +648,6 @@ handoff_bind_has_content() {  # <file>
 # sync — that copy is deliberately self-contained because SessionStart
 # must not depend on this lib being installed). Reads stdin.
 handoff_defang() {
-  LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' \
+  LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout|local-command-stderr)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' \
     || echo "⚠️  handoff: defang filter failed — rules content above may be truncated"
 }

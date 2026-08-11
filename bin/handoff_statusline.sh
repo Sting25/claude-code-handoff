@@ -73,14 +73,30 @@ usage_sum="$(jq -r '
 ' <<<"$payload" 2>/dev/null || true)"
 [[ "$usage_sum" =~ ^[0-9]+$ ]] || usage_sum=""
 
-# --- Project scope. workspace/cwd come from the payload (docs claim the
-#     statusline runs in the project dir, but that claim is unverified — trust
-#     the payload first, fall back to $PWD), then the same git-top/-project-dir
-#     chain the other hooks use. ---
+# --- Project scope: shared resolver (CLAUDE_PROJECT_DIR -> payload dir ->
+#     $PWD, then git -C toplevel of that anchor), so the cache lands in the
+#     same .claude/ the writer hooks use — the old chain could disagree with
+#     them whenever cwd != CLAUDE_PROJECT_DIR (worktrees, submodules, a
+#     mid-session `cd`). This script is the one caller allowed to pass the
+#     payload's `workspace.project_dir` as the resolver's payload_cwd rung:
+#     the statusline payload states the project dir authoritatively (with
+#     .cwd as its own fallback). Lib absent -> inline (standalone). ---
 dir="$(jq -r '.workspace.project_dir // .cwd // empty' <<<"$payload" 2>/dev/null || true)"
-[[ -n "$dir" && -d "$dir" ]] || dir="$PWD"
-repo_root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
-[[ -n "$repo_root" ]] || repo_root="${CLAUDE_PROJECT_DIR:-$dir}"
+[[ -n "$dir" && -d "$dir" ]] || dir=""
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+fi
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$dir"
+  repo_root="$HANDOFF_ROOT"
+else
+  anchor="${CLAUDE_PROJECT_DIR:-${dir:-$PWD}}"
+  [[ -d "$anchor" ]] || anchor="${dir:-$PWD}"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$repo_root" ]] || repo_root="$anchor"
+fi
 
 # --- Token derivation (see header for why total_* are never read) ---
 tokens=""
@@ -103,7 +119,15 @@ fi
 HANDOFF_PLACEHOLDER_SENTINEL="<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->"
 handoff_state="none"
 handoff_doc="$repo_root/.claude/handoff_current.md"
-if [[ -f "$handoff_doc" ]]; then
+# Symlink read guard — same refusal as handoff_session_start.sh (read-side
+# twin of write_handoff.sh's write guard): display-only or not, the grep below
+# READS the doc, and a malicious cloned repo can COMMIT
+# .claude/handoff_current.md as a symlink to a file outside the repo. `! -L`
+# refuses it, leaving the state "none"; the one-line display has no room for a
+# warning (the loader hooks emit that), and the line must never die to this.
+# Directory-aware, like the loader: a leaf-only test is false when `.claude`
+# itself is the symlink (the leaf is then a real file at the target).
+if [[ ! -L "$repo_root/.claude" && ! -L "$handoff_doc" && -f "$handoff_doc" ]]; then
   if grep -qF "$HANDOFF_PLACEHOLDER_SENTINEL" "$handoff_doc" 2>/dev/null; then
     handoff_state="auto"
   else
@@ -175,11 +199,38 @@ write_cache() {
   # rotated out — a session that renders a statusline but never completes a
   # turn (open-and-quit, broken Stop hook) never gets a dump, so its cache
   # would accumulate forever. This script is the only producer of these files,
-  # so it also janitors them: anything (including orphaned mktemp temps) not
-  # touched in 7 days is long past ctx-check's staleness horizon and dead
-  # weight. -type f skips symlinks; the current session's file was written
-  # just above, so its fresh mtime keeps it out of the prune set.
-  find "$bd" -maxdepth 1 -name '.ctx_sl_*' -type f -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true
+  # so it also janitors them after the 7-day staleness horizon.
+  #
+  # ONLY DELETE FILES WE GENERATED (the retention rule: never rm by glob+mtime
+  # alone — cf. the companion-cursor ownership proof in handoff_turn_append.sh's
+  # prune). The '.ctx_sl_*' glob is broader than what write_cache writes: a
+  # user's hand-dropped ".ctx_sl_notes.backup" matches it, and a bare
+  # glob+mtime -exec rm deleted any such file silently once it aged past 7
+  # days. Ownership proof, all three required before rm:
+  #   name    — exactly .ctx_sl_<sid> with <sid> in the session-id charset
+  #             ([A-Za-z0-9_-]+ — the same guard the cache write above applies);
+  #   file    — a REGULAR file, never a symlink (find -type f tests the link
+  #             itself, so links are already excluded; the -L re-check is belt
+  #             and braces against a swap between find and rm);
+  #   content — the cache's own shape: nothing but known key=value lines, with
+  #             at least one numeric window=/tokens= line (cheap grep proof,
+  #             same spirit as the cursor companion).
+  # Safe-direction trade-off: orphaned mktemp temps (.ctx_sl_<sid>.XXXXXX) now
+  # fail the name proof and linger instead of being reaped — their suffix is
+  # indistinguishable from a user's ".backup"-style name, and leftover litter
+  # beats deleting someone else's file.
+  local stale sid
+  while IFS= read -r stale; do
+    [[ -n "$stale" ]] || continue
+    sid="${stale##*/}"; sid="${sid#.ctx_sl_}"
+    [[ "$sid" =~ ^[A-Za-z0-9_-]+$ ]] || continue
+    [[ -f "$stale" && ! -L "$stale" ]] || continue
+    LC_ALL=C grep -Eq '^(window|tokens)=[0-9]+$' "$stale" 2>/dev/null || continue
+    if LC_ALL=C grep -Evq '^(window=[0-9]+|tokens=[0-9]+|pct=[0-9]+(\.[0-9]+)?|model=[]A-Za-z0-9._ ()[-]+)$' "$stale" 2>/dev/null; then
+      continue  # some line is not cache-shaped -> not provably ours
+    fi
+    rm -f -- "$stale"
+  done < <(find "$bd" -maxdepth 1 -name '.ctx_sl_*' -type f -mtime +7 2>/dev/null || true)
 }
 # `|| true`: display already succeeded; a cache failure must never surface as
 # a nonzero exit (which would blank the status line on some CC versions).

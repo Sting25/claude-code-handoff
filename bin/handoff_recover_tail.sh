@@ -28,7 +28,21 @@
 # a normal "nothing to recover," not an error.
 #
 # Test/override env vars:
-#   HANDOFF_BACKUP_DIR          override the backup dir (default <repo>/.claude/handoff_backups)
+#   HANDOFF_BACKUP_DIR          override where THIS SCRIPT looks for the cursor
+#                               file (default <repo>/.claude/handoff_backups).
+#                               Scoped to this reader ONLY: the Stop hook
+#                               (handoff_turn_append.sh), handoff_ctx_check.sh,
+#                               handoff_compact_reset.sh, and
+#                               handoff_statusline.sh each resolve the backup
+#                               dir independently and do NOT honor this var, so
+#                               setting it does not relocate where those hooks
+#                               WRITE — it exists for tests that stage a cursor
+#                               file at a throwaway path, not for relocating
+#                               the backup directory project-wide. Pointing it
+#                               anywhere but the real write location desyncs
+#                               this script from its own cursor file; see the
+#                               "cursor missing but dump present" warning below
+#                               for the detectable symptom.
 #   HANDOFF_RECOVER_TRANSCRIPT  use this exact JSONL path (skip the projects-dir search)
 #   HANDOFF_PROJECTS_DIR        projects root to search (default $HOME/.claude/projects)
 
@@ -62,14 +76,37 @@ fi
 if [[ -n "${HANDOFF_BACKUP_DIR:-}" ]]; then
   backup_dir="$HANDOFF_BACKUP_DIR"
 else
-  repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  # Off-git, fall back to the Claude Code project dir / cwd, matching the writer
-  # hooks so the backup dir resolves to the same place they wrote it.
-  [[ -n "$repo_root" ]] || repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+  # Shared resolver (CLAUDE_PROJECT_DIR -> $PWD, then git -C toplevel of that
+  # anchor), matching the writer hooks so the cursor is read from the same
+  # .claude/ they wrote it to. The old bare `git rev-parse` anchored on this
+  # process's cwd, which could diverge from the writers' project-dir anchor
+  # (worktrees, submodules, mid-session `cd`). No hook payload here — the
+  # /handoff-recover skill invokes this directly — so no payload_cwd rung.
+  # Lib absent -> inline the same precedence (standalone).
+  prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+  if [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
+    # shellcheck source=bin/handoff_provenance.sh
+    . "$prov_dir/handoff_provenance.sh"
+  fi
+  if type handoff_resolve_root >/dev/null 2>&1; then
+    handoff_resolve_root ""
+    repo_root="$HANDOFF_ROOT"
+  else
+    anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+    [[ -d "$anchor" ]] || anchor="$PWD"
+    repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$repo_root" ]] || repo_root="$anchor"
+  fi
   [[ -z "$repo_root" ]] && { echo "handoff_recover_tail.sh: cannot resolve project dir and HANDOFF_BACKUP_DIR unset" >&2; exit 0; }
   backup_dir="$repo_root/.claude/handoff_backups"
 fi
 cursor_file="$backup_dir/.handoff_raw_${session_id}.cursor"
+# Companion dump file. handoff_turn_append.sh writes it FIRST (creating the
+# dump on its first fire), appends the turn, then writes the cursor last
+# (tmp+mv) — so in the normal case the two exist or don't exist together.
+# That makes the dump a witness for a suspiciously-missing cursor below: see
+# the cursor-read block.
+dump_file="$backup_dir/handoff_raw_${session_id}.md"
 
 # --- Locate the transcript JSONL ---
 # Session ids are globally-unique UUIDs, so glob the projects tree for
@@ -80,12 +117,42 @@ if [[ -n "${HANDOFF_RECOVER_TRANSCRIPT:-}" ]]; then
 else
   projects_dir="${HANDOFF_PROJECTS_DIR:-$HOME/.claude/projects}"
   transcript=""
+  # The <id>.jsonl LEAF is unique, but the SLUG directory above it is not:
+  # Claude Code mints a new project-slug dir when a project is renamed, moved,
+  # or resumed from a different cwd (handoff_session_start.sh's HANDOFF_ROOT
+  # mismatch warning covers the same root cause on the write side), so the
+  # same session id can end up filed under two slugs at once — one live, one a
+  # stale leftover. Collect every match rather than taking the first.
   # Nullglob so a no-match leaves the array empty instead of a literal pattern.
+  cands=()
   shopt -s nullglob
   for cand in "$projects_dir"/*/"${session_id}.jsonl"; do
-    transcript="$cand"; break
+    cands+=("$cand")
   done
   shopt -u nullglob
+  if (( ${#cands[@]} > 1 )); then
+    # The old code took whichever match the glob happened to expand first and
+    # broke out of the loop — effectively lexical order over the slug
+    # directory names, which has no relationship to which transcript is the
+    # real, current one. A stale 1-line copy under an alphabetically-earlier
+    # slug silently outranked a live multi-turn transcript, and recover_tail
+    # reported "dump is complete; no tail to recover" while discarding the
+    # very turns it exists to rescue. Select by mtime instead — same `ls -t`
+    # idiom handoff_turn_append.sh already uses for its dump-pruning order
+    # (BSD find has no -printf, so this is the portable way to get mtime
+    # order across GNU and BSD). LC_ALL=C pins collation, matching the sort
+    # discipline used elsewhere in this codebase (handoff_session_start.sh's
+    # history-file sort, write_handoff.sh's rotation sort): `proj-a` vs
+    # `proj_a` resolve differently under `C` vs `en_US.UTF-8`, and this
+    # script's own path resolution should not silently change which
+    # transcript wins depending on the caller's locale.
+    echo "handoff_recover_tail.sh: WARNING: found ${#cands[@]} transcripts for session $session_id under $projects_dir — using the most recently modified; the others are likely stale copies from a renamed/moved project:" >&2
+    for cand in "${cands[@]}"; do echo "  $cand" >&2; done
+    # shellcheck disable=SC2012  # ls -t is deliberate: mtime ordering, and BSD find has no -printf (same idiom as handoff_turn_append.sh's prune)
+    transcript="$(LC_ALL=C ls -t "${cands[@]}" 2>/dev/null | head -n 1)"
+  elif (( ${#cands[@]} == 1 )); then
+    transcript="${cands[0]}"
+  fi
 fi
 
 if [[ -z "$transcript" || ! -f "$transcript" ]]; then
@@ -98,6 +165,22 @@ cursor=0
 if [[ -f "$cursor_file" ]]; then
   cursor="$(cat "$cursor_file" 2>/dev/null || echo 0)"
   [[ "$cursor" =~ ^[0-9]+$ ]] || cursor=0
+elif [[ -f "$dump_file" ]]; then
+  # cursor=0 is meant for "nothing has been captured yet" (a legitimate first
+  # run). A dump WITHOUT a cursor is a different situation: the dump can only
+  # exist because the Stop hook already ran, and the Stop hook always writes
+  # the cursor in that same run — so the cursor almost certainly exists
+  # somewhere else, most likely because HANDOFF_BACKUP_DIR (see header) points
+  # away from where the Stop hook actually wrote. Silently falling through to
+  # cursor=0 here is the exact bug this guards against: the WHOLE session then
+  # gets formatted below and printed under the "Recovered tail" header,
+  # indistinguishable from a genuine crash-tail rescue, and /handoff-recover
+  # folds a duplicate of already-captured turns into curated Notes. Cursor
+  # still defaults to 0 (a duplicate re-emit is a human-recoverable annoyance;
+  # guessing a wrong non-zero cursor and silently dropping real tail turns
+  # would not be), but the warning gives the caller the signal needed to
+  # notice and fix the actual cause instead of trusting a false "recovered".
+  echo "handoff_recover_tail.sh: WARNING: $dump_file exists but its cursor file ($cursor_file) does not — proceeding with cursor=0 would re-emit the ENTIRE session as 'recovered tail', including turns already captured in the dump. Check whether HANDOFF_BACKUP_DIR is set to something other than where the Stop hook actually writes." >&2
 fi
 
 # Count transcript lines. `awk 'END{print NR}'` counts a final line even when it
@@ -126,6 +209,7 @@ if command -v perl >/dev/null 2>&1; then
       s{<command-message>.*?</command-message>\s*}{}gs;
       s{<command-args>.*?</command-args>\s*}{}gs;
       s{<local-command-stdout>.*?</local-command-stdout>\s*}{}gs;
+      s{<local-command-stderr>.*?</local-command-stderr>\s*}{}gs;
       s{\n{3,}}{\n\n}g;
     '
   }

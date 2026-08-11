@@ -5,9 +5,6 @@
 # tests-macos is intentionally NON-blocking: it surfaces the bash-3.2 / BSD
 # portability gaps that otherwise only bite on a dev's Mac, without blocking
 # merges on them.
-#
-# DRAFT: the first run is the real measurement — it confirms the suite is
-# green on Linux and shows exactly what (if anything) macOS still needs.
 name: CI
 
 on:
@@ -22,22 +19,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run test suite
+        # NO_SKIP: ubuntu runners ship jq, perl, and openssl, so a skipped
+        # check here means the image changed under us and part of the suite
+        # went quietly untested — which is exactly how a green build stops
+        # meaning anything.
+        env:
+          HANDOFF_TESTS_NO_SKIP: "1"
         run: ./tests/run.sh
 
+  # BLOCKING as of v0.13.0. It was advisory, and that was the wrong way
+  # round: ubuntu has flock and GNU stat/date/mv, so the fallback branches
+  # never execute there — genuine BSD behavior was covered ONLY by the job
+  # that could not fail. A macOS-only regression in the lock or rotation code
+  # merged green, and those are the two areas this release changed most. It
+  # passes on this tree with zero skips, so the gate is real, not aspirational.
   tests-macos:
-    name: tests (macOS / bash 3.2) — advisory
+    name: tests (macOS / bash 3.2) — required
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Run test suite (surfaces BSD / bash-3.2 portability gaps)
         run: ./tests/run.sh
 
+  # BLOCKING as of v0.13.0. It was advisory, and the mask was not
+  # hypothetical: the exact command below failed on the tree while CI stayed
+  # green, so the committed .shellcheckrc and the many targeted
+  # `# shellcheck disable=` annotations were being maintained against a check
+  # that could not fail. The tree is clean now, so the gate costs nothing to
+  # hold and everything to drop.
   shellcheck:
-    name: shellcheck — advisory
+    name: shellcheck — required
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: ShellCheck all scripts
-        run: shellcheck bin/*.sh tests/*.sh install.sh
+        # Print the version first: the runner's shellcheck is typically older
+        # than a developer's, and the two name some checks differently (the
+        # trap-only-invocation warning is SC2329 from 0.11 and SC2317 before
+        # it). When this job fails on a tree that is clean locally, the
+        # version line is the first thing to look at.
+        run: |
+          shellcheck --version
+          shellcheck bin/*.sh tests/*.sh install.sh

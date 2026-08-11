@@ -31,7 +31,10 @@
 #                          write-time stamp, and without a restamp the next
 #                          session loads the rules as data, not binding.
 #                          Degrades to a no-op warning when signing is
-#                          unavailable (no openssl / no provenance lib).
+#                          unavailable (no openssl / no provenance lib), and
+#                          likewise when another writer holds the write lock —
+#                          a stale-signed document is recoverable, one
+#                          overwritten with pre-rotation bytes is not.
 #
 # Reason-aware safety net (hook invocations only): when invoked as a hook,
 # stdin carries a JSON payload that MAY include a `reason` field (e.g.
@@ -65,12 +68,18 @@ umask 077
 hook_payload=""
 [[ -t 0 ]] || hook_payload="$(cat 2>/dev/null || true)"
 session_end_reason=""
+payload_cwd=""
 if [[ -n "$hook_payload" ]] && command -v jq >/dev/null 2>&1; then
   session_end_reason="$(jq -r '.reason // empty' <<<"$hook_payload" 2>/dev/null || true)"
   # Charset guard: known reasons are lowercase words ("clear", "logout",
   # "prompt_input_exit", "resume", "other"); anything else is treated as
   # unrecognized -> empty -> the write proceeds.
   [[ "$session_end_reason" =~ ^[a-z_]+$ ]] || session_end_reason=""
+  # Payload `cwd`: fed to handoff_resolve_root below as the second-rung
+  # anchor. Guarded the same way as `.reason` (jq optional, parse failure ->
+  # empty) and validated as an existing directory before use.
+  payload_cwd="$(jq -r '.cwd // empty' <<<"$hook_payload" 2>/dev/null || true)"
+  [[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
 fi
 
 # Shared provenance helpers (issue #42): HMAC signing so the next session's
@@ -88,6 +97,12 @@ fi
 HANDOFF_BIND_BEGIN="${HANDOFF_BIND_BEGIN:-<!-- HANDOFF_BIND_BEGIN -->}"
 HANDOFF_BIND_END="${HANDOFF_BIND_END:-<!-- HANDOFF_BIND_END -->}"
 HANDOFF_MAC_PREFIX="${HANDOFF_MAC_PREFIX:-<!-- HANDOFF_HMAC: }"
+HANDOFF_SKEL_PREFIX="${HANDOFF_SKEL_PREFIX:-<!-- HANDOFF_SKEL_HMAC: }"
+# Section headings emitted directly after our own BIND markers; the restamp
+# guard uses them to tell a writer-opened region from an editor-opened one.
+HANDOFF_PIN_HEADING="${HANDOFF_PIN_HEADING:-## 📌 Pinned — carried forward every handoff}"
+HANDOFF_RULES_HEADING="${HANDOFF_RULES_HEADING:-## Rules (fences — carried into the next session)}"
+HANDOFF_NOTES_HEADING="${HANDOFF_NOTES_HEADING:-## Notes from this session}"
 
 # Can this run sign at all? Gates every signing call site below.
 can_sign() {
@@ -208,15 +223,31 @@ if ! [[ "$HISTORY_KEEP" =~ ^[0-9]+$ ]]; then
   HISTORY_KEEP=5
 fi
 
-# Project scope: prefer the git worktree top; fall back to the Claude Code
-# project dir (or cwd) so handoff works in projects NOT under git. `in_git`
-# gates the git-only pieces below (commit snapshot, .gitignore bootstrap,
-# the verify-state command block).
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-in_git=1
-if [[ -z "$repo_root" ]]; then
-  in_git=0
-  repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Project scope: shared resolver (handoff_resolve_root, sourced above) —
+# anchor on CLAUDE_PROJECT_DIR first, then the hook payload's cwd, then $PWD,
+# and take the git toplevel of THAT anchor. The old bare `git rev-parse
+# --show-toplevel` anchored on the hook process's cwd while the SessionStart
+# loader anchored on CLAUDE_PROJECT_DIR — so with cwd != project dir
+# (worktrees, submodules, a `cd` during the session) this writer put the
+# handoff under a root the loader never looked at. Skill-invoked runs (no
+# CLAUDE_PROJECT_DIR in the Bash-tool env, no payload) still anchor on $PWD,
+# unchanged. `in_git` gates the git-only pieces below (commit snapshot,
+# .gitignore bootstrap, the verify-state command block).
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$payload_cwd"
+  repo_root="$HANDOFF_ROOT"
+  in_git="$HANDOFF_ROOT_IN_GIT"
+else
+  # Lib absent (stale copy-mode install): inline the same precedence so this
+  # script stays standalone. No payload rung here — the lib carries it.
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [[ -d "$anchor" ]] || anchor="$PWD"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  in_git=1
+  if [[ -z "$repo_root" ]]; then
+    in_git=0
+    repo_root="$anchor"
+  fi
 fi
 if [[ -z "$repo_root" ]]; then
   echo "ERROR: cannot resolve a project directory (no git worktree, CLAUDE_PROJECT_DIR, or PWD)" >&2
@@ -237,8 +268,17 @@ history_relpath=".claude/handoff_history/"
 # repos without them are entirely unaffected. Override via
 # HANDOFF_PINNED_FILE / HANDOFF_SYSTEMLOG_FILE.
 pinned_file="${HANDOFF_PINNED_FILE:-$handoff_dir/handoff_pinned.md}"
-pinned_relpath="${pinned_file#"$repo_root"/}"
 systemlog_file="${HANDOFF_SYSTEMLOG_FILE:-$repo_root/SYSTEM_LOG.md}"
+# A RELATIVE override is resolved against the REPO ROOT, matching how the
+# tracked-ness check below (and git itself) interprets it. Resolving it against
+# the process cwd instead — which is what reading the raw value does — makes
+# the pin silently VANISH from the handoff whenever a hook fires with cwd !=
+# root, the exact asymmetry this codebase's root resolver exists to close. It
+# also left the .gitignore bootstrap below pointing at a path that never
+# matched. Absolute values are untouched.
+case "$pinned_file" in /*) ;; *) pinned_file="$repo_root/${pinned_file#./}" ;; esac
+case "$systemlog_file" in /*) ;; *) systemlog_file="$repo_root/${systemlog_file#./}" ;; esac
+pinned_relpath="${pinned_file#"$repo_root"/}"
 systemlog_relpath="${systemlog_file#"$repo_root"/}"
 
 # Pin bindability (issue #42): the pinned file is meant to be USER-authored
@@ -277,6 +317,19 @@ if type handoff_is_untracked >/dev/null 2>&1 && [[ -n "$pin_check_rel" ]]; then
   fi
 fi
 
+# Symlink read guard for the pin, the write-path twin of the loader's guard on
+# handoff_current.md. The pin body is cat'd VERBATIM into the generated
+# document, so a cloned repo shipping .claude/handoff_pinned.md as a symlink to
+# ~/.ssh/id_rsa doesn't just echo the target — it PERSISTS it into a repo file
+# and replays it into the next session. Tracked-ness only decides bindability;
+# it does nothing about disclosure. Directory-aware for the same reason the
+# other guards are: with `.claude` itself a symlink the leaf test is false.
+# Refused means treated as absent — an empty path fails the `-s` test below.
+if [[ -L "$pinned_file" || -L "$(dirname "$pinned_file")" ]]; then
+  echo "write_handoff.sh: $pinned_relpath is a symlink (or sits under one); refusing to read through it — the pin body is copied verbatim into the handoff, so a link could persist a file from outside the repo. Treating the pin as absent." >&2
+  pinned_file=""
+fi
+
 # Symlink-safety. The final document write is a `>` redirect (and rotation does
 # `mv "$handoff_path" -> history`); `>` FOLLOWS a symlink and truncates its
 # target. A malicious repo can ship `.claude/handoff_current.md` (or `.claude`
@@ -297,13 +350,97 @@ if [[ -L "$handoff_path" ]]; then
   echo "write_handoff.sh: dropping planted symlink at $handoff_relpath (refusing to write through it)." >&2
   rm -f "$handoff_path"
 fi
+# handoff_history/ is the third component of the same guard and was the one
+# left uncovered. Rotation `mv`s the outgoing document — verbatim session
+# prose — into it, so a repo shipping `.claude/handoff_history` as a symlink
+# sends every rotated snapshot outside the repo, silently. It also kills
+# retention: `find -P` will not descend a symlinked start point, so prune and
+# the SessionStart history fallback see an empty history while snapshots
+# accumulate off-tree. Refuse the run rather than deleting the link — same
+# fail-closed choice as the .claude guard above, and it never destroys
+# anything the link points at.
+if [[ -L "$history_dir" ]]; then
+  echo "write_handoff.sh: $history_relpath is a symlink; refusing to operate through it (rotated snapshots contain session prose and would land outside the repo, with retention silently disabled). Replace it with a real directory." >&2
+  exit 1
+fi
+
+# ----- mkdir-based mutual-exclusion locks ------------------------------------
+# Shared idiom with handoff_turn_append.sh's flock-less fallback (keep the two
+# in sync): mkdir(2) is the one atomic test-and-create primitive available
+# everywhere this script runs (flock ships on Linux and Git Bash but not
+# macOS), so a lock is "held" while the lock DIRECTORY exists. A hard kill
+# (SIGKILL, OOM, power loss) skips EXIT traps and would leave the dir behind
+# forever, so acquisition includes the same mtime-based staleness reclaim as
+# the turn-append hook: a lock older than HANDOFF_LOCK_STALE_SECS (default
+# 300s — comfortably above Claude Code's 60s hook timeout, so a slow-but-alive
+# holder can't have its lock stolen) is presumed orphaned and reclaimed.
+# Returns 0 with the lock held, 1 otherwise; each call site documents how it
+# degrades on a miss. The lock paths live under .claude/, whose non-symlink
+# status is enforced above.
+try_mkdir_lock() {  # <lock_dir>
+  local lock_dir="$1" stale_secs lock_mtime now
+  # A symlink planted at the lock path (a malicious repo could ship one) makes
+  # mkdir fail with EEXIST forever and rmdir can't reclaim through it — i.e. a
+  # permanently wedged lock. Refuse it, mirroring this script's other symlink
+  # guards; the caller degrades exactly as for a held lock.
+  if [[ -L "$lock_dir" ]]; then
+    echo "write_handoff.sh: $lock_dir is a symlink; refusing to use it as a lock." >&2
+    return 1
+  fi
+  mkdir "$lock_dir" 2>/dev/null && return 0
+  # Held (or leftover). Reclaim only when older than the staleness window.
+  # Age via GNU `stat -c` with a BSD `stat -f` fallback, like turn_append.
+  stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
+  # Numeric guard before the (( )) below: bash arithmetic recursively
+  # expands its operand, so a non-numeric payload (e.g. an array subscript
+  # with command substitution) delivered via a clone's .claude/settings.json
+  # env would execute. Fall back to the default on anything non-numeric,
+  # matching every other arithmetic env var in this script.
+  [[ "$stale_secs" =~ ^[0-9]+$ ]] || stale_secs=300
+  lock_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null \
+                || stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  if [[ "$lock_mtime" =~ ^[0-9]+$ ]] \
+     && (( now - lock_mtime >= stale_secs )) \
+     && rmdir "$lock_dir" 2>/dev/null \
+     && mkdir "$lock_dir" 2>/dev/null; then
+    return 0   # reclaimed a stale lock
+  fi
+  return 1
+}
+
+# One EXIT trap owns ALL cleanup from here on (traps replace each other, so
+# scattering per-resource traps would silently drop earlier ones): the build
+# tmp file, and any lock still held when the script exits — normal release is
+# explicit at the end of each critical section; this is the abort backstop.
+# Every variable is read with a :- default because the trap can fire before
+# any of them is set.
+write_lock_dir=""
+write_lock_held=0
+gitignore_lock=""
+gitignore_lock_held=0
+handoff_tmp=""
+restamp_tmp=""
+restamp_src=""
+cleanup() {
+  if [[ -n "${handoff_tmp:-}" ]]; then rm -f "$handoff_tmp" 2>/dev/null || true; fi
+  if [[ -n "${restamp_tmp:-}" ]]; then rm -f "$restamp_tmp" 2>/dev/null || true; fi
+  if [[ -n "${restamp_src:-}" ]]; then rm -f "$restamp_src" 2>/dev/null || true; fi
+  if (( ${write_lock_held:-0} )); then rmdir "$write_lock_dir" 2>/dev/null || true; fi
+  if (( ${gitignore_lock_held:-0} )); then rmdir "$gitignore_lock" 2>/dev/null || true; fi
+  return 0
+}
+trap cleanup EXIT
 
 # --restamp: re-sign the existing document in place and exit. Runs after the
 # symlink guards above (so it can't stamp through a planted link) and before
 # everything else — no rotation, no rebuild, no .gitignore bootstrap. The
-# rewrite is mktemp+mv atomic like the main publish. Every degraded path
-# (missing file, no signing capability) warns and exits 0: the /handoff skill
-# calls this best-effort, and an unsigned file just keeps data framing.
+# rewrite is mktemp+mv atomic like the main publish, and the whole
+# read→guard→sign→publish sequence runs under the same whole-run write lock the
+# main path uses (see the acquisition comment below for why atomic-in-isolation
+# isn't enough). Every degraded path (missing file, no signing capability,
+# contended lock) warns and exits 0: the /handoff skill calls this best-effort,
+# and an unsigned file just keeps data framing.
 if (( RESTAMP )); then
   if [[ ! -f "$handoff_path" ]]; then
     echo "write_handoff.sh: --restamp: no $handoff_relpath to stamp; nothing done." >&2
@@ -314,23 +451,210 @@ if (( RESTAMP )); then
     echo "$handoff_path"
     exit 0
   fi
-  if mac="$(handoff_mac_compute "$handoff_path" ensure)"; then
-    restamp_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
-    trap 'rm -f "$restamp_tmp"' EXIT
-    {
-      # Strip only a well-formed trailer (matching handoff_mac_compute), so a
-      # prose line that merely starts with the prefix is preserved and stays
-      # covered by the digest. `|| true`: grep -v exits 1 on an all-stripped
-      # (empty) doc, which under set -e/pipefail would abort the restamp.
-      LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$handoff_path" || true
-      printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac"
-    } > "$restamp_tmp"
-    chmod 600 "$restamp_tmp" 2>/dev/null || true
-    mv -f "$restamp_tmp" "$handoff_path"
+  # Serialize against the main path's rotate→prune→publish behind the SAME
+  # whole-run lock. A restamp is a read-modify-write of handoff_current.md, and
+  # its final `mv` is atomic only in isolation: the sequence is read(doc) →
+  # guard → sign → publish, and a writer running concurrently can rotate that
+  # document into history and publish a fresh one inside the gap. The restamp's
+  # mv then lands the PRE-rotation bytes back on top of the just-published
+  # document — the session loses the newer snapshot, and because the ghost
+  # carries a freshly computed MAC it verifies, so nothing downstream can tell
+  # the substitution happened. The realistic trigger is the /handoff skill
+  # restamping its edit while a SessionEnd or PreCompact safety-net write is
+  # mid-sequence; the lock makes the read and the publish observe one document.
+  #
+  # Degradation on a miss is deliberately the OPPOSITE of the main path's
+  # explicit-run policy below (which proceeds unlocked rather than drop a write
+  # the user asked for). Proceeding unlocked here IS the clobber above, and the
+  # two outcomes are not symmetric: a skipped restamp leaves a correct document
+  # carrying a stale signature, so the next session loads its rules as
+  # reference data instead of binding — the already-documented degraded mode,
+  # and re-runnable — while a clobber destroys curated prose that exists
+  # nowhere else. So: wait the same ~1s a competing hook fire needs to finish,
+  # then warn loudly and skip. Nothing goes to stdout on that path — the
+  # handoff path is this script's "the job was done" signal, and a caller
+  # seeing it would assume binding had been restored when it had not.
+  write_lock_dir="$handoff_dir/.handoff_write.lock"
+  if try_mkdir_lock "$write_lock_dir"; then
+    write_lock_held=1
   else
-    echo "write_handoff.sh: --restamp: cannot sign (openssl or the per-machine secret unavailable); the rules layer will load as reference data, not binding." >&2
+    # `sleep 0.2` works on GNU and BSD/macOS sleep; the `|| sleep 1` fallback
+    # covers a strictly-integer POSIX sleep.
+    for _ in 1 2 3 4 5; do
+      sleep 0.2 2>/dev/null || sleep 1
+      if try_mkdir_lock "$write_lock_dir"; then
+        write_lock_held=1
+        break
+      fi
+    done
   fi
-  echo "$handoff_path"
+  if (( ! write_lock_held )); then
+    echo "write_handoff.sh: --restamp: write lock $write_lock_dir still held after ~1s; SKIPPING the restamp rather than overwriting another writer's publish. $handoff_relpath keeps its current signature, so its rules load as reference data, not binding — re-run /handoff to restore it." >&2
+    exit 0
+  fi
+  # Re-check under the lock. The holder we just waited out may have rotated the
+  # document into history and then aborted before publishing its replacement,
+  # so the file that existed at the guard above can be gone by the time we own
+  # the lock. Reading a missing file below would yield an EMPTY body (the
+  # `|| true` on the grep swallows the read error), sign that, and publish an
+  # empty handoff into the gap — the same content loss by a different route.
+  if [[ ! -f "$handoff_path" ]]; then
+    echo "write_handoff.sh: --restamp: $handoff_relpath disappeared while waiting for the write lock; nothing done." >&2
+    exit 0
+  fi
+  # NUL-byte guard, checked BEFORE the bind-region guard ever sees the
+  # document. handoff_guard_bind_regions runs on awk, and BSD/macOS awk
+  # silently truncates a line at its first NUL byte instead of erroring or
+  # preserving the rest — so a NUL anywhere in the document (a stray binary
+  # byte, a paste, prompt-injected content) would make the guard emit a
+  # silently-shortened body. Unlike the line-count check below (which catches
+  # a truncated OUTPUT), this would NOT trip that invariant when the NUL and
+  # everything after it on its line falls entirely within one line: one line
+  # goes in, one (shorter) line comes out, so line counts still match. This
+  # path then signs a valid fresh HMAC over the corrupted bytes and PUBLISHES
+  # it — the corruption verifies as authentic to every downstream reader.
+  # Refuse up front instead, using the same refusal shape as the line-count
+  # check: the file is left byte-identical, a warning goes to stderr, and the
+  # write exits 0 carrying a stale-but-honest signature (loads as reference
+  # data, not binding) rather than a fresh signature over corrupted content.
+  #
+  # Portable NUL detection (bash 3.2, BSD + GNU): compare the file's raw byte
+  # count against its byte count with NUL bytes stripped. `wc -c` counts
+  # every byte, NUL included, on both BSD and GNU; `LC_ALL=C tr -d '\0'`
+  # removes NUL bytes on both. Equal counts means no NUL was present; a
+  # mismatch means at least one was. `wc -l` cannot substitute here — a NUL
+  # does not change newline counts either way, so it would miss this entirely
+  # (verified: macOS /usr/bin/awk drops "line two\x00rest" down to "line
+  # two", losing 17 bytes with the line count unchanged).
+  raw_bytes="$(LC_ALL=C wc -c < "$handoff_path" | tr -d ' ')"
+  stripped_bytes="$(LC_ALL=C tr -d '\0' < "$handoff_path" | LC_ALL=C wc -c | tr -d ' ')"
+  if [[ "$raw_bytes" != "$stripped_bytes" ]]; then
+    echo "write_handoff.sh: --restamp: $handoff_relpath contains a NUL byte, which BSD/macOS awk silently truncates a line at — refusing to restamp. $handoff_relpath is unchanged and keeps its previous signature; its rules load as reference data, not binding. Remove the NUL byte (or any binary content) and re-run /handoff." >&2
+    if (( write_lock_held )); then
+      rmdir "$write_lock_dir" 2>/dev/null || true
+      write_lock_held=0
+    fi
+    exit 0
+  fi
+  # H-A structural gate — runs AFTER the NUL refusal (so the skeleton filter,
+  # itself awk, never sees a truncating NUL) and BEFORE the bind-region guard.
+  # The write-time skeleton stamp is an HMAC over the document's structure minus
+  # the two sanctioned edit zones (the Notes body and the writer's own Rules
+  # fences). Recompute it over the current bytes and refuse to publish a
+  # binding-capable signature on any mismatch — a bind marker, heading, or
+  # section added, moved, or deleted OUTSIDE those zones. That is exactly the
+  # class the in-band heuristic guard cannot catch (a duplicated Rules/Pinned
+  # heading above Notes, a forged region at the top, a deleted Notes heading),
+  # because the attacker is the model editing the doc and every in-band token is
+  # published. A LEGACY doc with no recorded stamp refuses too, rather than
+  # silently falling back to the broken heuristic. Same refusal shape as the
+  # NUL / line-count checks: file left byte-identical, warn, exit 0 — its edit
+  # already staled the write-time HMAC, so the rules load as reference data, and
+  # re-running /handoff regenerates a fresh, structurally-stamped document.
+  skel_refused=""
+  if recorded_skel="$(handoff_skel_read "$handoff_path")"; then
+    if skel_now="$(handoff_skel_compute "$handoff_path" verify)"; then
+      [[ "$skel_now" == "$recorded_skel" ]] || skel_refused="structural"
+    else
+      skel_refused="compute"
+    fi
+  else
+    skel_refused="legacy"
+  fi
+  if [[ -n "$skel_refused" ]]; then
+    case "$skel_refused" in
+      legacy) skel_reason="carries no structural (skeleton) stamp — it predates this protection, or the stamp was removed" ;;
+      structural) skel_reason="changed shape since it was built (a bind marker, heading, or section was added, moved, or deleted outside the Notes and Rules edit zones)" ;;
+      *) skel_reason="could not be structurally verified — the skeleton filter failed (check that awk is on PATH)" ;;
+    esac
+    echo "write_handoff.sh: --restamp: $handoff_relpath $skel_reason; refusing to re-sign it as binding. It is unchanged and keeps its previous signature, so its rules load as reference data, not binding. Re-run /handoff to regenerate a fresh, structurally-stamped handoff." >&2
+    if (( write_lock_held )); then
+      rmdir "$write_lock_dir" 2>/dev/null || true
+      write_lock_held=0
+    fi
+    exit 0
+  fi
+  # Build the body to be signed, THEN sign it — the document has been edited
+  # since it was written (that is why a restamp is needed), so the bytes must
+  # be brought back under the writer-only bind invariant before a signature
+  # vouches for them. Signing the on-disk bytes first would stamp whatever the
+  # editor left, including a BIND marker pair smuggled into the Notes block.
+  restamp_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
+  restamp_src="$(mktemp "$handoff_dir/.handoff_pre.XXXXXX")"
+  # Strip only a well-formed trailer (matching handoff_mac_compute), so a
+  # prose line that merely starts with the prefix is preserved and stays
+  # covered by the digest. `|| true`: grep -v exits 1 on an all-stripped
+  # (empty) doc, which under set -e/pipefail would abort the restamp.
+  LC_ALL=C grep -Ev '^<!-- HANDOFF_(HMAC|SKEL_HMAC): [0-9a-f]{64} -->[[:space:]]*$' \
+    "$handoff_path" > "$restamp_src" || true
+  guard_ok=1
+  if type handoff_guard_bind_regions >/dev/null 2>&1; then
+    handoff_guard_bind_regions < "$restamp_src" > "$restamp_tmp" || guard_ok=0
+  else
+    # Stale lib (a copy-mode ~/.claude/bin predating the guard). Pass the body
+    # through unchanged rather than emptying the document; the result is the
+    # pre-guard behavior, so warn that this restamp can promote edited content
+    # into the binding tier.
+    echo "write_handoff.sh: --restamp: installed handoff_provenance.sh predates the bind-region guard; re-run install.sh to restore it." >&2
+    cat "$restamp_src" > "$restamp_tmp" || guard_ok=0
+  fi
+  # The guard REWRITES marker lines in place and never adds or removes one, so
+  # equal line counts is an exact invariant, not a heuristic — and it is the
+  # check that makes a partial filter failure impossible to publish. Without
+  # it, an awk that dies mid-stream (absent, OOM-killed, non-zero on a
+  # pathological line) yields a truncated body that this path then SIGNS and
+  # moves over the curated handoff: permanent loss, no history copy (restamp
+  # does not rotate), a valid fresh MAC so it verifies as authentic, and rc=0
+  # reported to the user as success. Refuse rather than publish; the document
+  # on disk is still correct, merely carrying a stale signature.
+  src_lines="$(LC_ALL=C wc -l < "$restamp_src" | tr -d ' ')"
+  out_lines="$(LC_ALL=C wc -l < "$restamp_tmp" | tr -d ' ')"
+  if (( ! guard_ok )) || [[ "$src_lines" != "$out_lines" ]]; then
+    echo "write_handoff.sh: --restamp: the bind-region guard did not return the document intact (${src_lines} lines in, ${out_lines} out); refusing to publish. $handoff_relpath is unchanged and keeps its previous signature — its rules load as reference data, not binding. Check that awk is on PATH, then re-run /handoff." >&2
+    rm -f "$restamp_src"; restamp_src=""
+    if (( write_lock_held )); then
+      rmdir "$write_lock_dir" 2>/dev/null || true
+      write_lock_held=0
+    fi
+    exit 0
+  fi
+  rm -f "$restamp_src"; restamp_src=""
+  chmod 600 "$restamp_tmp" 2>/dev/null || true
+  restamp_signed=0
+  # Re-emit the skeleton stamp (structure verified intact above, so this equals
+  # the recorded one) BEFORE the main HMAC, which then covers it — the same
+  # order the build path uses, and it keeps the invariant that every signed doc
+  # carries a matching stamp so the NEXT restamp has a baseline. A recompute
+  # failure here refuses the publish rather than shipping a doc with a main HMAC
+  # but no skeleton (which the next restamp would then reject as legacy).
+  if fresh_skel="$(handoff_skel_compute "$restamp_tmp" ensure)"; then
+    printf '%s%s -->\n' "$HANDOFF_SKEL_PREFIX" "$fresh_skel" >> "$restamp_tmp"
+    if mac="$(handoff_mac_compute "$restamp_tmp" ensure)"; then
+      printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$restamp_tmp"
+      mv -f "$restamp_tmp" "$handoff_path"
+      restamp_tmp=""   # published; nothing left for the EXIT trap to remove
+      restamp_signed=1
+    else
+      echo "write_handoff.sh: --restamp: cannot sign (openssl or the per-machine secret unavailable); the rules layer will load as reference data, not binding." >&2
+    fi
+  else
+    echo "write_handoff.sh: --restamp: could not recompute the structural (skeleton) stamp; refusing to publish. $handoff_relpath is unchanged and keeps its previous signature — its rules load as reference data, not binding." >&2
+  fi
+  # Normal-path lock release, mirroring the main path's; the cleanup trap is
+  # only the abort backstop.
+  if (( write_lock_held )); then
+    rmdir "$write_lock_dir" 2>/dev/null || true
+    write_lock_held=0
+  fi
+  # The path on stdout is this script's "the job was done" signal, and every
+  # caller keys on it — so it is only printed when the document was actually
+  # re-signed. Printing it after a failed sign is the same lie the safety-net
+  # skip used to tell: the /handoff skill would report success while the next
+  # session silently loaded the rules as data. The stderr warning above is the
+  # only output on that path. Exit stays 0 — this is best-effort by design.
+  if (( restamp_signed )); then
+    echo "$handoff_path"
+  fi
   exit 0
 fi
 
@@ -425,17 +749,33 @@ bootstrap_gitignore() {
   echo "write_handoff.sh: added '$entry' to $gi (set HANDOFF_NO_GITIGNORE_BOOTSTRAP=1 to skip)" >&2
 }
 if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]]; then
-  bootstrap_gitignore "$handoff_relpath"
-  bootstrap_gitignore "$history_relpath"
-  # Raw per-turn transcript dumps (written by the Stop hook) contain
-  # verbatim session content — including anything sensitive surfaced in
-  # tool output — so they must never be committable.
-  bootstrap_gitignore ".claude/handoff_backups/"
-  # The pin is local operational state, same class as the handoff itself.
-  # Only auto-ignore when it sits inside the repo (the default and the
-  # common override); an out-of-tree override is the user's to manage.
-  if [[ "$pinned_relpath" != /* && "$pinned_relpath" != "$pinned_file" ]]; then
-    bootstrap_gitignore "$pinned_relpath"
+  # The check-ignore→append sequence in bootstrap_gitignore races the
+  # IDENTICAL bootstrap in handoff_turn_append.sh (Stop hook): both can pass
+  # check-ignore before either appends, and the .gitignore ends up with
+  # duplicated entries. Both scripts therefore take the SAME dedicated lock —
+  # <root>/.claude/.handoff_gitignore.lock, name and idiom shared with
+  # turn_append — around the whole sequence so they actually exclude each
+  # other. On a miss, skip silently: the holder is appending the very same
+  # entries, and check-ignore makes the next fire's retry idempotent.
+  gitignore_lock="$handoff_dir/.handoff_gitignore.lock"
+  if try_mkdir_lock "$gitignore_lock"; then
+    gitignore_lock_held=1
+    bootstrap_gitignore "$handoff_relpath"
+    bootstrap_gitignore "$history_relpath"
+    # Raw per-turn transcript dumps (written by the Stop hook) contain
+    # verbatim session content — including anything sensitive surfaced in
+    # tool output — so they must never be committable.
+    bootstrap_gitignore ".claude/handoff_backups/"
+    # The pin is local operational state, same class as the handoff itself.
+    # Only auto-ignore when it sits inside the repo (the default and the
+    # common override); an out-of-tree override is the user's to manage.
+    if [[ "$pinned_relpath" != /* && "$pinned_relpath" != "$pinned_file" ]]; then
+      bootstrap_gitignore "$pinned_relpath"
+    fi
+    # Release promptly (the doc build below is slow); the cleanup trap is
+    # only the abort backstop.
+    rmdir "$gitignore_lock" 2>/dev/null || true
+    gitignore_lock_held=0
   fi
 fi
 
@@ -460,6 +800,16 @@ file_mtime_stamp() {
   fi
 }
 
+# Is <path> a name the atomic claim below may aim `mv -n` at — i.e. free, or
+# occupied by a regular file (which `mv -n` will refuse, leaving the source
+# put)? Anything else — a directory, a fifo, a dangling symlink — is NOT a
+# claimable destination; see the loop for what goes wrong when one is used.
+# A symlink TO a regular file counts as claimable: `mv -n` sees an existing
+# destination and refuses it, which is the outcome we want anyway.
+claimable_archive_name() {  # <path>
+  [[ ! -e "$1" && ! -L "$1" ]] || [[ -f "$1" ]]
+}
+
 rotate_existing_handoff() {
   [[ -f "$handoff_path" ]] || return 0
   # An outgoing UNEDITED placeholder is deleted, not archived: it carries no
@@ -480,21 +830,99 @@ rotate_existing_handoff() {
   local ts archived
   ts="$(file_mtime_stamp "$handoff_path")"
   archived="$history_dir/handoff_${ts}.md"
-  # If a file with the same timestamp already exists, append a counter
-  # so we don't clobber. Only happens if two rotations land in the same
-  # second, which is rare but possible.
-  if [[ -e "$archived" ]]; then
-    local n=2
-    while [[ -e "${archived%.md}_${n}.md" ]]; do n=$((n+1)); done
-    archived="${archived%.md}_${n}.md"
-  fi
-  mv "$handoff_path" "$archived"
+  # If a file with the same timestamp already exists, append a counter so we
+  # don't clobber. The claim must be ATOMIC, not probe-then-mv: the old
+  # `[[ -e ]]` probe followed by a plain `mv` was a TOCTOU — two concurrent
+  # runs could both probe the same name clear, and the second `mv` silently
+  # clobbered the first run's archive. `mv -n` ("never overwrite an existing
+  # destination") folds the existence check and the rename into one operation.
+  # Portability, verified: BSD/macOS mv supports -n (on a skip it leaves the
+  # source in place and exits 0), and GNU coreutils mv supports -n too — but
+  # GNU's exit status ON SKIP changed across versions (nonzero since
+  # coreutils 9.2), so the exit code is NOT a portable skip signal. The one
+  # invariant both implementations share: a skipped move leaves the SOURCE
+  # file in place. So the loop attempts a candidate name and keys on "did the
+  # source disappear" to know it won; source-still-there means the name was
+  # taken — bump the counter and try the next. Chosen over the ln-then-rm
+  # hard-link idiom because mv preserves the single-rename atomicity the
+  # publish path already relies on and needs no link-count cleanup.
+  # Bounded: 50 same-second collisions is not a real scenario, so after 50
+  # attempts the failure is something else (EPERM, ENOSPC — where mv also
+  # leaves the source, for a different reason); fall through to a plain loud
+  # mv so the real error surfaces under set -e instead of spinning forever.
+  #
+  # "Source disappeared" is only a valid win signal when the candidate name was
+  # CLAIMABLE to begin with. `mv -n` refuses to overwrite an existing file, but
+  # a DIRECTORY is not an overwrite: `mv -n file dir` moves the file INTO it and
+  # succeeds, so the source vanishes and the loop reads it as a win. The
+  # rotation then chmod 600's the directory, stripping its traverse bit, and the
+  # curated snapshot is sealed inside a name no `-type f` consumer can reach —
+  # prune_history, handoff_session_start's history fallback and /handoff-more
+  # all walk right past it. Silent loss of exactly the file retention exists to
+  # keep. The probe-then-mv code this replaced got that right by accident
+  # (`[[ -e ]]` is true for a directory, so it bumped to _2); the atomic claim
+  # must get it right on purpose, WITHOUT giving up the claim — the TOCTOU it
+  # closed was two concurrent rotations both finding the same name free, and
+  # that race is still live. So the probe here is narrow: it only rules out
+  # names that are not regular files, and every free-name claim still goes
+  # through `mv -n`. Nothing in this system ever creates a non-file under
+  # handoff_history/ — these arrive from outside (a restore that unpacked a
+  # tree, a user's mkdir, a stray checkout), so there is no writer to race the
+  # probe against.
+  local n=1 attempts=0 candidate="$archived"
+  while :; do
+    if claimable_archive_name "$candidate"; then
+      mv -n "$handoff_path" "$candidate" 2>/dev/null || true
+      [[ -e "$handoff_path" ]] || break      # source gone -> claim succeeded
+    fi
+    attempts=$((attempts + 1))
+    if (( attempts >= 50 )); then
+      # Out of attempts. If the name is truly FREE (nothing at all there), the
+      # blocker is a real errno (EPERM, ENOSPC, ...), so move LOUDLY and let
+      # set -e surface it — that is what this fallback exists for. But
+      # claimable_archive_name also returns true for an EXISTING REGULAR FILE
+      # (that's what makes it a valid `mv -n` target inside the loop above),
+      # and that case must NOT reach the unprotected mv: without `-n` it would
+      # silently overwrite a real, already-archived handoff — exactly the
+      # clobber this rotation exists to prevent. So re-check narrowly for
+      # "truly free" before dropping to the loud mv; a non-free claimable name
+      # (an existing archive) aborts instead, same direction as the
+      # non-claimable (directory/fifo) case below. Aborting is the safe
+      # direction either way: the publish below never runs, so
+      # handoff_current.md keeps its curated prose (unrotated) rather than
+      # being overwritten by a mechanical snapshot whose predecessor we just
+      # failed to archive.
+      if ! claimable_archive_name "$candidate"; then
+        echo "write_handoff.sh: cannot rotate $handoff_relpath — 50 candidate names under $history_relpath are occupied by non-files; refusing to move the handoff into one. Clear them and re-run." >&2
+        exit 1
+      fi
+      if [[ -e "$candidate" || -L "$candidate" ]]; then
+        echo "write_handoff.sh: cannot rotate $handoff_relpath — 50 candidate names under $history_relpath already exist as archived handoffs; refusing to overwrite $candidate. Clear stale names, raise HANDOFF_HISTORY_KEEP, or re-run later." >&2
+        exit 1
+      fi
+      mv "$handoff_path" "$candidate"        # candidate confirmed free; loud on a real errno
+      break
+    fi
+    n=$((n + 1))
+    candidate="${archived%.md}_${n}.md"
+  done
+  archived="$candidate"
   # Tighten a doc written 0644 by a pre-0.8.2 version: `mv` preserves the source
   # mode, so without this a world-readable handoff stays world-readable once
   # rotated into history (the prose can hold secrets). New docs are already 0600.
   chmod 600 "$archived" 2>/dev/null || true
 }
 prune_history() {
+  # KEEP=0 means "retention disabled" — documented in the README as "existing
+  # snapshots are never touched", and the rotation guard above already skips
+  # archiving on KEEP<=0. But this prune used to run unconditionally: with
+  # KEEP=0 the `tail -n +$((KEEP+1))` below is `tail -n +1`, which lists EVERY
+  # history file for deletion — so a one-off `HANDOFF_HISTORY_KEEP=0` run
+  # destroyed all prior curated snapshots (the exact opposite of "disabled").
+  # Skip pruning entirely; existing history is left untouched. The non-numeric/
+  # negative fallback above guarantees HISTORY_KEEP is a non-negative integer
+  # by the time we get here.
+  [[ "$HISTORY_KEEP" -gt 0 ]] || return 0
   [[ -d "$history_dir" ]] || return 0
   # Delete all but the HISTORY_KEEP newest. Use a `while IFS= read -r` loop with
   # `rm -f --` (mirroring handoff_turn_append.sh) rather than a bare `xargs -r
@@ -511,10 +939,16 @@ prune_history() {
   # deleted with no warning and no backup. Filter to the exact shape we emit:
   # `handoff_<YYYY-MM-DD>_<HHMMSS>.md`, plus the `_<N>` same-second collision
   # suffix. Anything else is someone else's file and is left untouched. (#46)
+  # LC_ALL=C on the sort: same-second collision names (handoff_<stamp>_2.md)
+  # must rank as NEWER than their base (handoff_<stamp>.md), which holds under
+  # byte collation (`_` 0x5F > `.` 0x2E) but flips under UTF-8 locale
+  # collation (measured on macOS en_US.UTF-8) — an at-the-retention-boundary
+  # prune would then delete the newer sibling and keep the older one. Same
+  # fix as handoff_session_start.sh's newest-first pick; keep them in sync.
   local f
   find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
     | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
-    | sort -r \
+    | LC_ALL=C sort -r \
     | tail -n +$((HISTORY_KEEP + 1)) \
     | while IFS= read -r f; do
         [[ -n "$f" ]] && rm -f -- "$f"
@@ -544,7 +978,11 @@ fi
 substrate_root=""
 if [[ -n "$SUBSTRATE_NAME" ]]; then
   candidate="$(cd "$repo_root/.." && pwd)/$SUBSTRATE_NAME"
-  if [[ -d "$candidate/.git" ]]; then
+  # `git rev-parse`, not `[[ -d "$candidate/.git" ]]`: .git is a FILE (a
+  # gitdir: pointer) in a linked worktree and in a submodule, so the -d test
+  # reported a perfectly legitimate sibling as "not a git repo" and silently
+  # dropped its snapshot. This is the idiom used everywhere else in this file.
+  if git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     substrate_root="$candidate"
   else
     # Configured but not found / not a git repo. Silently skipping hid typos in
@@ -636,21 +1074,34 @@ list_inflight_md() {
 }
 
 # Build the document in a temp file in $handoff_dir (same filesystem → the mv
-# below is an atomic rename). umask 077 makes it 0600 at creation; the trap
-# removes it if anything aborts before the final publish.
+# below is an atomic rename). umask 077 makes it 0600 at creation; the cleanup
+# EXIT trap (installed above, alongside the lock helpers) removes it if
+# anything aborts before the final publish — do NOT set a new trap here, that
+# would silently replace the shared one and leak any held lock on abort.
 handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
-trap 'rm -f "$handoff_tmp"' EXIT
 
 {
   printf '# %s — session handoff (auto-generated)\n\n' "$repo_name"
   printf '**Generated:** %s\n\n' "$ts_utc"
+  # Machine-readable resolution record: which root this doc was written for,
+  # and whether that root was a git worktree at write time. The SessionStart
+  # loader compares these against ITS resolution and warns on a mismatch
+  # (moved/renamed project) or a non-git -> git flip (the snapshot predates
+  # `git init` / arrived with a clone), instead of silently loading a doc
+  # that describes some other tree. An inert HTML comment, covered by the
+  # HMAC like every other line.
+  printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n\n' "$repo_root" "$in_git"
 
   cat <<EOF
 Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
 \`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).
 Auto-loaded into the next session by the \`SessionStart\` hook in the
-same settings file. Always lives at \`<repo>/.claude/handoff_current.md\`;
-the previous handoff is rotated to \`.claude/handoff_history/\` before
+same settings file. Lives at \`<root>/.claude/handoff_current.md\`, where
+\`<root>\` is resolved from the Claude Code project dir (falling back to
+the hook payload's cwd, then the process cwd) and then anchored on that
+dir's git toplevel — the same resolution the loader uses, recorded in the
+\`HANDOFF_ROOT\` comment above. The previous handoff is rotated to
+\`.claude/handoff_history/\` before
 overwrite (last $HISTORY_KEEP retained; override via \`HANDOFF_HISTORY_KEEP\`).
 Run \`/handoff-more\` in a fresh session to pull older handoffs into context.
 
@@ -672,7 +1123,7 @@ EOF
     if (( pin_bindable )); then
       printf '%s\n' "$HANDOFF_BIND_BEGIN"
     fi
-    printf '## 📌 Pinned — carried forward every handoff\n\n'
+    printf '%s\n\n' "$HANDOFF_PIN_HEADING"
     if (( ! pin_bindable )); then
       printf '_Note: the pin file is TRACKED in git, so it may have arrived with a\n'
       printf 'clone — it loads as reference data, not binding rules. Untrack it\n'
@@ -720,7 +1171,14 @@ EOF
     snapshot_repo "$substrate_root" "Substrate: $SUBSTRATE_NAME"
   fi
 
-  # In-flight markdown across configured paths in the main repo
+  # In-flight markdown across configured paths in the main repo.
+  # `set -f` around both unquoted loops: word splitting on these
+  # space-separated lists is intentional and documented, but PATHNAME
+  # EXPANSION rides along with it unguarded — HANDOFF_INFLIGHT_DIRS="docs *"
+  # globs against the process cwd and turns a config value into a directory
+  # listing of wherever the hook happened to run. Splitting is what we want;
+  # globbing never is.
+  set -f
   for d in $INFLIGHT_DIRS; do
     [[ -d "$repo_root/$d" ]] || continue
     # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
@@ -755,6 +1213,7 @@ EOF
       fi
     done
   fi
+  set +f
 
   printf '## Verify state matches reality\n\n'
   printf '```bash\n'
@@ -803,13 +1262,13 @@ EOF
   # stray "next session should..." sentence can't become law — and even
   # marked content binds only when the document's provenance verifies.
   printf '%s\n' "$HANDOFF_BIND_BEGIN"
-  printf '## Rules (fences — carried into the next session)\n\n'
+  printf '%s\n\n' "$HANDOFF_RULES_HEADING"
   printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
   printf '%s\n' "$HANDOFF_BIND_END"
   printf '\n'
   echo '---'
   echo
-  printf '## Notes from this session\n\n'
+  printf '%s\n\n' "$HANDOFF_NOTES_HEADING"
   printf '%s\n' "$HANDOFF_PLACEHOLDER_SENTINEL"
   printf '\n'
   printf '_The /handoff skill should replace this entire block (sentinel\n'
@@ -829,6 +1288,18 @@ EOF
 # isn't possible — an unsigned handoff loads exactly as today (data framing);
 # this must NEVER abort the write.
 if can_sign; then
+  # Skeleton stamp (H-A) FIRST, so the main HMAC below covers it. It records an
+  # HMAC over the document's STRUCTURE minus the two sanctioned edit zones (see
+  # handoff_skeleton), giving --restamp an out-of-band way to prove no structural
+  # smuggling happened since build — the defense the in-band heuristic guard
+  # cannot provide. A skel-compute failure is non-fatal (the main HMAC still
+  # signs): the doc then reads as a legacy no-skeleton doc, which --restamp
+  # refuses to promote after an edit — the fail-closed direction, not a crash.
+  if skel="$(handoff_skel_compute "$handoff_tmp" ensure)"; then
+    printf '%s%s -->\n' "$HANDOFF_SKEL_PREFIX" "$skel" >> "$handoff_tmp"
+  else
+    echo "write_handoff.sh: structural (skeleton) stamp unavailable — after any edit, /handoff must be re-run to restore binding; the rules layer will otherwise load as reference data." >&2
+  fi
   if mac="$(handoff_mac_compute "$handoff_tmp" ensure)"; then
     printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$handoff_tmp"
   else
@@ -840,10 +1311,67 @@ fi
 # covers a tmp produced under an unusual umask). The prose may include secrets.
 chmod 600 "$handoff_tmp" 2>/dev/null || true
 
+# ----- Whole-run write lock: rotation through publish ------------------------
+# Two concurrent runs (SessionEnd + PreCompact firing together, or two
+# sessions open in one repo) interleave rotation and publish: each individual
+# mv is atomic, but the rotate→prune→publish SEQUENCE is not — writer B can
+# rotate away the document writer A published a moment earlier, silently
+# losing a snapshot. Serialize the whole destructive window behind
+# <root>/.claude/.handoff_write.lock. The doc build above deliberately runs
+# UNLOCKED: it only reads, and holding the lock through slow git commands
+# would starve the other writer's brief wait below.
+write_lock_dir="$handoff_dir/.handoff_write.lock"
+if try_mkdir_lock "$write_lock_dir"; then
+  write_lock_held=1
+elif (( IF_CURATED )); then
+  # Hook (safety-net) run: another writer is mid-write, and its snapshot of
+  # this same repo state does the job — a second mechanical snapshot adds
+  # nothing worth contending for. Exit 0 like the other safety-net skips (a
+  # hook must never fail the session; the built tmp is discarded by the
+  # cleanup trap) — but SAY SO, and print nothing on stdout.
+  #
+  # The silent version of this skip could void the safety net outright. The
+  # lock is a bare directory with no owner recorded, so a writer that took a
+  # SIGKILL, met the OOM killer, or lost the machine mid-sequence leaves one
+  # behind with nothing to reap it; until it ages past
+  # HANDOFF_LOCK_STALE_SECS (default 300s) EVERY SessionEnd and PreCompact
+  # fire in that repo skipped its write. And the skip was byte-for-byte
+  # indistinguishable from success: rc=0, the handoff path on stdout, no
+  # diagnostic anywhere. A session could end having written nothing, with the
+  # loaded document silently hours stale and no signal that the net had not
+  # caught it. The path is this script's "the write happened" signal — every
+  # caller keys on it — so emitting it on a skip is the specific lie that made
+  # the failure undetectable. The other --if-curated skips above legitimately
+  # print it: there the document at that path IS the current, correct one and
+  # was deliberately preserved. Here nothing was inspected and nothing written.
+  #
+  # The remedy goes in the message because the operator is the only one who
+  # can tell a wedged lock from a live writer.
+  echo "write_handoff.sh: write lock $write_lock_dir is held; SKIPPING this safety-net write (no rotation, no publish) — $handoff_relpath is unchanged and may be stale. A lock left by a killed writer clears itself after ${HANDOFF_LOCK_STALE_SECS:-300}s; if no other writer is running, remove it: rmdir '$write_lock_dir'" >&2
+  exit 0
+else
+  # Explicit (/handoff or manual) run: the user asked for THIS write, so
+  # never deadlock it. Wait briefly — a competing hook fire finishes in well
+  # under a second — then proceed unlocked with a warning: a possibly-racy
+  # write beats silently dropping the write the user is about to curate.
+  # `sleep 0.2` works on GNU and BSD/macOS sleep; the `|| sleep 1` fallback
+  # covers a strictly-integer POSIX sleep.
+  for _ in 1 2 3 4 5; do
+    sleep 0.2 2>/dev/null || sleep 1
+    if try_mkdir_lock "$write_lock_dir"; then
+      write_lock_held=1
+      break
+    fi
+  done
+  if (( ! write_lock_held )); then
+    echo "write_handoff.sh: write lock $write_lock_dir still held after ~1s; proceeding without it (an explicit run must not deadlock)." >&2
+  fi
+fi
+
 # Rotate the previous handoff only NOW that its replacement is fully built.
 # Any failure during the doc build above leaves handoff_current.md untouched
 # (the EXIT trap just removes the tmp); the destructive window is reduced to
-# the two renames here and below.
+# the two renames here and below — and is serialized by the write lock.
 rotate_existing_handoff
 prune_history || true   # a prune failure must never abort the handoff write
 
@@ -851,5 +1379,11 @@ prune_history || true   # a prune failure must never abort the handoff write
 # made to write through a symlink that reappears after the guard above (TOCTOU),
 # and a crash mid-write can't leave a half-written handoff_current.md.
 mv -f "$handoff_tmp" "$handoff_path"
+
+# Normal-path lock release; the cleanup trap is only the abort backstop.
+if (( write_lock_held )); then
+  rmdir "$write_lock_dir" 2>/dev/null || true
+  write_lock_held=0
+fi
 
 echo "$handoff_path"

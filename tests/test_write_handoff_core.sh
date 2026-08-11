@@ -117,6 +117,104 @@ check "curated rotation -> prose preserved in history" yes \
   "$(grep -rq 'MARKER_ROTCUR' "$repo/.claude/handoff_history" && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- Same-second rotation collision: atomic claim, both archives survive -----
+# Regression: the archive name is derived from the outgoing file's mtime, so
+# two rotations in the same second pick the same name. The old probe-then-mv
+# was a TOCTOU: both could probe clear and the second mv clobbered the first
+# archive. Pre-creating the archived name simulates the raciest interleaving
+# (the other writer already claimed it); the rotation must claim the next
+# counter name and BOTH files must survive with distinct names.
+repo="$(mk_repo_gitignored)"
+hist="$repo/.claude/handoff_history"; must mkdir -p "$hist"
+must cat > "$repo/.claude/handoff_current.md" <<'EOF'
+# h
+
+## Notes from this session
+
+curated notes MARKER_COLLIDE_NEW
+EOF
+touch -d "2020-03-04T05:06:07Z" "$repo/.claude/handoff_current.md"   # ISO T/Z form: GNU + BSD
+echo "earlier archive MARKER_COLLIDE_OLD" > "$hist/handoff_2020-03-04_050607.md"
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 )
+check "collision: pre-existing archive intact" yes \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607.md" 2>/dev/null)" "MARKER_COLLIDE_OLD")"
+check "collision: rotated doc claims counter name" yes \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607_2.md" 2>/dev/null)" "MARKER_COLLIDE_NEW")"
+count="$(find "$hist" -maxdepth 1 -name 'handoff_2020-03-04_050607*' 2>/dev/null | wc -l | tr -d ' ')"
+check "collision: both files survive, distinct names" 2 "$count"
+rm -rf "$repo"
+
+# --- DATA-1: a DIRECTORY at the archive name must not swallow the snapshot ---
+# The atomic claim keys on "did the source disappear", but `mv -n file dir`
+# moves the file INTO the directory and succeeds — so the claim read that as a
+# win, and the chmod 600 that follows stripped the directory's traverse bit.
+# The curated snapshot ended up sealed inside a name no `-type f` consumer
+# (prune_history, the SessionStart history fallback, /handoff-more) can reach.
+# Note the assertions deliberately avoid looking INSIDE the directory: on the
+# unfixed code it is chmod 600 and un-traversable, so a find in there returns
+# nothing and would pass vacuously. These check the reachable side instead.
+repo="$(mk_repo_gitignored)"
+hist="$repo/.claude/handoff_history"; must mkdir -p "$hist"
+must cat > "$repo/.claude/handoff_current.md" <<'EOF'
+# h
+
+## Notes from this session
+
+curated notes MARKER_DIRCLAIM
+EOF
+touch -d "2020-03-04T05:06:07Z" "$repo/.claude/handoff_current.md"   # ISO T/Z form: GNU + BSD
+must mkdir -p "$hist/handoff_2020-03-04_050607.md"    # a DIRECTORY at the archive name
+( cd "$repo" && bash "$WH" >/dev/null 2>&1 )
+check "dir at archive name: snapshot claims the next counter" yes \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607_2.md" 2>/dev/null)" "MARKER_DIRCLAIM")"
+check "dir at archive name: snapshot visible to -type f consumers" 1 \
+  "$(find "$hist" -maxdepth 1 -type f -name 'handoff_*.md' 2>/dev/null | wc -l | tr -d ' ')"
+check "dir at archive name: directory left traversable (not chmod 600'd)" yes \
+  "$([[ -x "$hist/handoff_2020-03-04_050607.md" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# --- L-A: rotation exhaustion must not clobber an existing archive ----------
+# After 50 same-second collisions the loop falls through to a loud,
+# unprotected `mv` (no -n) so a REAL errno (EPERM, ENOSPC) surfaces instead of
+# spinning forever. But claimable_archive_name returns true for BOTH "the
+# name is free" and "the name is an existing regular file" (that's what makes
+# it a valid `mv -n` target inside the loop) — the exhaustion branch only
+# re-checked claimable_archive_name, so when the 50th candidate is an
+# existing REGULAR FILE (a real, already-archived handoff — not a directory
+# or fifo), the loud fallback `mv` silently overwrote it. Pre-creating all 50
+# candidate names as regular files forces every `mv -n` in the loop to skip
+# (destination already exists), driving the loop to exhaustion with the 50th
+# candidate itself a real archive.
+repo="$(mk_repo_gitignored)"
+hist="$repo/.claude/handoff_history"; must mkdir -p "$hist"
+must cat > "$repo/.claude/handoff_current.md" <<'EOF'
+# h
+
+## Notes from this session
+
+curated notes MARKER_EXHAUST_SRC
+EOF
+touch -d "2020-03-04T05:06:07Z" "$repo/.claude/handoff_current.md"   # ISO T/Z form: GNU + BSD
+for i in $(seq 1 50); do
+  if [[ "$i" -eq 1 ]]; then
+    name="handoff_2020-03-04_050607.md"
+  else
+    name="handoff_2020-03-04_050607_${i}.md"
+  fi
+  echo "existing archive $i MARKER_EXHAUST_$i" > "$hist/$name"
+done
+rc=0
+err="$( cd "$repo" && bash "$WH" 2>&1 >/dev/null )" || rc=$?
+check "exhaustion: aborts rather than silently succeeding" 1 "$rc"
+check "exhaustion: refusal message on stderr" yes "$(has "$err" "refusing")"
+check "exhaustion: 50th archive survives untouched" yes \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607_50.md" 2>/dev/null)" "MARKER_EXHAUST_50")"
+check "exhaustion: 50th archive NOT clobbered with source content" no \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607_50.md" 2>/dev/null)" "MARKER_EXHAUST_SRC")"
+check "exhaustion: source handoff_current.md left unrotated (curated content intact)" yes \
+  "$(has "$(cat "$repo/.claude/handoff_current.md" 2>/dev/null)" "MARKER_EXHAUST_SRC")"
+rm -rf "$repo"
+
 # --- Invalid HANDOFF_HISTORY_KEEP falls back to 5 (no history wipe) ----------
 # Regression: KEEP=-1 made prune run `tail -n +0`, which on GNU deletes EVERY
 # history file (silent data loss). A negative/garbage value must clamp to the
@@ -143,6 +241,28 @@ echo "old current MARKER_OLDCUR" > "$repo/.claude/handoff_current.md"
 ( cd "$repo" && HANDOFF_HISTORY_KEEP=0 bash "$WH" >/dev/null 2>&1 )
 check "KEEP=0 -> no history dir"        no  "$([[ -d "$repo/.claude/handoff_history" ]] && echo yes || echo no)"
 check "KEEP=0 -> old current overwritten" no "$(has "$(cat "$repo/.claude/handoff_current.md")" "MARKER_OLDCUR")"
+rm -rf "$repo"
+
+# --- HANDOFF_HISTORY_KEEP=0 must NOT wipe a PRE-POPULATED history ------------
+# Regression: the rotation guard skipped archiving on KEEP=0, but prune_history
+# still ran — and with KEEP=0 its `tail -n +1` listed EVERY history file for
+# deletion, so a single `HANDOFF_HISTORY_KEEP=0` run destroyed all prior
+# curated snapshots. The earlier KEEP=0 test above used a fresh repo (no
+# history dir at all) and never caught it. README documents 0 as "disables
+# pruning entirely; existing snapshots are never touched" — pin exactly that.
+repo="$(mk_repo_gitignored)"
+hist="$repo/.claude/handoff_history"; must mkdir -p "$hist"
+echo "old current MARKER_OLDCUR" > "$repo/.claude/handoff_current.md"
+for ts in 2020-01-01_000000 2020-01-02_000000 2020-01-03_000000; do
+  echo "curated snapshot $ts" > "$hist/handoff_$ts.md"
+done
+( cd "$repo" && HANDOFF_HISTORY_KEEP=0 bash "$WH" >/dev/null 2>&1 )
+kept="$(find "$hist" -maxdepth 1 -name 'handoff_*.md' 2>/dev/null | wc -l | tr -d ' ')"
+check "KEEP=0 + existing history -> ALL 3 survive"  3 "$kept"
+for ts in 2020-01-01_000000 2020-01-02_000000 2020-01-03_000000; do
+  check "KEEP=0 -> $ts untouched" yes "$([[ -f "$hist/handoff_$ts.md" ]] && echo yes || echo no)"
+done
+check "KEEP=0 -> new current still written" no "$(has "$(cat "$repo/.claude/handoff_current.md")" "MARKER_OLDCUR")"
 rm -rf "$repo"
 
 # --- .gitignore bootstrap: on by default, off via env -----------------------

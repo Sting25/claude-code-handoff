@@ -22,6 +22,15 @@
 #                        will overwrite it within a second anyway).
 # KEPT: .ctx_model_<sid> — the model didn't change across compaction, and
 # keeping it preserves window auto-detection until the next Stop fire.
+# KEPT: .fences_<sid> — the rules re-injection cooldown (handoff_ctx_check.sh
+#                       writes it). Deliberate, and stated here because this
+#                       header's job is to account for EVERY sidecar and it
+#                       previously omitted this one entirely. Its state is a
+#                       transcript-byte watermark, and the transcript keeps
+#                       growing across compaction, so the delta comparison
+#                       still advances correctly; handoff_session_start.sh
+#                       also re-injects on source=compact, which would make a
+#                       reset here a double injection.
 #
 # Degradation: PostCompact only exists on CC >= 2.1.76 (older builds simply
 # never fire this). jq missing -> exit 0; the sidecars then age out via the
@@ -44,13 +53,39 @@ session_id="$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)"
 # make the rm targets escape backup_dir.
 [[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
 
-# --- Project scope: same resolver chain as the sibling hooks (git worktree
-#     top, else the Claude Code project dir / cwd for non-git projects). ---
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-[[ -n "$repo_root" ]] || repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Payload `cwd`: second-rung anchor for the shared root resolver below.
+payload_cwd="$(jq -r '.cwd // empty' <<<"$payload" 2>/dev/null || true)"
+[[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
+
+# --- Project scope: shared resolver (CLAUDE_PROJECT_DIR -> payload cwd ->
+#     $PWD, then git -C toplevel of that anchor), matching the sibling hooks.
+#     The old bare `git rev-parse` anchored on the hook process's cwd, so with
+#     cwd != CLAUDE_PROJECT_DIR this hook reset sidecars in a .claude/ other
+#     than the one the Stop hook wrote — the stale pre-compact ledger
+#     survived. Lib absent -> inline the same precedence (standalone). ---
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+fi
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$payload_cwd"
+  repo_root="$HANDOFF_ROOT"
+else
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [[ -d "$anchor" ]] || anchor="$PWD"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$repo_root" ]] || repo_root="$anchor"
+fi
 [[ -z "$repo_root" ]] && exit 0
 
 backup_dir="$repo_root/.claude/handoff_backups"
+# Refuse symlinked parents before any rm, matching handoff_turn_append.sh and
+# handoff_statusline.sh. Near-unreachable in practice (turn_append bails on the
+# same components, so the sidecars this deletes never get created through a
+# link) — but this was the one hook in the sweep with no guard at all, and a
+# script whose only job is deleting files should not be the exception.
+[[ -L "$repo_root/.claude" || -L "$backup_dir" ]] && exit 0
 [[ -d "$backup_dir" ]] || exit 0
 
 rm -f -- "$backup_dir/.ctx_${session_id}" \

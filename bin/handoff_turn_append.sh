@@ -35,6 +35,10 @@ umask 077
 payload="$(cat)"
 session_id="$(jq -r '.session_id // empty'      <<<"$payload")"
 transcript_path="$(jq -r '.transcript_path // empty' <<<"$payload")"
+# Payload `cwd`: second-rung anchor for the shared root resolver below.
+# Validated as an existing directory before use.
+payload_cwd="$(jq -r '.cwd // empty' <<<"$payload" 2>/dev/null || true)"
+[[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
 
 [[ -z "$session_id"        ]] && exit 0
 [[ -z "$transcript_path"   ]] && exit 0
@@ -57,14 +61,31 @@ transcript_path="$(jq -r '.transcript_path // empty' <<<"$payload")"
 # (hex + dashes); accept only [A-Za-z0-9_-] and exit clean on anything else.
 [[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
 
-# --- Project scope. Prefer the git worktree top; fall back to the Claude Code
-#     project dir (or cwd) so handoff also works in projects NOT under git.
-#     `in_git` gates the git-only .gitignore bootstrap below. ---
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-in_git=1
-if [[ -z "$repo_root" ]]; then
-  in_git=0
-  repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+# --- Project scope: shared resolver (CLAUDE_PROJECT_DIR -> payload cwd ->
+#     $PWD, then git -C toplevel of that anchor). The old bare `git rev-parse`
+#     anchored on the hook process's cwd, so when cwd != CLAUDE_PROJECT_DIR
+#     (worktrees, submodules, mid-session `cd`) this hook dumped turns under a
+#     .claude/ the SessionStart loader (project-dir-anchored) never read.
+#     `in_git` gates the git-only .gitignore bootstrap below. Lib absent ->
+#     inline the same precedence so the hook stays standalone. ---
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+fi
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$payload_cwd"
+  repo_root="$HANDOFF_ROOT"
+  in_git="$HANDOFF_ROOT_IN_GIT"
+else
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [[ -d "$anchor" ]] || anchor="$PWD"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  in_git=1
+  if [[ -z "$repo_root" ]]; then
+    in_git=0
+    repo_root="$anchor"
+  fi
 fi
 [[ -z "$repo_root" ]] && exit 0
 
@@ -98,34 +119,82 @@ mkdir -p "$backup_dir"
 if (( in_git )) \
    && [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]] \
    && ! git -C "$repo_root" check-ignore -q ".claude/handoff_backups/" 2>/dev/null; then
-  gi="$repo_root/.gitignore"
-  # Don't append through a symlinked .gitignore (a malicious repo could point it
-  # at a victim file). If it's a symlink, skip the bootstrap — the dump is still
-  # protected by the backup-dir symlink guard above, and worst case it shows up
-  # in `git status` rather than leaking.
-  if [[ ! -L "$gi" ]]; then
-    existed=1; [[ -e "$gi" ]] || existed=0
-    # Best-effort append. An UNWRITABLE .gitignore (root-owned, chmod a-w, a
-    # shared checkout) used to abort the whole hook right here under set -e —
-    # before the lock, the dump write, and the ctx sidecars — on EVERY Stop
-    # fire, silently ('2>/dev/null || true' wiring). The bootstrap is a
-    # nicety, not a dependency of the dump: on failure warn and continue,
-    # accepting the same degraded outcome as the symlink skip above (the
-    # backup dir shows in `git status`). Commands in an `if` condition are
-    # exempt from set -e, so the group can fail without killing the script.
-    if {
-         if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
-           printf '\n' >> "$gi"
-         fi
-         echo ".claude/handoff_backups/" >> "$gi"
-       } 2>/dev/null; then
-      # A .gitignore is not secret; don't let the script-wide `umask 077` leave a
-      # freshly-created one 0600 (see write_handoff.sh). Only normalize a file WE
-      # just created; never touch one the user already had.
-      (( existed )) || chmod 644 "$gi" 2>/dev/null || true
-    else
-      echo "handoff_turn_append.sh: cannot append to $gi; skipping .gitignore bootstrap (the backup dir may show in git status)." >&2
+  # Serialize the check-then-append against write_handoff.sh, which runs the
+  # SAME bootstrap: a SessionEnd write and a final Stop fire can land together,
+  # and unserialized both pass check-ignore and both append — a duplicate
+  # .gitignore line, or interleaved partial writes. Both scripts take this
+  # shared mkdir lock around their check+append. On lock-miss skip silently:
+  # the peer is bootstrapping right now, and if it somehow fails the next
+  # fire retries. mkdir/rmdir never follow a symlink, so a planted link at
+  # the lock path can't be written through — it just reads as "held" (its
+  # rmdir fails) and the bootstrap is skipped, same degraded-but-safe outcome
+  # as the symlinked-.gitignore skip below. No staleness machinery is needed
+  # for a micro-critical-section this small, but a holder that died mid-append
+  # (hard kill skips cleanup) would wedge the bootstrap forever — so reclaim
+  # a lock older than the same generous window the session lock uses.
+  gi_lock="$repo_root/.claude/.handoff_gitignore.lock"
+  gi_held=0
+  if mkdir "$gi_lock" 2>/dev/null; then
+    gi_held=1
+  else
+    gi_stale="${HANDOFF_LOCK_STALE_SECS:-300}"
+    # Numeric guard BEFORE the value reaches (( )) below: bash arithmetic
+    # recursively expands its operand, so an array-subscript payload in this
+    # env var would execute command substitution. A clone-delivered
+    # .claude/settings.json can set env, so treat it as untrusted; fall back
+    # to the default on anything non-numeric (matches HISTORY_KEEP et al.).
+    [[ "$gi_stale" =~ ^[0-9]+$ ]] || gi_stale=300
+    gi_mtime="$(stat -c %Y "$gi_lock" 2>/dev/null \
+                || stat -f %m "$gi_lock" 2>/dev/null || echo 0)"
+    gi_now="$(date +%s)"
+    if [[ "$gi_mtime" =~ ^[0-9]+$ ]] \
+       && (( gi_now - gi_mtime >= gi_stale )) \
+       && rmdir "$gi_lock" 2>/dev/null \
+       && mkdir "$gi_lock" 2>/dev/null; then
+      gi_held=1
     fi
+  fi
+  # Re-check under the lock: the peer may have completed the bootstrap between
+  # our unlocked fast-path check above and our acquisition. Without this the
+  # lock alone still yields a duplicate line — only a check made while HOLDING
+  # the lock can be acted on atomically.
+  if (( gi_held )) \
+     && ! git -C "$repo_root" check-ignore -q ".claude/handoff_backups/" 2>/dev/null; then
+    gi="$repo_root/.gitignore"
+    # Don't append through a symlinked .gitignore (a malicious repo could point it
+    # at a victim file). If it's a symlink, skip the bootstrap — the dump is still
+    # protected by the backup-dir symlink guard above, and worst case it shows up
+    # in `git status` rather than leaking.
+    if [[ ! -L "$gi" ]]; then
+      existed=1; [[ -e "$gi" ]] || existed=0
+      # Best-effort append. An UNWRITABLE .gitignore (root-owned, chmod a-w, a
+      # shared checkout) used to abort the whole hook right here under set -e —
+      # before the lock, the dump write, and the ctx sidecars — on EVERY Stop
+      # fire, silently ('2>/dev/null || true' wiring). The bootstrap is a
+      # nicety, not a dependency of the dump: on failure warn and continue,
+      # accepting the same degraded outcome as the symlink skip above (the
+      # backup dir shows in `git status`). Commands in an `if` condition are
+      # exempt from set -e, so the group can fail without killing the script.
+      if {
+           if [[ -s "$gi" ]] && [[ "$(tail -c1 "$gi" | wc -l)" -eq 0 ]]; then
+             printf '\n' >> "$gi"
+           fi
+           echo ".claude/handoff_backups/" >> "$gi"
+         } 2>/dev/null; then
+        # A .gitignore is not secret; don't let the script-wide `umask 077` leave a
+        # freshly-created one 0600 (see write_handoff.sh). Only normalize a file WE
+        # just created; never touch one the user already had.
+        (( existed )) || chmod 644 "$gi" 2>/dev/null || true
+      else
+        echo "handoff_turn_append.sh: cannot append to $gi; skipping .gitignore bootstrap (the backup dir may show in git status)." >&2
+      fi
+    fi
+  fi
+  # Release promptly — this micro-lock must not ride the EXIT trap (the
+  # session mkdir-lock branch below installs its own trap, which would
+  # replace any set here). No exit path exists between acquire and here.
+  if (( gi_held )); then
+    rmdir "$gi_lock" 2>/dev/null || true
   fi
 fi
 
@@ -133,10 +202,18 @@ dump_file="$backup_dir/handoff_raw_${session_id}.md"
 cursor_file="$backup_dir/.handoff_raw_${session_id}.cursor"
 lock_file="$backup_dir/.handoff_raw_${session_id}.lock"
 
-# backup_dir is confirmed a real dir above; this catches a per-file symlink
-# planted at the exact dump name. (The lock below is acquired with mktemp-style
-# guarantees / a UUID-scoped name, so the dump content sink is the one to guard.)
+# backup_dir is confirmed a real dir above; these catch a per-file symlink
+# planted at the exact dump or lock name. The dump is the secret-bearing sink,
+# but the LOCK file is a truncation primitive of its own: the flock branch
+# below opens it with `exec 9>`, and `>` FOLLOWS a symlink at that path —
+# there is no mktemp-style safety here (the name is predictable from the
+# session id), so a planted link would truncate an attacker-chosen victim
+# file. Guard both before anything is opened. (The mkdir-lock fallback has its
+# own guard at its call site below — mkdir/rmdir never FOLLOW a symlink, which
+# is precisely why a link planted there wedges the lock permanently instead of
+# leaking through it.)
 refuse_symlink "$dump_file" "dump file" || exit 0
+refuse_symlink "$lock_file" "lock file" || exit 0
 
 # --- Serialize concurrent invocations: only one Stop hook may process
 #     this session at a time. If another instance is already running,
@@ -150,6 +227,18 @@ if command -v flock >/dev/null 2>&1; then
   fi
 else
   lock_mkdir="${lock_file}.d"
+  # A symlink planted at the mkdir-lock path permanently wedges this session's
+  # dumps: mkdir fails EEXIST forever and the stale reclaim can't recover,
+  # because rmdir cannot remove a symlink no matter how old it is. The comment
+  # above ("the mkdir-lock fallback needs no guard: mkdir/rmdir never follow a
+  # symlink") is right about FOLLOWING and wrong about availability — not
+  # following is exactly what makes the wedge permanent. write_handoff.sh's
+  # try_mkdir_lock guards its own mkdir lock for this reason; this is the
+  # matching refusal, and this is the branch that runs on stock macOS.
+  if [[ -L "$lock_mkdir" ]]; then
+    echo "handoff_turn_append.sh: $lock_mkdir is a symlink; refusing to use it as a lock (it would wedge this session's dumps permanently). Remove it to restore the raw dump." >&2
+    exit 0
+  fi
   if ! mkdir "$lock_mkdir" 2>/dev/null; then
     # The mkdir lock is released by the EXIT trap below, but a hard kill
     # (SIGKILL, OOM, power loss) skips traps and leaves the dir behind —
@@ -159,14 +248,18 @@ else
     # under a second, but a FIRST fire over a long backlog (session resume
     # with a new id, cursor evicted by the prune) forks several jq per
     # transcript line and can run for minutes — so the holder re-touches the
-    # lock dir periodically during the append loop (see below), keeping a
-    # live lock's mtime fresh, and the default window is 300s: comfortably
+    # lock dir at acquisition, between phases, and periodically during the
+    # append loop (refresh_lock below), keeping a live lock's mtime fresh,
+    # and the default window is 300s: comfortably
     # above both the touch interval and Claude Code's 60s hook timeout, so a
     # slow-but-alive run can't have its lock stolen (which interleaved dump
     # content and clobbered the cursor). Age via GNU `stat -c` with a BSD
     # `stat -f` fallback (this branch only runs where flock is absent —
     # typically macOS/BSD).
     stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
+    # Numeric guard before (( )) — see the gitignore-lock site above; an
+    # array-subscript payload here would otherwise execute.
+    [[ "$stale_secs" =~ ^[0-9]+$ ]] || stale_secs=300
     lock_mtime="$(stat -c %Y "$lock_mkdir" 2>/dev/null \
                   || stat -f %m "$lock_mkdir" 2>/dev/null || echo 0)"
     now="$(date +%s)"
@@ -179,8 +272,51 @@ else
       exit 0
     fi
   fi
-  trap 'rmdir "$lock_mkdir" 2>/dev/null || true' EXIT
+  lock_mkdir_held=1
 fi
+
+# One EXIT trap owns all cleanup from here (traps REPLACE each other, so a
+# second `trap … EXIT` would silently drop the first — the same discipline
+# write_handoff.sh states in its own trap comment). It releases the mkdir lock
+# when this run took one, and removes any sidecar tmp still unmoved.
+#
+# The sidecar tmps are the addition: tmp_cursor / tmp_ctx / tmp_tokens /
+# tmp_model are mktemp'd and then mv'd into place, and a hard kill or ENOSPC
+# in that window stranded one. Nothing reaped them — the prune below deletes
+# only exact sidecar names, and the statusline's 7-day janitor deliberately
+# excludes the .XXXXXX suffix. Litter only, but it accumulated in a directory
+# the user is told to ignore.
+lock_mkdir="${lock_mkdir:-}"
+lock_mkdir_held="${lock_mkdir_held:-0}"
+tmp_cursor=""; tmp_ctx=""; tmp_tokens=""; tmp_model=""
+# Both codes: shellcheck names this same "invoked only via trap" situation
+# SC2329 from 0.11 and SC2317 before it, and CI's runner is older than a
+# typical dev machine — suppressing only one makes the gate pass locally and
+# fail in CI (it did).
+# shellcheck disable=SC2329,SC2317  # invoked indirectly by the EXIT trap below
+ta_cleanup() {
+  if (( ${lock_mkdir_held:-0} )); then rmdir "$lock_mkdir" 2>/dev/null || true; fi
+  rm -f "${tmp_cursor:-}" "${tmp_ctx:-}" "${tmp_tokens:-}" "${tmp_model:-}" 2>/dev/null || true
+  return 0
+}
+trap ta_cleanup EXIT
+
+# Keep the mkdir-lock fresh OUTSIDE the append loop too. The stale reclaim
+# above is purely mtime-based, and the loop's periodic touch only starts once
+# lines are flowing — a holder stalled BEFORE the loop (a slow `wc -l` over a
+# huge transcript, an fs stall) or AFTER it (the whole-transcript usage scan
+# below) would look dead past the stale window while still alive, and a
+# concurrent Stop fire would steal its lock mid-write. Called immediately
+# after acquisition and again before each potentially-slow phase, so no
+# refresh-to-refresh gap spans more than one slow operation. Cheap: a single
+# `touch -c` (never creates; a vanished dir is a no-op), and a no-op entirely
+# under flock, where the OS keeps the lock live for the process lifetime.
+refresh_lock() {
+  if [[ -n "${lock_mkdir:-}" ]]; then
+    touch -c "$lock_mkdir" 2>/dev/null || true
+  fi
+}
+refresh_lock   # stamp explicitly at acquisition; covers the cursor read + wc
 
 # --- Cursor: how many transcript lines we've already processed ---
 prev_count=0
@@ -219,6 +355,7 @@ if command -v perl >/dev/null 2>&1; then
       s{<command-message>.*?</command-message>\s*}{}gs;
       s{<command-args>.*?</command-args>\s*}{}gs;
       s{<local-command-stdout>.*?</local-command-stdout>\s*}{}gs;
+      s{<local-command-stderr>.*?</local-command-stderr>\s*}{}gs;
       s{\n{3,}}{\n\n}g;
     '
   }
@@ -245,6 +382,8 @@ fi
 # governs files created during *this* run); the contents may include secrets.
 chmod 600 "$dump_file" 2>/dev/null || true
 
+refresh_lock   # entering the append loop; its own periodic touch takes over
+
 # --- Append new turn block ---
 {
   printf '\n## Turn at %s\n\n' "$(date -u +'%Y-%m-%d %H:%M:%S UTC')"
@@ -262,7 +401,7 @@ chmod 600 "$dump_file" 2>/dev/null || true
       if [[ -n "${lock_mkdir:-}" ]]; then
         lines_since_touch=$((lines_since_touch + 1))
         if (( lines_since_touch >= 200 )); then
-          touch "$lock_mkdir" 2>/dev/null || true
+          refresh_lock
           lines_since_touch=0
         fi
       fi
@@ -332,6 +471,8 @@ chmod 600 "$dump_file" 2>/dev/null || true
 tmp_cursor="$(mktemp "${cursor_file}.XXXXXX")"
 echo "$curr_count" > "$tmp_cursor"
 mv -f "$tmp_cursor" "$cursor_file"
+
+refresh_lock   # the usage scan below re-reads the whole transcript (wc + jq)
 
 # --- Record context measurements for the ctx-check UserPromptSubmit hook.
 #     Companion script handoff_ctx_check.sh reads these on the next prompt
@@ -421,8 +562,14 @@ fi
 # no longer pruned (it lingers) rather than risking someone else's file. (#46)
 list_our_dumps() {
   local f base id
+  # LC_ALL=C: `ls -t` breaks MTIME TIES by collated name, and ties are not
+  # exotic here — `cp -p`, `rsync -t`, and a tar restore all reproduce
+  # timestamps exactly. Under a UTF-8 locale the tie-break flips against byte
+  # collation, so which dump falls outside the keep-3 cut (and is deleted)
+  # depends on the user's locale. Pinned for the same reason the rotation
+  # sorts in write_handoff.sh and handoff_session_start.sh are.
   # shellcheck disable=SC2012  # ls -t is deliberate: prune needs mtime ordering and BSD find has no -printf
-  ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | while IFS= read -r f; do
+  LC_ALL=C ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     base="$(basename "$f" .md)"       # handoff_raw_<id>
     id="${base#handoff_raw_}"

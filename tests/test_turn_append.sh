@@ -144,6 +144,41 @@ check "prune: evicted .ctx_sl_ removed"   no  "$([[ -f "$bd/.ctx_sl_OLD1" ]] && 
 check "prune: surviving .ctx_sl_ kept"    yes "$([[ -f "$bd/.ctx_sl_OLD3" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- .gitignore bootstrap lock (shared with write_handoff.sh) ----------------
+# The check-ignore-then-append bootstrap is serialized against write_handoff.sh
+# via the shared mkdir lock at .claude/.handoff_gitignore.lock. A held (fresh)
+# lock means the peer is mid-bootstrap: this hook must skip the append silently
+# and still write the dump. A released lock proceeds, and repeat runs add no
+# duplicate line (the check-ignore is re-run under the lock).
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; tx="$repo/tx.jsonl"
+printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
+must mkdir -p "$repo/.claude/.handoff_gitignore.lock"   # fresh mtime = live peer
+run_turn "$repo" GILOCK "$tx"
+check "held gi-lock: dump still written"    yes "$([[ -f "$bd/handoff_raw_GILOCK.md" ]] && echo yes || echo no)"
+check "held gi-lock: bootstrap skipped"     no  "$([[ -f "$repo/.gitignore" ]] && grep -q handoff_backups "$repo/.gitignore" && echo yes || echo no)"
+check "held gi-lock: peer's lock left held" yes "$([[ -d "$repo/.claude/.handoff_gitignore.lock" ]] && echo yes || echo no)"
+# Peer releases: the next fire bootstraps; further fires add no duplicate.
+must rmdir "$repo/.claude/.handoff_gitignore.lock"
+printf '{"type":"user","message":{"content":"turn two"}}\n' >> "$tx"
+run_turn "$repo" GILOCK "$tx"
+check "released gi-lock: bootstrap proceeds"  1  "$(grep -c '^\.claude/handoff_backups/$' "$repo/.gitignore" 2>/dev/null)"
+check "released gi-lock: lock released after" no "$([[ -d "$repo/.claude/.handoff_gitignore.lock" ]] && echo yes || echo no)"
+printf '{"type":"user","message":{"content":"turn three"}}\n' >> "$tx"
+run_turn "$repo" GILOCK "$tx"
+check "repeat run: no duplicate .gitignore line" 1 "$(grep -c '^\.claude/handoff_backups/$' "$repo/.gitignore" 2>/dev/null)"
+rm -rf "$repo"
+
+# A STALE gi-lock (holder hard-killed mid-append; mtime past the generous
+# window) is reclaimed so the bootstrap can't be wedged forever.
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; tx="$repo/tx.jsonl"
+printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
+must mkdir -p "$repo/.claude/.handoff_gitignore.lock"
+must touch -t 202001010000 "$repo/.claude/.handoff_gitignore.lock"   # ancient
+run_turn "$repo" GISTALE "$tx"
+check "stale gi-lock: reclaimed, bootstrap ran" 1  "$(grep -c '^\.claude/handoff_backups/$' "$repo/.gitignore" 2>/dev/null)"
+check "stale gi-lock: released after run"       no "$([[ -d "$repo/.claude/.handoff_gitignore.lock" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
 # Positive control: a real UUID-style id (hex + dashes) still produces a dump.
 repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; tx="$repo/tx.jsonl"
 sid="0a1b2c3d-4e5f-6789-abcd-ef0123456789"

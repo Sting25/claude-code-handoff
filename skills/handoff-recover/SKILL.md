@@ -94,8 +94,11 @@ handoff unsigned and can silently miss the lost session's final turns.
       "previous session's id?" — they often have the terminal
       transcript or the registry handy.
 
-   If `handoff_backups/` is empty or doesn't exist, skip to step 4
-   (no raw dump available) and note this in the recovered Notes.
+   If `handoff_backups/` is empty or doesn't exist, skip step 2 (there
+   is no raw dump to read) but still do **step 3** — with no dump, the
+   most recent history handoff becomes your PRIMARY reference, not an
+   optional extra; see "Raw dump not available" below. Note the missing
+   dump in the recovered Notes.
 
 2. **Read the raw dump.** Use `Read` on the previous session's
    `handoff_raw_<session_id>.md`. It is verbose (per-turn user
@@ -134,8 +137,17 @@ handoff unsigned and can silently miss the lost session's final turns.
    If not in context, read it manually:
 
    ```bash
-   ls -1 <repo>/.claude/handoff_history/handoff_*.md | sort -r | head -1
+   ls -1 <repo>/.claude/handoff_history/handoff_*.md | LC_ALL=C sort -r | head -1
    ```
+
+   `LC_ALL=C` is load-bearing, not decoration. "Newest first" here is a
+   LEXICAL claim about the rotation names (`handoff_<stamp>.md`, with a
+   `_<N>` suffix on same-second collisions), and it only holds under
+   byte collation, where `_` (0x5F) sorts after `.` (0x2E) and so puts
+   `handoff_<stamp>_2.md` — the newer file — first. A UTF-8 locale
+   weighs punctuation differently and flips exactly that pair, silently
+   loading the OLDER of a same-second pair. `bin/write_handoff.sh` and
+   `bin/handoff_session_start.sh` pin their equivalents for this reason.
 
    Use it as scaffolding context — it tells you what the session
    *before* the lost one had been working on, which often clarifies

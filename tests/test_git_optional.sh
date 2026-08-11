@@ -34,13 +34,19 @@ check "write_handoff off-git -> no .gitignore" no  "$([[ -f "$d/.gitignore" ]] &
 rm -rf "$d"
 
 # --- CLAUDE_PROJECT_DIR anchor (cwd elsewhere) ------------------------------
-# When CLAUDE_PROJECT_DIR is set to a non-git dir but cwd is somewhere else,
-# the handoff must land under CLAUDE_PROJECT_DIR, mirroring session_start.
-d="$(mk_nogit)"
-( cd /tmp && CLAUDE_PROJECT_DIR="$d" bash "$WH" >/dev/null 2>&1 )
+# When CLAUDE_PROJECT_DIR is set to a non-git dir, the handoff must land under
+# CLAUDE_PROJECT_DIR even when cwd is inside a REAL git repo. Under the old
+# resolver this held only for a non-git cwd (the bare `git rev-parse` won on
+# any git-repo cwd and silently anchored the write there); the shared resolver
+# makes the precedence genuinely unconditional, so exercise the strong form:
+# cwd inside a git fixture, not /tmp.
+d="$(mk_nogit)"; g="$(mk_repo)"
+( cd "$g" && CLAUDE_PROJECT_DIR="$d" bash "$WH" </dev/null >/dev/null 2>&1 )
 check "write_handoff anchors on CLAUDE_PROJECT_DIR" yes \
   "$([[ -f "$d/.claude/handoff_current.md" ]] && echo yes || echo no)"
-rm -rf "$d"
+check "git-repo cwd does NOT capture the write" no \
+  "$([[ -f "$g/.claude/handoff_current.md" ]] && echo yes || echo no)"
+rm -rf "$d" "$g"
 
 # --- turn_append.sh: dumps off-git, skips .gitignore bootstrap --------------
 d="$(mk_nogit)"; tx="$d/tx.jsonl"

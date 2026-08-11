@@ -88,6 +88,11 @@
 
 set -euo pipefail
 
+# Context check output and state files carry session metadata that may include
+# model information and token counts. umask 077 makes all of it owner-only at
+# creation time, protecting against unintended disclosure.
+umask 077
+
 THRESHOLD_PCT="${HANDOFF_CTX_THRESHOLD_PCT:-40}"
 COOLDOWN_KB="${HANDOFF_CTX_COOLDOWN_KB:-100}"
 # Validate both numerically, mirroring the MAX_FLAGS guard below. A slightly-
@@ -127,13 +132,42 @@ session_id="$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)"
 # clean otherwise.
 [[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
 
-# --- Project scope (matches Stop-hook scoping): git worktree top, else the
-#     Claude Code project dir / cwd so non-git projects work too. ---
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-[[ -n "$repo_root" ]] || repo_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Payload `cwd`: second-rung anchor for the shared root resolver below, and
+# the primary key for the ~/.claude.json .projects lookup (Claude Code keys
+# .projects by LAUNCH cwd, not by git toplevel). Directory-validated.
+payload_cwd="$(jq -r '.cwd // empty' <<<"$payload" 2>/dev/null || true)"
+[[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
+
+# --- Project scope: shared resolver (CLAUDE_PROJECT_DIR -> payload cwd ->
+#     $PWD, then git -C toplevel of that anchor). The old bare `git rev-parse`
+#     anchored on the hook process's cwd, so with cwd != CLAUDE_PROJECT_DIR
+#     (worktrees, submodules, mid-session `cd`) this hook read its ctx
+#     sidecars from a .claude/ different from the one the writers used and the
+#     nudge silently never fired. Lib absent -> inline the same precedence so
+#     the hook stays standalone. (prov_dir is also reused by the fences
+#     re-injection block further down.) ---
+prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
+if [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
+  # shellcheck source=bin/handoff_provenance.sh
+  . "$prov_dir/handoff_provenance.sh"
+fi
+if type handoff_resolve_root >/dev/null 2>&1; then
+  handoff_resolve_root "$payload_cwd"
+  repo_root="$HANDOFF_ROOT"
+else
+  anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [[ -d "$anchor" ]] || anchor="$PWD"
+  repo_root="$(git -C "$anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$repo_root" ]] || repo_root="$anchor"
+fi
 [[ -z "$repo_root" ]] && exit 0
 
 backup_dir="$repo_root/.claude/handoff_backups"
+# Refuse symlinked parents, matching handoff_turn_append.sh and
+# handoff_statusline.sh. The per-file guards further down cover the individual
+# flag/fences writes; this covers the components above them, so the sweep is
+# systematic rather than nearly-systematic.
+[[ -L "$repo_root/.claude" || -L "$backup_dir" ]] && exit 0
 size_file="$backup_dir/.ctx_${session_id}"
 tokens_file="$backup_dir/.ctx_tokens_${session_id}"
 model_file="$backup_dir/.ctx_model_${session_id}"
@@ -197,7 +231,16 @@ FENCES_KB="${HANDOFF_FENCES_REINJECT_KB:-200}"
 [[ "$FENCES_KB" =~ ^[0-9]+$ ]] || FENCES_KB=200
 handoff_doc="$repo_root/.claude/handoff_current.md"
 prov_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || prov_dir=""
-if (( FENCES_KB > 0 )) && [[ -f "$handoff_doc" ]] \
+# Symlink read guard — same refusal as handoff_session_start.sh (read-side twin
+# of write_handoff.sh's write guard): handoff_provenance_ok and
+# handoff_bind_content below READ the doc (even the HMAC computation cats it),
+# and a malicious cloned repo can COMMIT .claude/handoff_current.md as a
+# symlink to a file outside the repo. Refuse the read, warn (one visible line
+# in the injected hook output), and skip re-injection; the ctx nudge below
+# still runs — never crash the hook.
+if [[ -L "$handoff_doc" ]]; then
+  echo "⚠️  handoff: $handoff_doc is a symlink — refusing to read through it; rules re-injection skipped. Replace the symlink with a regular file to restore it."
+elif (( FENCES_KB > 0 )) && [[ -f "$handoff_doc" ]] \
    && [[ -n "$prov_dir" && -f "$prov_dir/handoff_provenance.sh" ]]; then
   # shellcheck source=bin/handoff_provenance.sh
   . "$prov_dir/handoff_provenance.sh"
@@ -296,9 +339,28 @@ if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
         window_tokens=1000000
       fi
     elif [[ -f "$HOME/.claude.json" ]]; then
-      # Step 3a: per-project has a 1M-regex match.
-      if jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
-            (.projects[$cwd].lastModelUsage // {})
+      # ~/.claude.json's .projects map is keyed by the LAUNCH cwd — the dir
+      # Claude Code was started from — not by the git toplevel this script
+      # resolves, so indexing with $repo_root missed the entry whenever the
+      # two differ (subdir launch, worktree). Key precedence mirrors the
+      # launch reality: the payload's cwd first (the actual session cwd),
+      # else CLAUDE_PROJECT_DIR, else the resolved root as a last resort.
+      # Each probe tries the key as-is AND its physical (pwd -P) form: on
+      # macOS case-aliasing filesystems ~/.claude.json accumulates both
+      # spellings of the same dir (~/Dev vs ~/dev), and symlinked launch
+      # paths record the logical form. Identical forms just probe twice,
+      # harmlessly.
+      claude_key="$payload_cwd"
+      if [[ -z "$claude_key" && -n "${CLAUDE_PROJECT_DIR:-}" && -d "${CLAUDE_PROJECT_DIR:-}" ]]; then
+        claude_key="$CLAUDE_PROJECT_DIR"
+      fi
+      [[ -n "$claude_key" ]] || claude_key="$repo_root"
+      claude_key_phys="$(cd "$claude_key" 2>/dev/null && pwd -P || printf '%s' "$claude_key")"
+      # Step 3a: per-project has a 1M-regex match. The two key forms' maps
+      # are MERGED (not //-short-circuited) so a k1 entry that exists but
+      # carries no lastModelUsage can't mask a populated k2 entry.
+      if jq -e --arg k1 "$claude_key" --arg k2 "$claude_key_phys" --arg re "$ONE_M_MODEL_RE" '
+            ((.projects[$k1].lastModelUsage // {}) + (.projects[$k2].lastModelUsage // {}))
             | keys
             | map(select(test($re)))
             | length > 0
@@ -306,8 +368,8 @@ if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
         window_tokens=1000000
       # Step 3b/3c: per-project missing or empty → fall back to global.
       #          (jq returns true when lastModelUsage is null OR keys array is empty.)
-      elif jq -e --arg cwd "$repo_root" --arg re "$ONE_M_MODEL_RE" '
-            ((.projects[$cwd].lastModelUsage // {}) | keys | length) == 0
+      elif jq -e --arg k1 "$claude_key" --arg k2 "$claude_key_phys" --arg re "$ONE_M_MODEL_RE" '
+            (((.projects[$k1].lastModelUsage // {}) + (.projects[$k2].lastModelUsage // {})) | keys | length) == 0
             and
             ([.projects[]?.lastModelUsage // {} | keys[]] | map(select(test($re))) | length > 0)
           ' "$HOME/.claude.json" >/dev/null 2>&1; then

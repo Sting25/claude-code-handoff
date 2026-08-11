@@ -55,12 +55,13 @@ rm -rf "$src" "$home"
 # --- D. Persistent source -> symlinks, no volatile warning (no false-positive)
 # A source path that is neither under /tmp nor named like an mktemp dir. The
 # repo checkout itself is the natural persistent base (a mktemp dir is by
-# definition volatile, and using $HOME here was the suite's one remaining
-# write into the developer's real home — issue #49's sibling). A contributor
-# CAN legitimately run the suite from a /tmp clone, where REPO_ROOT is
-# volatile too — fall back to the old $HOME base there so this case still
-# tests what it claims to. Trap-cleaned so a mid-test crash can't strand the
-# fixture in either location.
+# definition volatile). This suite touches the developer's real home in
+# exactly one situation: when the checkout is a /tmp clone, REPO_ROOT is
+# volatile too, so this case AND case G below fall back to the old $HOME
+# base — otherwise they would not test what they claim to. Both fixtures are
+# registered with lib.sh's cleanup_on_exit (NOT a raw `trap ... EXIT`, which
+# would clobber lib.sh's cleanup trap) so a mid-test crash can't strand them
+# in either location.
 eval "$(sed -n '/^is_volatile_path()/,/^}/p' "$REPO_ROOT/install.sh")"
 if is_volatile_path "$REPO_ROOT"; then
   persist_base="$HOME"
@@ -68,7 +69,7 @@ else
   persist_base="$REPO_ROOT/tests"
 fi
 persist="$(mktemp -d "$persist_base/.handoff_test_persist.XXXXXX")"
-trap 'rm -rf "$persist"' EXIT
+cleanup_on_exit "$persist"
 cp "$REPO_ROOT/install.sh" "$persist/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$persist/"
 home="$(mktemp -d)"
 out="$(CLAUDE_HOME="$home" bash "$persist/install.sh" 2>&1)"
@@ -121,8 +122,15 @@ check "control: plain home-ish path stays persistent" persistent "$(probe /opt/c
 # A source reached through a clean-looking symlink whose target lives in /tmp:
 # the literal path matches nothing, only canonicalization catches it. Without
 # the fix this installed dangling-prone symlinks (issue #21 regression class).
+# The alias must sit at a PERSISTENT-looking path — under $TMPDIR its literal
+# path would match the volatile patterns and the test would pass without ever
+# exercising pwd -P — so it reuses case D's persist_base (the repo checkout,
+# or $HOME only for a /tmp clone; see case D). $real must stay in literal
+# /tmp: being volatile-through-the-symlink is the point. Both are registered
+# for exit cleanup so a mid-test failure can't strand them.
 real="$(mktemp -d /tmp/handoff_iv_real.XXXXXX)"
-alias_dir="$(mktemp -d "$HOME/.handoff_test_alias.XXXXXX")"
+alias_dir="$(mktemp -d "$persist_base/.handoff_test_alias.XXXXXX")"
+cleanup_on_exit "$real" "$alias_dir"
 cp "$REPO_ROOT/install.sh" "$real/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$real/"
 ln -s "$real" "$alias_dir/src"
 home="$(mktemp -d)"
