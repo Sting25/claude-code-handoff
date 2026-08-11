@@ -52,13 +52,19 @@ before each new write.
    elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
      hb="$HOME/.claude/bin"
    else
+     nb=0
      for d in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff/*/bin; do
-       [ -f "$d/write_handoff.sh" ] && hb="$d"
+       if [ -f "$d/write_handoff.sh" ]; then
+         t="$(stat -f %m "$d/write_handoff.sh" 2>/dev/null || stat -c %Y "$d/write_handoff.sh" 2>/dev/null || echo 0)"
+         [ "$t" -ge "$nb" ] && nb="$t" && hb="$d"
+       fi
      done
    fi
    # env var wins when set (running from that plugin), legacy bin next (existing
    # installs), cache glob last (plugin installed but env var not visible to
-   # skill Bash); the loop's last match takes the lexically-highest version dir.
+   # skill Bash); among cached versions the newest mtime wins. NOT lexical
+# last-match: glob order sorts 0.9.0 AFTER 0.14.0, so that silently ran an
+# older cached version across a digit-count boundary (fixed v0.14.1).
    [ -n "$hb" ] || echo "MISSING: handoff scripts not installed (neither ~/.claude/bin nor a plugin install found)"
    echo "handoff-bin: $hb"
    ```
