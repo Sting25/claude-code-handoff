@@ -256,6 +256,19 @@ handoff_ensure_secret() {
     return 0
   fi
   [ -L "$sf" ] && return 1
+  # Resolved path exists but is not a regular file (most commonly a
+  # directory — e.g. a mistyped/misconfigured HANDOFF_SECRET_FILE pointing at
+  # an existing dir). `mv tmp "$sf"` below would otherwise MOVE THE TMP INTO
+  # the directory (mv's into-a-directory semantics) and report success —
+  # stranding a fresh key file inside it on every signed write, with signing
+  # and verification never converging on one key. Fail loudly instead of
+  # silently misfiring: the caller (write_handoff.sh) already degrades to an
+  # unsigned write whenever this function returns non-zero, the same as the
+  # no-openssl / HANDOFF_TRUST_DISABLE path.
+  if [ -e "$sf" ] && [ ! -f "$sf" ]; then
+    echo "handoff: HANDOFF_SECRET_FILE ('$sf') exists but is not a regular file (looks like a directory) — refusing to sign through it. Point HANDOFF_SECRET_FILE at a plain file path (or remove/rename what's currently there) and retry; the handoff will be written unsigned until then." >&2
+    return 1
+  fi
   dir="$(dirname "$sf")"
   mkdir -p "$dir" 2>/dev/null || return 1
   tmp="$(mktemp "$dir/.handoff_secret.XXXXXX" 2>/dev/null)" || return 1
