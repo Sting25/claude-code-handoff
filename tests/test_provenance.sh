@@ -232,21 +232,7 @@ check "doctor: dir at secret path -> signing degraded" yes \
 must rmdir "$dsec"
 
 # openssl absent -> degraded regardless of secret state (handoff_mac_compute's
-# very first check). Same PATH-shim helper as test_jq_missing.sh/
-# test_portability.sh/test_trusted_rules.sh.
-path_without() {
-  local drop="$1" shim d f b
-  shim="$(mktemp -d)"
-  for d in ${PATH//:/ }; do
-    [[ -d "$d" ]] || continue
-    for f in "$d"/*; do
-      b="$(basename "$f")"
-      [[ "$b" == "$drop" ]] && continue
-      [[ -e "$shim/$b" ]] || ln -s "$f" "$shim/$b" 2>/dev/null || true
-    done
-  done
-  printf '%s\n' "$shim"
-}
+# very first check). PATH shim via lib.sh's path_without.
 if command -v openssl >/dev/null 2>&1; then
   nossl="$(path_without openssl)"
   check "openssl really absent on shim PATH" absent \

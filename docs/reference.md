@@ -457,6 +457,25 @@ default `<!-- HANDOFF_HMAC: `. Changing it invalidates every existing
 signature, since verification strips and rebuilds the trailer using this
 exact string. Present for testing; there is no reason to set it.
 
+### Environment variables and the trust boundary
+
+A deliberate design note, so nobody rediscovers this as a "finding":
+`CLAUDE_HOME`, `CLAUDE_CONFIG_DIR`, `CLAUDE_PLUGIN_ROOT`, and
+`HANDOFF_SECRET_FILE` all *select paths* — which scripts the skills
+resolve, where the signing secret lives. Anything able to set
+environment variables for a session (for example a trusted repo's
+`.claude/settings.json` `env` block) can therefore redirect them, up to
+and including pointing the skills' plugin-cache fallback at a
+repo-controlled directory. This tool does not defend against its own
+host environment: that is Claude Code's trust boundary (folder trust,
+settings review), and the same class applies to `PATH` or `HOME` for
+any tool on the machine. The handoff-specific protections are scoped to
+what *content* can do — a cloned repo's handoff file loads defanged as
+data unless it carries a valid HMAC from this machine's secret — not to
+what an already-trusted environment can override. Review a repo's
+`.claude/settings.json` before trusting the folder; that review is the
+control.
+
 ## Install internals
 
 `./install.sh`:

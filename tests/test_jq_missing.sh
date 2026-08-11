@@ -21,20 +21,6 @@ fi
 
 has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 
-# A PATH mirroring the real one minus jq (same helper as test_portability.sh).
-path_without() {
-  local drop="$1" shim d f b
-  shim="$(mktemp -d)"
-  for d in ${PATH//:/ }; do
-    [[ -d "$d" ]] || continue
-    for f in "$d"/*; do
-      b="$(basename "$f")"
-      [[ "$b" == "$drop" ]] && continue
-      [[ -e "$shim/$b" ]] || ln -s "$f" "$shim/$b" 2>/dev/null || true
-    done
-  done
-  printf '%s\n' "$shim"
-}
 nojq="$(path_without jq)"
 check "jq really absent on shim PATH" absent \
   "$(PATH="$nojq" command -v jq >/dev/null 2>&1 && echo present || echo absent)"

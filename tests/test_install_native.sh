@@ -155,15 +155,7 @@ rm -rf "$src5" "$HOME_DIR"
 # jq-less plain install refuses up front (mediums fix, f3dde70) — the refusal
 # must survive alongside the new wiring. Build a PATH that simply lacks jq
 # (a failing jq stub is not enough: install.sh checks `command -v jq`).
-nojq="$(mktemp -d)"
-for d in ${PATH//:/ }; do
-  [[ -d "$d" ]] || continue
-  for f in "$d"/*; do
-    b="$(basename "$f")"
-    [[ "$b" == "jq" ]] && continue
-    [[ -e "$nojq/$b" ]] || ln -s "$f" "$nojq/$b" 2>/dev/null || true
-  done
-done
+nojq="$(path_without jq)"
 src6="$(mktemp -d)"; HOME_DIR6="$(mktemp -d)"
 cp "$REPO_ROOT/install.sh" "$src6/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src6/"
 out="$(PATH="$nojq" CLAUDE_HOME="$HOME_DIR6" bash "$src6/install.sh" 2>&1)" && rc=0 || rc=$?

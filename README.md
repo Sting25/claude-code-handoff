@@ -62,6 +62,21 @@ The installer symlinks the scripts and skills into `~/.claude/` and
 patches `~/.claude/settings.json` (backed up first; idempotent; your
 own settings are left untouched).
 
+`install.sh` is a generated artifact (concatenated from `install.d/`
+by `tools/build-install.sh`; CI rebuilds and diffs it on every change)
+and ships with a checksum. Inside a full clone, git already guarantees
+integrity — but if you ever fetch `install.sh` on its own instead of
+cloning, fetch `install.sh.sha256` from the same tag and verify before
+running:
+
+```bash
+shasum -a 256 -c install.sh.sha256
+```
+
+A mismatch means a corrupted or tampered download — don't run it. (Both
+files travel the same channel, so this catches corruption and casual
+tampering, not a fully compromised host.)
+
 ### Either way
 
 Once installed (either mode), in any project:

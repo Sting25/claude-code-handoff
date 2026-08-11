@@ -205,20 +205,6 @@ check "startup payload -> full load"     yes "$(has "$out" "Auto-loaded handoff"
 rm -rf "$proj"
 
 # --- openssl missing: write degrades to unsigned; load degrades to data ------
-# Same PATH-shim helper as test_jq_missing.sh / test_portability.sh.
-path_without() {
-  local drop="$1" shim d f b
-  shim="$(mktemp -d)"
-  for d in ${PATH//:/ }; do
-    [[ -d "$d" ]] || continue
-    for f in "$d"/*; do
-      b="$(basename "$f")"
-      [[ "$b" == "$drop" ]] && continue
-      [[ -e "$shim/$b" ]] || ln -s "$f" "$shim/$b" 2>/dev/null || true
-    done
-  done
-  printf '%s\n' "$shim"
-}
 nossl="$(path_without openssl)"
 check "openssl really absent on shim PATH" absent \
   "$(PATH="$nossl" command -v openssl >/dev/null 2>&1 && echo present || echo absent)"
