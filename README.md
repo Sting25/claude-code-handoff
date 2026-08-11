@@ -99,6 +99,21 @@ never bind. Verified rules are re-injected as the transcript grows so
 they don't decay. Full design:
 [docs/reference.md](docs/reference.md#trusted-rules-when-the-fences-actually-bind).
 
+**Why the cryptography (in one paragraph).** Prompt injection can't be
+fully prevented — a session that reads a poisoned README or web page can
+be manipulated. What the signing prevents is that compromise *persisting*:
+the handoff would be the natural place for a manipulated session to plant
+standing orders for every future session, so nothing gets promoted to
+binding without a seal only this machine's writer can produce. Since
+v0.13.0 that includes a structural fingerprint recorded at publish time —
+`--restamp` (re-signing after the model curates its notes) refuses to
+bless a document whose structure changed outside the two zones the model
+is allowed to edit. The failure mode is always a *downgrade*: tampered or
+unverifiable rules still load, but as visibly untrusted reference notes.
+One boundary is deliberate: rules the model writes in its own sanctioned
+Rules section (that's the carry-your-fences-forward feature) do bind —
+review them when they change.
+
 **Status line (optional).** `bin/handoff_statusline.sh` renders
 `Fable | ctx 34% (340k/1000k) | handoff: curated` and caches Claude
 Code's own context numbers (`.ctx_sl_<session_id>`) so the nudge uses
