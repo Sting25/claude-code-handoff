@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 8794c42a7dcfd92bed99cf20cb6a06c0c01a6b49d87665d71457f199256f49b8
+# SOURCE-SHA256: 9e3d8bde0614902e7804c96357ccea632e721f105ec1777626e88267f50995ec
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -451,6 +451,19 @@ uninstall_symlinks() {
   unlink_if_ours "$claude_home/skills/handoff/README.md"         "$repo_root/skills/handoff/README.md"
   unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$repo_root/skills/handoff-more/SKILL.md"
   unlink_if_ours "$claude_home/skills/handoff-recover/SKILL.md"  "$repo_root/skills/handoff-recover/SKILL.md"
+  # Tidy up now-empty leaf dirs we created. `rmdir` only removes a directory
+  # that is ALREADY empty (fails harmlessly otherwise) — never `rm -r` — so
+  # this can never touch a dir the user left files in (their own script
+  # dropped alongside ours, a co-located skill, etc.). Order matters: each
+  # skills/<name>/ dir first, then skills/ itself (which only empties out
+  # once its subdirs are gone), then bin/. Best-effort and silent: rmdir's
+  # own semantics ("empty or untouched") already say everything worth saying.
+  local d
+  for d in "$claude_home/skills/handoff" "$claude_home/skills/handoff-more" \
+           "$claude_home/skills/handoff-recover" "$claude_home/skills" \
+           "$claude_home/bin"; do
+    rmdir "$d" 2>/dev/null || true
+  done
 }
 
 # Remove the per-machine HMAC secret that write_handoff.sh generates on first
