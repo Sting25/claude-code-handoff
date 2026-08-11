@@ -11,7 +11,16 @@ on:
   pull_request:
   push:
     branches: [main]
-    tags: ['v*']
+    # ALL tags, not 'v*': a mistyped tag (0.15.0, release-1) used to trigger
+    # no CI at all — zero validation, silently. Now every tag runs the suite
+    # and plugin-version-sync rejects any tag that isn't vX.Y.Z == VERSION.
+    tags: ['**']
+
+# Least-privilege token for every job (lint.yml pins the same). All steps
+# are plain shell + first-party checkout; nothing needs write access, and a
+# future step addition shouldn't inherit one by default.
+permissions:
+  contents: read
 
 jobs:
   tests-linux:
@@ -72,7 +81,7 @@ jobs:
           shellcheck --version
           shellcheck bin/*.sh tests/*.sh tools/build-install.sh install.sh
 
-  # v0.14.0: closes the missed-tag/missing-version failure mode. VERSION is
+  # v0.14.0: flags the missed-tag/missing-version failure mode. VERSION is
   # the single source of truth; plugin.json's own "version" field is only
   # free-standing JSON, so nothing stops it drifting from VERSION on a normal
   # commit. On a release tag the check goes further: the tag itself must
@@ -101,8 +110,12 @@ jobs:
             exit 1
           fi
 
-          # Tag builds only: refs/tags/vX.Y.Z must match VERSION, and
-          # CHANGELOG.md must carry the matching "## [X.Y.Z]" heading.
+          # Tag builds: refs/tags/vX.Y.Z must match VERSION, and CHANGELOG.md
+          # must carry the matching "## [X.Y.Z]" heading; any other tag shape
+          # is rejected outright. DETECTIVE, not preventive: this job runs
+          # after the tag already exists, so a red X here means the published
+          # tag is bad and needs deleting/re-tagging — nothing in-repo can
+          # stop the push itself (that would take a GitHub tag ruleset).
           case "$GITHUB_REF" in
             refs/tags/v*)
               tag_version="${GITHUB_REF#refs/tags/v}"
@@ -110,11 +123,22 @@ jobs:
                 echo "::error::tag v$tag_version does not match VERSION ($version)"
                 exit 1
               fi
-              if ! grep -qF "## [$version]" CHANGELOG.md; then
-                echo "::error::CHANGELOG.md has no '## [$version]' heading for the tagged release"
+              # Anchored + dots escaped: the old unanchored fixed-string grep
+              # was satisfied by a heading quoted in prose or a code fence.
+              # Deliberately ONLY plain grep -qE here — a -q/-v combination
+              # was tried and dropped: ugrep (which some dev machines alias
+              # as grep) inverts its semantics, so the check would pass
+              # locally and fail in CI or vice versa.
+              ver_re="$(printf '%s' "$version" | sed 's/\./\\./g')"
+              if ! grep -qE "^## \[$ver_re\]" CHANGELOG.md; then
+                echo "::error::CHANGELOG.md has no '## [$version]' heading at line start for the tagged release"
                 exit 1
               fi
               echo "tag v$tag_version matches VERSION and CHANGELOG.md"
+              ;;
+            refs/tags/*)
+              echo "::error::tag '${GITHUB_REF#refs/tags/}' is not a vX.Y.Z release tag — delete it or re-tag as v$version"
+              exit 1
               ;;
           esac
 
