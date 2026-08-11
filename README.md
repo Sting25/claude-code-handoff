@@ -42,7 +42,7 @@ with the plugin and are picked up automatically — no
 `~/.claude/settings.json` patching, no symlinking. Scripts run from
 the plugin's own `bin/`, wherever Claude Code checks the plugin out
 (cache path pattern
-`~/.claude/plugins/cache/<marketplace>/claude-code-handoff/<version>/bin/`).
+`${CLAUDE_CONFIG_DIR:-~/.claude}/plugins/cache/<marketplace>/claude-code-handoff/<version>/bin/`).
 
 The one thing a plugin install can't wire up for you is the optional
 status line — details below, under **How it works → Status line**.

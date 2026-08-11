@@ -44,21 +44,43 @@ are appended).
   fails the build if `.claude-plugin/plugin.json`'s `"version"` drifts
   from the `VERSION` file, and on a tag push additionally requires the
   tag to match `VERSION` and `CHANGELOG.md` to already carry the
-  matching `## [X.Y.Z]` heading — closing the missed-tag / mismatched-
-  manifest failure mode a normal commit doesn't otherwise catch.
+  matching `## [X.Y.Z]` heading — flagging the missed-tag / mismatched-
+  manifest failure mode a normal commit doesn't otherwise catch
+  (detective, not preventive: the job runs after the tag exists).
 
 ### Added — skills dual-location script resolution
 - **`skills/handoff`, `skills/handoff-more`, `skills/handoff-recover`**
   now resolve the handoff scripts against either install mode instead
   of assuming `~/.claude/bin/`: prefer `${CLAUDE_PLUGIN_ROOT}/bin` when
   that env var is set and the script is actually there, fall back to
-  the legacy `$HOME/.claude/bin`, and — since `CLAUDE_PLUGIN_ROOT`'s
-  visibility to skill-driven Bash calls is unverified — fall back
-  further to a `$HOME/.claude/plugins/cache/*/claude-code-handoff/*/bin`
-  glob (lexically-highest match wins) before reporting the scripts as
-  not installed. Resolution and execution are kept as separate Bash
-  calls in each skill's steps, since shell state (the resolved `$hb`)
-  does not persist across calls.
+  the legacy `$HOME/.claude/bin`, and — since `CLAUDE_PLUGIN_ROOT` was
+  measured NOT to be exported to skill-driven Bash calls — fall back
+  further to a
+  `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/claude-code-handoff/*/bin`
+  glob before reporting the scripts as not installed. (As shipped in
+  0.14.0 the glob loop kept its LAST match — lexical order, which is
+  not version order; 0.14.1 replaces it with newest-mtime selection.)
+  Resolution and execution are kept as separate Bash calls in each
+  skill's steps, since shell state (the resolved `$hb`) does not
+  persist across calls.
+
+### Added — doctor, installer, and uninstall polish
+_(shipped in 0.14.0; recorded retroactively in the 0.14.1 docs true-up)_
+- **Doctor/installer signing status line.** `./install.sh --doctor` and
+  a fresh install now print one consolidated
+  `handoff signing: active | degraded: <reason> | pending: <reason>`
+  line (`signing_status_reason()`), answering "will the next handoff
+  actually be HMAC-signed" instead of leaving it implied by per-item
+  checks.
+- **`CLAUDE_CONFIG_DIR` honored.** The installer's plugin-cache
+  detection, all three skills' fallback glob, and the README statusLine
+  snippet resolve the plugin cache under
+  `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` instead of a hardcoded
+  `$HOME/.claude`.
+- **Uninstall tidies emptied directories.** `--uninstall` now `rmdir`s
+  `~/.claude/bin` and `skills/*` dirs it emptied (rmdir only, never
+  recursive — a directory holding any user file is left alone, with
+  the user's file untouched).
 
 ### Added — tests
 - **`tests/test_plugin_layout.sh`** — static `jq`-based shape
