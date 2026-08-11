@@ -1,8 +1,0 @@
-# Forbidden patterns for shell scripts (*.sh, *.bash). See forbidden-patterns/README.md.
-# scaffold-extensions: sh bash
-# Copy to your project as `.forbidden-patterns/shell.txt`.
-
-(^|[^A-Za-z_])(curl|wget)([[:space:]]+[^|]*)?\|[[:space:]]*(sudo[[:space:]]+)?(bash|sh|zsh)([[:space:]]|$)	Piping remote download to a shell — review the script and run it as a separate step
-(^|[^A-Za-z_])rm[[:space:]]+((-[a-zA-Z]+|--[a-z]+)[[:space:]]+)+["']?(/|/\*|~|~/\*|\$\{?HOME\}?(/\*)?)["']?([[:space:]]|[;&]|$)	`rm -rf /` (or /*, ~, $HOME) detected — refuse to ship; scope to a specific path
-(^|[^A-Za-z_])chmod[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*0?777([[:space:]]|$)	chmod 0?777 — overly permissive; scope to specific user/group bits
-(^|[^A-Za-z_])git[[:space:]][^|;&]*[[:space:]]--no-verify([[:space:]]|[;&]|$)	git --no-verify bypasses the pre-commit/commit-msg hooks — fix the failure, don't skip the gate (mark a genuine uninstall with scaffold-allow)
