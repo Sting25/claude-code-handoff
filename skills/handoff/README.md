@@ -32,6 +32,12 @@ manual copy-paste, no kickoff prompt to remember.
 
 ## Components
 
+The layout below is a **script install** — `bin/` and `skills/` sit
+directly under `~/.claude/`. A **plugin install** ships the same
+files under the plugin's own root instead (its `bin/` in place of
+`~/.claude/bin/`); the skills resolve whichever install is present at
+runtime, so no manual path juggling is needed either way.
+
 ```
 ~/.claude/
 ├── bin/

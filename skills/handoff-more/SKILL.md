@@ -8,8 +8,10 @@ description: Pull older handoffs from .claude/handoff_history/ into the current 
 > **Prerequisite:** this skill reads history that only exists when the
 > scripts and hooks from https://github.com/Sting25/claude-code-handoff
 > are installed — `write_handoff.sh` is what rotates snapshots into
-> `handoff_history/`. That toolchain is NOT part of this file alone;
-> run `./install.sh` from that repo once per machine first.
+> `handoff_history/`. That toolchain lives under `~/.claude/bin/`
+> (script install) or the plugin's `bin/` (plugin install) and is NOT
+> part of this file alone; run `./install.sh` from that repo (or
+> install the plugin) once per machine first.
 
 The `SessionStart` hook auto-loads `handoff_current.md` (the most
 recent handoff). This skill pulls in the older snapshots that
@@ -36,15 +38,33 @@ before each new write.
    ls -la <repo-root>/.claude/handoff_history/
    ```
    If the directory is missing or empty, check whether that's "no
-   history yet" or "toolchain never installed":
+   history yet" or "toolchain never installed". Script installs put
+   the scripts under `~/.claude/bin/`; plugin installs put them under
+   the plugin's `bin/`, whose location `CLAUDE_PLUGIN_ROOT` gives when
+   set — but that env var's visibility to skill-driven Bash calls is
+   unverified, so fall back to the legacy path and then a cache-glob
+   before giving up:
    ```bash
-   test -f ~/.claude/bin/write_handoff.sh || echo "MISSING: handoff scripts not installed"
+   hb=""
+   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
+     hb="${CLAUDE_PLUGIN_ROOT}/bin"
+   elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
+     hb="$HOME/.claude/bin"
+   else
+     for d in "$HOME"/.claude/plugins/cache/*/claude-code-handoff/*/bin; do
+       [ -f "$d/write_handoff.sh" ] && hb="$d"
+     done
+   fi
+   # env var wins when set (running from that plugin), legacy bin next (existing
+   # installs), cache glob last (plugin installed but env var not visible to
+   # skill Bash); the loop's last match takes the lexically-highest version dir.
+   [ -n "$hb" ] || echo "MISSING: handoff scripts not installed (neither ~/.claude/bin nor a plugin install found)"
    ```
    If it prints MISSING, stop and tell the user to clone
    https://github.com/Sting25/claude-code-handoff and run `./install.sh`
-   — don't try to substitute for the missing toolchain. If the scripts
-   ARE installed, say there's simply no history yet and stop — there's
-   nothing to load.
+   (or install the plugin) — don't try to substitute for the missing
+   toolchain. If the scripts ARE installed, say there's simply no
+   history yet and stop — there's nothing to load.
 
 2. Read each retained snapshot, newest first. The default retention
    is 5 (configurable via `HANDOFF_HISTORY_KEEP` in the user's shell),
