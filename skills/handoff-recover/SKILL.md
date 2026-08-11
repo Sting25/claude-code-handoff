@@ -8,9 +8,10 @@ description: Compose a retroactive curated handoff when the previous session end
 > **Prerequisite:** this skill leans on scripts and hooks from
 > https://github.com/Sting25/claude-code-handoff — the raw dumps it
 > recovers from are written by the Stop hook, and it runs
-> `handoff_recover_tail.sh` / `write_handoff.sh` from `~/.claude/bin/`.
+> `handoff_recover_tail.sh` / `write_handoff.sh` from `~/.claude/bin/`
+> (script install) or the plugin's `bin/` (plugin install).
 > None of that ships with this file alone; run `./install.sh` from that
-> repo once per machine first.
+> repo (or install the plugin) once per machine first.
 
 The previous session ended without running `/handoff` — crashed,
 killed, terminal closed, or just never invoked. `SessionEnd` wrote a
@@ -48,18 +49,47 @@ into the current session's context and persists it back into
 
 ## Steps
 
-**Preflight — verify the toolchain is installed.** Before step 1:
+**Preflight — resolve the scripts and verify the toolchain is
+installed.** Before step 1, script installs put the scripts under
+`~/.claude/bin/`; plugin installs put them under the plugin's `bin/`.
+`CLAUDE_PLUGIN_ROOT` would name that location, but measurement
+(2026-08-11, plugin-enabled headless session) shows the CLI does NOT
+export it to model-driven Bash calls — the env-var check stays only
+as cheap future-proofing, and in plugin mode the cache-glob is the
+branch that actually resolves:
 
 ```bash
-test -f ~/.claude/bin/write_handoff.sh || echo "MISSING: handoff scripts not installed"
+hb=""
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
+  hb="${CLAUDE_PLUGIN_ROOT}/bin"
+elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
+  hb="$HOME/.claude/bin"
+else
+  for d in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff/*/bin; do
+    [ -f "$d/write_handoff.sh" ] && hb="$d"
+  done
+fi
+# env var wins when set (running from that plugin), legacy bin next (existing
+# installs), cache glob last (plugin installed but env var not visible to
+# skill Bash); the loop's last match takes the lexically-highest version dir.
+[ -n "$hb" ] || echo "MISSING: handoff scripts not installed (neither ~/.claude/bin nor a plugin install found)"
+echo "handoff-bin: $hb"
 ```
 
+**Shell state (env vars) does not persist between separate Bash
+calls.** `$hb` is used again in steps 2 and 7 below, each a fresh Bash
+call — those blocks re-resolve `$hb` themselves rather than assuming
+it survives from here, so they're safe to run standalone. If you ever
+copy just one of those blocks in isolation, you can alternatively
+substitute the literal path this preflight printed after `handoff-bin: `.
+
 If it prints MISSING, **stop here** — tell the user to clone
-https://github.com/Sting25/claude-code-handoff and run `./install.sh`,
-then re-invoke `/handoff-recover`. Do NOT reconstruct the scripts'
-behavior by hand: a recovery composed without the real
-`write_handoff.sh --restamp` / `handoff_recover_tail.sh` leaves the
-handoff unsigned and can silently miss the lost session's final turns.
+https://github.com/Sting25/claude-code-handoff and run `./install.sh`
+(or install the plugin), then re-invoke `/handoff-recover`. Do NOT
+reconstruct the scripts' behavior by hand: a recovery composed without
+the real `write_handoff.sh --restamp` / `handoff_recover_tail.sh`
+leaves the handoff unsigned and can silently miss the lost session's
+final turns.
 
 1. **Identify the previous session's raw dump.** The `Stop` hook
    appends every turn to `<repo>/.claude/handoff_backups/handoff_raw_<session_id>.md`.
@@ -115,10 +145,22 @@ handoff unsigned and can silently miss the lost session's final turns.
    JSONL. That last turn is often the most valuable thing to recover
    ("what I was about to do next"). The dump alone silently loses it.
 
-   Run the recovery helper to surface anything the dump missed:
+   Run the recovery helper to surface anything the dump missed. This is
+   a fresh Bash call, separate from the preflight above — re-resolve
+   `$hb` here rather than assuming it's still set:
 
    ```bash
-   bash ~/.claude/bin/handoff_recover_tail.sh <previous_session_id>
+   hb=""
+   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
+     hb="${CLAUDE_PLUGIN_ROOT}/bin"
+   elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
+     hb="$HOME/.claude/bin"
+   else
+     for d in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff/*/bin; do
+       [ -f "$d/write_handoff.sh" ] && hb="$d"
+     done
+   fi
+   bash "$hb/handoff_recover_tail.sh" <previous_session_id>
    ```
 
    It compares the dump's cursor against the transcript JSONL and prints
@@ -189,9 +231,21 @@ handoff unsigned and can silently miss the lost session's final turns.
 7. **Re-sign the edited handoff.** Your Edit invalidated the HMAC
    trailer `write_handoff.sh` wrote on the file, which would silently
    demote the pinned/rules blocks from binding to reference data for
-   every subsequent session. Re-stamp it:
+   every subsequent session. This is a fresh Bash call, far from the
+   preflight above — re-resolve `$hb` here rather than assuming it's
+   still set. Re-stamp it:
    ```bash
-   bash ~/.claude/bin/write_handoff.sh --restamp
+   hb=""
+   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
+     hb="${CLAUDE_PLUGIN_ROOT}/bin"
+   elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
+     hb="$HOME/.claude/bin"
+   else
+     for d in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff/*/bin; do
+       [ -f "$d/write_handoff.sh" ] && hb="$d"
+     done
+   fi
+   bash "$hb/write_handoff.sh" --restamp
    ```
    Best-effort — if it warns (no openssl, older install), continue; the
    handoff still works, the rules just load as data. Re-run it after any

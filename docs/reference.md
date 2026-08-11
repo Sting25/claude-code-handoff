@@ -540,6 +540,23 @@ command string or adds a new hook — that's called out in
 Run `./install.sh --doctor` anytime to confirm every installed hook
 still resolves (handy after moving or re-cloning the repo).
 
+### Plugin installs: the stale-cache gotcha (dev note)
+
+Plugin installs update through Claude Code's own plugin management
+(`/plugin` in-session), not `git pull`. If you're developing the
+plugin locally, know this measured behavior (observed 2026-08-11):
+the plugin cache lives at
+`$CLAUDE_CONFIG_DIR/plugins/cache/<marketplace>/claude-code-handoff/<version>/`
+(`~/.claude/plugins/cache/...` when `CLAUDE_CONFIG_DIR` is unset), and
+reinstalling the **same version** serves the stale cached
+`plugin.json` — `/plugin marketplace update`, `/plugin update`, and
+even a full remove-and-re-add do not refresh it. Between local test
+cycles, either bump the version in `.claude-plugin/plugin.json` (+
+`VERSION`) or delete that cache directory. One more wrinkle: with a
+directory-source marketplace, `hooks/hooks.json` was read live from
+the repo path while the plugin's identity came from the cache — so
+hook edits can look live while manifest edits look stale.
+
 ## Uninstall details
 
 ```bash
@@ -586,9 +603,19 @@ is preserved; uninstall only removes entries it can prove are its own.
 │       └── SKILL.md               # /handoff-recover slash command: retroactively compose Notes when the previous session crashed
 ├── docs/
 │   ├── handoff-pattern.md         # design philosophy: the WRITE/READ discipline behind the tool
+│   ├── install-split-v0.14-design.md  # design note: install.sh as a generated build artifact
 │   └── reference.md               # this file
+├── install.d/                     # install.sh SOURCE — contiguous slices, concatenated by tools/build-install.sh
+│   ├── 00-preamble.sh
+│   ├── 10-symlinks.sh
+│   ├── 20-settings-patch.sh
+│   ├── 30-settings-unpatch-doctor.sh
+│   └── 40-main.sh
+├── tools/
+│   └── build-install.sh           # concatenates install.d/*.sh -> install.sh + install.sh.sha256
 ├── tests/                         # dependency-free bash test suite (./tests/run.sh)
-├── install.sh                     # symlink + settings.json patcher
+├── install.sh                     # GENERATED: symlink + settings.json patcher (built from install.d/*.sh — do not edit directly)
+├── install.sh.sha256              # GENERATED: sha256 of install.sh, for a future curl|bash consumer to verify
 ├── CHANGELOG.md
 ├── LICENSE                        # MIT
 └── README.md

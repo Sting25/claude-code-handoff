@@ -10,7 +10,111 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
-## [Unreleased]
+## [0.14.0] — 2026-08-11
+
+### Added — plugin packaging (v0.14.0)
+- **Plugin manifest.** `.claude-plugin/plugin.json` declares the
+  `claude-code-handoff` plugin (name, version, author, keywords) and
+  points `"hooks"` at `./hooks/hooks.json` — the plugin equivalent of
+  what `./install.sh` has patched into `~/.claude/settings.json` since
+  0.1.0, now shippable without touching the user's settings file at
+  all.
+- **`hooks/hooks.json`** carries the same six events the bare-scripts
+  install wires (`SessionStart`, `SessionEnd`, `Stop`, `UserPromptSubmit`,
+  `PreCompact`, `PostCompact`), every command resolved via
+  `${CLAUDE_PLUGIN_ROOT}/bin/...` instead of a hardcoded repo-relative
+  path, so the hooks work correctly no matter where Claude Code checks
+  the plugin out. `SessionEnd` and `PreCompact` both carry
+  `"timeout": 60` — the safety-net snapshot write can legitimately take
+  longer than the hook default under a slow disk or a large in-flight
+  docs set, and a hook that times out mid-write is worse than one that
+  finishes late, so both mirror `write_handoff.sh`'s own internal
+  budget rather than relying on Claude Code's default. `PreCompact` is
+  registered with no `matcher`, matching the bare-scripts install's
+  existing behavior (fires on both auto and manual compaction).
+- **`.claude-plugin/marketplace.json`** self-hosts the marketplace in
+  this same repo — `owner` is Christopher Chadwick, and the single
+  listed plugin entry (`name: "claude-code-handoff"`, `source: "./"`)
+  points back at the repo root, so `/plugin marketplace add
+  Sting25/claude-code-handoff` followed by `/plugin install
+  claude-code-handoff@claude-code-handoff` needs no separate
+  marketplace repo.
+- **`VERSION` is the single source of truth for the plugin version.**
+  A new required CI job (`plugin-version-sync` in `.github/workflows/ci.yml`)
+  fails the build if `.claude-plugin/plugin.json`'s `"version"` drifts
+  from the `VERSION` file, and on a tag push additionally requires the
+  tag to match `VERSION` and `CHANGELOG.md` to already carry the
+  matching `## [X.Y.Z]` heading — closing the missed-tag / mismatched-
+  manifest failure mode a normal commit doesn't otherwise catch.
+
+### Added — skills dual-location script resolution
+- **`skills/handoff`, `skills/handoff-more`, `skills/handoff-recover`**
+  now resolve the handoff scripts against either install mode instead
+  of assuming `~/.claude/bin/`: prefer `${CLAUDE_PLUGIN_ROOT}/bin` when
+  that env var is set and the script is actually there, fall back to
+  the legacy `$HOME/.claude/bin`, and — since `CLAUDE_PLUGIN_ROOT`'s
+  visibility to skill-driven Bash calls is unverified — fall back
+  further to a `$HOME/.claude/plugins/cache/*/claude-code-handoff/*/bin`
+  glob (lexically-highest match wins) before reporting the scripts as
+  not installed. Resolution and execution are kept as separate Bash
+  calls in each skill's steps, since shell state (the resolved `$hb`)
+  does not persist across calls.
+
+### Added — tests
+- **`tests/test_plugin_layout.sh`** — static `jq`-based shape
+  assertions against `plugin.json`, `hooks/hooks.json`, and
+  `marketplace.json` (name/version fields, version matches `VERSION`,
+  all six hook events present, every command references
+  `${CLAUDE_PLUGIN_ROOT}`, `SessionEnd`/`PreCompact` timeouts `>= 60`,
+  `PreCompact` has no matcher, marketplace lists the plugin with
+  `source: "./"`), plus a relocation-safety run that copies `bin/`
+  into a scratch dir standing in for an arbitrary plugin install root
+  and invokes `handoff_session_start.sh`/`write_handoff.sh` from there
+  against a sandboxed `HOME`/`CLAUDE_HOME`/project, proving the
+  `BASH_SOURCE`-based sibling resolution the scripts already relied on
+  also holds when `bin/` is not at its normal repo-relative path — and
+  that the sandboxed writer never touches the real repo's own handoff
+  doc.
+
+### Changed — docs
+- **README restructured plugin-first.** `/plugin marketplace add` +
+  `/plugin install` is now the primary documented install path; the
+  `git clone` + `./install.sh` flow moved under a clearly-labeled
+  bare-scripts (legacy) heading — still fully supported, not
+  deprecated. Adds a status-line subsection for plugin users (plugins
+  cannot set `statusLine`; documents the manual `~/.claude/settings.json`
+  paste that globs the newest cached plugin version) and a dual-mode
+  warning (both hook sets fire if plugin and bare-scripts installs are
+  both present — Claude Code does not dedupe — `./install.sh --doctor`
+  warns). Sweeps prior "the scripts live in `~/.claude/bin`"-style
+  claims in "How it works" and "Updating, doctor, uninstall" to
+  qualify by install mode.
+
+### Added — install.sh build split
+- **`install.sh` is now a GENERATED artifact.** Its source lives in
+  `install.d/*.sh` as exact contiguous slices of the previous single
+  file (`00-preamble.sh`, `10-symlinks.sh`, `20-settings-patch.sh`,
+  `30-settings-unpatch-doctor.sh`, `40-main.sh`), each well under the
+  500-line default file-size cap. `tools/build-install.sh` reads an
+  explicit ordered array of module filenames (not a glob, so a stray
+  file in `install.d/` can't silently get spliced into a security-
+  relevant script) and concatenates them into the committed
+  `install.sh`, prefixed with a generated-file banner and a
+  `SOURCE-SHA256` provenance line. The build is deterministic (no
+  timestamps) and portable to both bash 3.2/BSD (macOS) and bash
+  5/GNU (Linux) — it prefers `shasum -a 256`, falling back to
+  `sha256sum`. It also writes `install.sh.sha256` alongside, for a
+  future `curl | bash` consumer to verify before piping. No behavior
+  change: `install.sh` still ships at the repo root, at the same path,
+  and `git clone` + `./install.sh` is unaffected.
+- **New required CI job `install-drift`** rebuilds `install.sh` from
+  `install.d/*.sh` in a scratch copy and diffs it against the
+  committed `install.sh` + `install.sh.sha256`, failing the build if
+  a contributor edited a module and forgot to regenerate the artifact.
+  `tests/test_install_build_drift.sh` gives the same check local
+  coverage via `./tests/run.sh`, before a PR ever reaches CI.
+- See `docs/install-split-v0.14-design.md` for the full design
+  rationale and landing-order notes.
 
 ## [0.13.0] — 2026-08-11
 

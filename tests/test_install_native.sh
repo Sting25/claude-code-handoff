@@ -78,7 +78,22 @@ check "uninstall: statusLine (ours) removed" null "$(sj '.statusLine // "null"')
 check "uninstall: PreCompact removed"        null "$(sj '.hooks.PreCompact // "null"')"
 check "uninstall: PostCompact removed"       null "$(sj '.hooks.PostCompact // "null"')"
 check "uninstall: reset perm removed"        ""   "$(sj '.permissions.allow // [] | .[]' | grep handoff_compact_reset)"
+# uninstall_symlinks tidies up now-empty leaf dirs it created (rmdir only,
+# never rm -r) — a clean install has nothing else under bin/ or skills/, so
+# both should be gone once every symlink/copy in them is removed.
+check "uninstall: bin/ dir removed (now empty)"    no "$([[ -d "$HOME_DIR/bin" ]] && echo yes || echo no)"
+check "uninstall: skills/ dir removed (now empty)" no "$([[ -d "$HOME_DIR/skills" ]] && echo yes || echo no)"
 rm -rf "$HOME_DIR" "$src3"
+
+# D1b: a user's own extra file left in bin/ blocks the rmdir (never rm -r) —
+# the dir AND the user's file must both survive uninstall untouched.
+run_install __ABSENT__
+printf '#!/bin/sh\necho mine\n' > "$HOME_DIR/bin/my-own-script.sh"
+src3b="$(mktemp -d)"; cp "$REPO_ROOT/install.sh" "$src3b/"; cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$src3b/"
+CLAUDE_HOME="$HOME_DIR" bash "$src3b/install.sh" --uninstall >/dev/null 2>&1
+check "uninstall: non-empty bin/ dir kept"         yes "$([[ -d "$HOME_DIR/bin" ]] && echo yes || echo no)"
+check "uninstall: user's own bin file untouched"   yes "$([[ -f "$HOME_DIR/bin/my-own-script.sh" ]] && echo yes || echo no)"
+rm -rf "$HOME_DIR" "$src3b"
 
 # D2: a user's own statusLine + a co-located PreCompact user command survive.
 read -r -d '' USERMIX <<'JSON' || true

@@ -11,6 +11,7 @@ on:
   pull_request:
   push:
     branches: [main]
+    tags: ['v*']
 
 jobs:
   tests-linux:
@@ -60,6 +61,92 @@ jobs:
         # trap-only-invocation warning is SC2329 from 0.11 and SC2317 before
         # it). When this job fails on a tree that is clean locally, the
         # version line is the first thing to look at.
+        #
+        # install.d/*.sh fragments are deliberately NOT globbed in here: they
+        # reference functions/vars defined in earlier modules, so linting
+        # them standalone would false-positive on names shellcheck can't see
+        # yet. The concatenated install.sh (linted below) is the real,
+        # final script and gets full coverage; the install-drift job (below)
+        # is what proves install.sh actually reflects install.d/*.sh.
         run: |
           shellcheck --version
-          shellcheck bin/*.sh tests/*.sh install.sh
+          shellcheck bin/*.sh tests/*.sh tools/build-install.sh install.sh
+
+  # v0.14.0: closes the missed-tag/missing-version failure mode. VERSION is
+  # the single source of truth; plugin.json's own "version" field is only
+  # free-standing JSON, so nothing stops it drifting from VERSION on a normal
+  # commit. On a release tag the check goes further: the tag itself must
+  # match VERSION, and CHANGELOG.md must already document the release — a
+  # tag pushed without either is exactly how a "shipped" version ends up
+  # undocumented or mismatched with what the plugin manifest advertises.
+  plugin-version-sync:
+    name: plugin version sync — required
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate plugin manifests + VERSION sync
+        run: |
+          set -euo pipefail
+
+          version="$(tr -d '[:space:]' < VERSION)"
+          echo "VERSION file: $version"
+
+          for f in .claude-plugin/plugin.json hooks/hooks.json .claude-plugin/marketplace.json; do
+            jq . "$f" >/dev/null || { echo "::error::$f does not parse as JSON"; exit 1; }
+          done
+
+          plugin_version="$(jq -r '.version' .claude-plugin/plugin.json)"
+          if [[ "$plugin_version" != "$version" ]]; then
+            echo "::error::.claude-plugin/plugin.json version ($plugin_version) != VERSION ($version)"
+            exit 1
+          fi
+
+          # Tag builds only: refs/tags/vX.Y.Z must match VERSION, and
+          # CHANGELOG.md must carry the matching "## [X.Y.Z]" heading.
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              tag_version="${GITHUB_REF#refs/tags/v}"
+              if [[ "$tag_version" != "$version" ]]; then
+                echo "::error::tag v$tag_version does not match VERSION ($version)"
+                exit 1
+              fi
+              if ! grep -qF "## [$version]" CHANGELOG.md; then
+                echo "::error::CHANGELOG.md has no '## [$version]' heading for the tagged release"
+                exit 1
+              fi
+              echo "tag v$tag_version matches VERSION and CHANGELOG.md"
+              ;;
+          esac
+
+  # v0.14.0: install.sh is now a GENERATED artifact, concatenated from
+  # install.d/*.sh by tools/build-install.sh
+  # (docs/install-split-v0.14-design.md). This closes the "edited
+  # install.d/, forgot to rebuild" failure mode: a full rebuild-and-diff,
+  # not the SOURCE-SHA256 banner line inside install.sh (that line is
+  # provenance/human-visible only — it can't detect its own staleness).
+  # Its own fast job rather than a tests-linux step: this is a repo-hygiene
+  # check, not a functional test, so it shouldn't share a pass/fail signal
+  # with the test suite.
+  install-drift:
+    name: install.sh drift — required
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild install.sh from install.d/*.sh and diff against the committed copy
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          cp -R install.d tools "$workdir"/
+          ( cd "$workdir" && bash tools/build-install.sh )
+
+          status=0
+          if ! diff -u install.sh "$workdir/install.sh"; then
+            echo "::error file=install.sh::install.sh is stale relative to install.d/*.sh — run 'bash tools/build-install.sh' and commit the result"
+            status=1
+          fi
+          if ! diff -u install.sh.sha256 "$workdir/install.sh.sha256"; then
+            echo "::error file=install.sh.sha256::install.sh.sha256 is stale — run 'bash tools/build-install.sh' and commit the result"
+            status=1
+          fi
+          [ "$status" -eq 0 ] && echo "install.sh matches install.d/*.sh + tools/build-install.sh"
+          exit "$status"

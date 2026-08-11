@@ -17,7 +17,40 @@ digest you never read.
 - **Keeps a history of past handoffs** (last 5 by default) that you can pull back into context on demand.
 - **Works in git and non-git projects**, in both the Claude Code CLI and the desktop app.
 
-## Quick start
+## Installation
+
+Two supported install modes, both fully maintained: install as a
+**plugin** (recommended — hooks and skills come with it automatically,
+no manual patching) or install the **bare scripts** (legacy, still
+fully supported) into `~/.claude/`. Pick one — see
+[Dual-mode warning](#dual-mode-warning) below before running both.
+
+### Plugin install (recommended)
+
+Inside Claude Code:
+
+```
+/plugin marketplace add Sting25/claude-code-handoff
+/plugin install claude-code-handoff@claude-code-handoff
+```
+
+This adds the `claude-code-handoff` marketplace — self-hosted in this
+repo at [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json)
+— and installs the `claude-code-handoff` plugin from it. Hooks
+([`hooks/hooks.json`](hooks/hooks.json)) and skills (`skills/`) come
+with the plugin and are picked up automatically — no
+`~/.claude/settings.json` patching, no symlinking. Scripts run from
+the plugin's own `bin/`, wherever Claude Code checks the plugin out
+(cache path pattern
+`~/.claude/plugins/cache/<marketplace>/claude-code-handoff/<version>/bin/`).
+
+The one thing a plugin install can't wire up for you is the optional
+status line — details below, under **How it works → Status line**.
+
+### Bare-scripts install (legacy / alternative)
+
+Still fully supported — dual-mode is a deliberate design choice, not a
+deprecated path.
 
 ```bash
 git clone https://github.com/Sting25/claude-code-handoff.git ~/code/claude-code-handoff
@@ -27,7 +60,11 @@ cd ~/code/claude-code-handoff
 
 The installer symlinks the scripts and skills into `~/.claude/` and
 patches `~/.claude/settings.json` (backed up first; idempotent; your
-own settings are left untouched). Then, in any project:
+own settings are left untouched).
+
+### Either way
+
+Once installed (either mode), in any project:
 
 - **`/handoff`** — run at the end of a working session; writes the snapshot and fills in the "Notes from this session" prose block. Invoke at 30-50% context remaining, not at 5%.
 - **`/handoff-recover`** — run when a new session shows an `ACTION: RUN /handoff-recover` banner; reconstructs the notes a crashed or un-handed-off session never wrote.
@@ -35,6 +72,16 @@ own settings are left untouched). Then, in any project:
 
 Everything else — loading, per-turn backups, the context nudge — runs
 through hooks without you thinking about it.
+
+### Dual-mode warning
+
+Claude Code does not dedupe hooks across install modes. If you install
+the plugin *and* leave a bare-scripts install wired into
+`~/.claude/settings.json`, both sets of hooks fire on every event —
+every `SessionStart`/`Stop`/`SessionEnd`/etc. runs twice, doubling
+writes and raw-dump appends. Pick one mode per machine. The doctor
+(`./install.sh --doctor`) warns when it detects both installed at
+once — run it if you're unsure which mode you're in.
 
 ## Requirements
 
@@ -58,7 +105,10 @@ through hooks without you thinking about it.
 
 ## How it works
 
-Six hooks, installed into `~/.claude/settings.json`:
+Six hooks. A bare-scripts install writes these into
+`~/.claude/settings.json` via `./install.sh`; a plugin install ships
+the same six in [`hooks/hooks.json`](hooks/hooks.json) and Claude Code
+loads them automatically — no settings.json patching either way:
 
 | Hook | Job |
 | --- | --- |
@@ -114,12 +164,30 @@ One boundary is deliberate: rules the model writes in its own sanctioned
 Rules section (that's the carry-your-fences-forward feature) do bind —
 review them when they change.
 
-**Status line (optional).** `bin/handoff_statusline.sh` renders
+**Status line (optional).** `handoff_statusline.sh` renders
 `Fable | ctx 34% (340k/1000k) | handoff: curated` and caches Claude
 Code's own context numbers (`.ctx_sl_<session_id>`) so the nudge uses
-real usage instead of model-id guessing. The installer wires it only
-if you don't already have a statusLine. Details:
-[docs/reference.md](docs/reference.md#status-line).
+real usage instead of model-id guessing. `statusLine` is a single slot
+in `~/.claude/settings.json` — only one command can occupy it — so how
+it gets wired differs by install mode:
+
+- **Bare-scripts install** — `./install.sh` wires it for you, but only
+  if you don't already have a statusLine (an existing one is never
+  overwritten; the installer prints the manual step instead).
+- **Plugin install** — plugins cannot set `statusLine` at all (Claude
+  Code has no per-plugin mechanism for it); wiring it is a manual,
+  optional paste into `~/.claude/settings.json`:
+
+  ```json
+  "statusLine": { "type": "command", "command": "bash \"$(ls -td \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"/plugins/cache/*/claude-code-handoff/*/bin/handoff_statusline.sh 2>/dev/null | head -1)\" 2>/dev/null" }
+  ```
+
+  `ls -td` picks the newest cached plugin version by directory mtime,
+  not by version number, so it can pick the wrong script if an older
+  version's cache directory was touched more recently than the current
+  one.
+
+Details: [docs/reference.md](docs/reference.md#status-line).
 
 ## Configuration
 
@@ -170,14 +238,21 @@ export HANDOFF_LOCK_STALE_SECS=600
 
 ## Updating, doctor, uninstall
 
-Symlink install means updating is just `git pull` in the clone — live
-next session, no re-install (re-run `./install.sh` only when
+This section covers the **bare-scripts install**. Symlink install
+means updating is just `git pull` in the clone — live next session, no
+re-install (re-run `./install.sh` only when
 [`CHANGELOG.md`](CHANGELOG.md) says a hook changed). Run
 `./install.sh --doctor` anytime to confirm every installed hook still
-resolves. `./install.sh --uninstall` removes the symlinks, strips only
-the entries it can prove are its own from settings.json (backup
-first), and deletes the per-machine HMAC secret — details in
+resolves (and to check for a plugin install running alongside it — see
+[Dual-mode warning](#dual-mode-warning)). `./install.sh --uninstall`
+removes the symlinks, strips only the entries it can prove are its own
+from settings.json (backup first), and deletes the per-machine HMAC
+secret — details in
 [docs/reference.md](docs/reference.md#uninstall-details).
+
+Plugin installs update and uninstall through Claude Code's own plugin
+management (`/plugin` in-session) instead — there's no `git pull` or
+`install.sh` step for that mode.
 
 Installing from a volatile path (`/tmp`, CI scratch) auto-switches to
 copy mode; `--copy` / `--link` force it, and `--model 'opus[1m]'` pins
