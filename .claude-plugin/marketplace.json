@@ -1,0 +1,14 @@
+{
+  "name": "claude-code-handoff",
+  "owner": {
+    "name": "Christopher Chadwick",
+    "url": "https://github.com/Sting25"
+  },
+  "plugins": [
+    {
+      "name": "claude-code-handoff",
+      "source": "./",
+      "description": "Session-state handoff between Claude Code sessions via hooks (auto-snapshot on SessionEnd/PreCompact, auto-load on SessionStart) with HMAC-verified provenance."
+    }
+  ]
+}
