@@ -133,7 +133,14 @@ cleanup() {
     echo "  restore $settings from $settings_backup (aborted mid-patch, rc=$rc)" >&2
   fi
 }
-trap cleanup EXIT
+# NOT armed here. A piped `curl | bash` executes top-level statements as they
+# parse, and on bash 3.2 a stream that truncates AFTER `trap ... EXIT` is
+# armed exits 0 on the resulting syntax error (set -e + EXIT trap swallow the
+# parse-error status; the trap sees $? = 0, so re-raising doesn't help).
+# Arming instead as the first statement of the dispatch group in 40-main.sh
+# means the trap only takes effect once that whole compound has parsed —
+# truncation anywhere inside it dies with bash's own rc=2, and no work
+# (so nothing needing cleanup) can have run before the trap is live.
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
