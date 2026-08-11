@@ -45,6 +45,23 @@ are appended).
   passed provenance, and loaded into the *next* session as verified
   **binding rules**. The restamp path now re-establishes the writer-only
   bind invariant before signing, and the MAC covers the guarded body.
+- **`--restamp` no longer trusts an in-band heuristic to tell writer
+  regions from smuggled ones (HIGH, H-A).** The bind-region guard above
+  decided a `HANDOFF_BIND_BEGIN` was the writer's own by comparing the
+  *next* line against two published headings — but those strings appear
+  verbatim in every handoff, and the attacker is the model editing the
+  document, so it was bypassable: duplicate the Rules or Pinned heading
+  above Notes, forge a region at the top with a writer heading, or delete
+  the Notes heading with a forged tail region, and the smuggled rules
+  bound. `write_handoff.sh` now records an out-of-band **skeleton HMAC**
+  (a second keyed trailer, `HANDOFF_SKEL_HMAC`) over the document's
+  *structure* minus the two sanctioned edit zones — the Notes body and the
+  writer's own `## Rules` fences. `--restamp` recomputes it and refuses to
+  publish a binding-capable signature when anything structural changed,
+  leaving the document byte-identical so its rules load as reference data
+  (re-run `/handoff` to regenerate). A model authoring fences inside its
+  own Rules region still binds — that zone is sanctioned and excluded from
+  the skeleton; the boundary defended is everything *outside* it.
 - **Symlinked `.claude/handoff_history` exfiltrated session prose (HIGH).**
   Rotation `mv`s the outgoing document into it, so a repo shipping the
   directory as a symlink sent every snapshot outside the repo with nothing

@@ -132,12 +132,23 @@ check "no MAC -> no binding header"      no  "$(has "$out" "$BOUND_HDR")"
 rm -rf "$proj"
 
 # --- Negative control: forged MAC (wrong secret) -> data framing -------------
+# This tests the LOADER's key check: a main HMAC trailer computed under a
+# DIFFERENT secret must not verify against the local one. Since H-A, --restamp
+# no longer re-signs a wrong-secret document (the skeleton stamp won't match
+# under the wrong key, so it refuses and leaves the doc byte-identical — see the
+# dedicated wrong-secret refusal case in test_restamp_skeleton_guard.sh), so we
+# forge the trailer directly rather than routing through --restamp.
 proj="$(mk_handoff_repo)" || exit 1
 must run_wh "$proj" >/dev/null
-# Re-sign with a DIFFERENT secret (the attacker's own), keeping the format valid.
+doc="$proj/.claude/handoff_current.md"
 attacker="$(mktemp -d)"
 printf 'attacker-secret\n' > "$attacker/sec"
-( cd "$proj" && env HANDOFF_SECRET_FILE="$attacker/sec" bash "$WH" --restamp >/dev/null 2>&1 )
+grep -v "^$MAC_PREFIX" "$doc" > "$doc.nomac"
+forged="$( . "$REPO_ROOT/bin/handoff_provenance.sh" \
+  && HANDOFF_SECRET_FILE="$attacker/sec" handoff_mac_compute "$doc.nomac" )"
+must test -n "$forged"
+{ cat "$doc.nomac"; printf '%s%s -->\n' "$MAC_PREFIX" "$forged"; } > "$doc"
+rm -f "$doc.nomac"
 out="$(run_ss "$proj")"
 check "forged MAC -> no binding header"  no  "$(has "$out" "$BOUND_HDR")"
 rm -rf "$attacker" "$proj"
@@ -315,14 +326,21 @@ out="$(run_ss "$proj")"
 check "decoy doc still verifies -> binding"     yes "$(has "$out" "$BOUND_HDR")"
 rm -rf "$proj"
 
-# --- Empty document: signing and --restamp must not choke (grep -v selects
-#     nothing under the caller's pipefail).
+# --- Empty document: --restamp must not choke (grep -v selects nothing under
+#     the caller's pipefail). Since H-A an empty doc carries no skeleton stamp,
+#     so it is treated as a stamp-less legacy document and REFUSED rather than
+#     signed — the fail-closed direction (there is nothing to bind anyway). The
+#     load-bearing assertion is still "does not choke": clean exit 0, file left
+#     byte-identical (empty).
 proj="$(mk_repo)" || exit 1
 must mkdir -p "$proj/.claude"
 : > "$proj/.claude/handoff_current.md"
 out="$( cd "$proj" && env HANDOFF_SECRET_FILE="$proj/.secret" bash "$WH" --restamp 2>&1 )"; rc=$?
 check "empty doc restamp -> exit 0"            0 "$rc"
-check "empty doc restamp -> signed"            1 "$(grep -c '^<!-- HANDOFF_HMAC: ' "$proj/.claude/handoff_current.md" || true)"
+check "empty doc restamp -> refused (legacy), not signed" 0 \
+  "$(grep -c '^<!-- HANDOFF_HMAC: ' "$proj/.claude/handoff_current.md" || true)"
+check "empty doc restamp -> left empty"        0 \
+  "$(LC_ALL=C wc -c < "$proj/.claude/handoff_current.md" | tr -d ' ')"
 rm -rf "$proj"
 
 finish

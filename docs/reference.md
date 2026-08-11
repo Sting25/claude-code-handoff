@@ -283,6 +283,47 @@ write-time signature. The skill therefore runs
 step is skipped, nothing breaks — the next session just loads the
 whole handoff as data, exactly like before this feature existed.
 
+### What re-signing is allowed to cover — the structural stamp
+
+`--restamp` re-signs a document *after* an edit, so it has to answer a
+sharper question than the write-time signature: which edits are
+legitimate curation, and which are an attacker (a model steered by
+prompt injection in something it read) smuggling new binding rules? The
+two rules layers are *meant* to change during curation — the model
+writes prose into the Notes body and fences into its own `## Rules`
+region — but everything else about the document's shape must not.
+
+You can't answer that from in-band text alone. The markers and headings
+that delimit a writer region (`HANDOFF_BIND_BEGIN`, the `## Rules`
+heading) are printed in every handoff, and the model editing the file
+can type them anywhere, so a heuristic like "a `BEGIN` whose next line
+is the Rules heading is the writer's" is bypassable — duplicate that
+heading above Notes, or forge a region at the top, and the smuggled
+rules read as writer-authored.
+
+So the writer records a second, out-of-band **skeleton stamp**: a keyed
+HMAC (`HANDOFF_SKEL_HMAC`, same per-machine secret) over the document's
+*structure* with the two sanctioned edit zones blanked out — the Notes
+body, and the content of the writer's own Rules region. Everything else
+— the preamble, the git snapshot, every heading, the pin region, and
+every BIND-marker *position* — is covered. `--restamp` recomputes it and
+**refuses to publish a binding-capable signature when the structure
+changed**: a bind marker, heading, or section added, moved, or deleted
+outside those two zones. A refusal leaves the file byte-identical, so —
+because the edit already staled the write-time signature — its rules
+load as reference data, and the warning tells you to re-run `/handoff`.
+A document with no skeleton stamp (written before this existed, or with
+the stamp stripped) refuses the same way rather than falling back to the
+old heuristic.
+
+The boundary this draws is deliberate: **a model authoring fences inside
+its own `## Rules` region is a feature, not an attack.** That zone is
+excluded from the skeleton, so writing rules there is exactly what binds
+in the next session. What's defended is everything *outside* the
+sanctioned zones — the document can't grow a *new* rules region, move an
+existing one, or hoist one above the narrative, without the restamp
+noticing and declining to vouch for it.
+
 ## System-log nudge
 
 If your repo keeps a `SYSTEM_LOG.md` (an append-only record of
@@ -360,6 +401,7 @@ to a follow-up. Open question: whether to validate the upload size on
 the client or rely on the server limit. The design doc at
 `docs/design-new-endpoint.md` is the source of truth; next session
 should start by reading it.
+<!-- HANDOFF_SKEL_HMAC: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2 -->
 <!-- HANDOFF_HMAC: 3f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f12 -->
 ````
 
@@ -367,7 +409,10 @@ The auto-snapshot above the `---` is git state — cheap, mechanical,
 always correct. The "Notes from this session" block is the part git
 can't see: decisions, in-flight tracks, open questions. The
 HMAC trailer (`<!-- HANDOFF_HMAC: ... -->`) proves the handoff was
-written locally (see "Trusted rules" above). The `HANDOFF_ROOT` line
+written locally (see "Trusted rules" above); the `HANDOFF_SKEL_HMAC`
+trailer just above it stamps the document's structure minus the two
+sanctioned edit zones, so `--restamp` can tell curation from smuggling
+(see "What re-signing is allowed to cover" above). The `HANDOFF_ROOT` line
 near the top records which project root the writer resolved; the
 SessionStart loader compares it against the root it resolves and warns
 when the two disagree, which is how a moved or renamed project (or a
@@ -530,7 +575,7 @@ is preserved; uninstall only removes entries it can prove are its own.
 │   ├── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
 │   ├── handoff_statusline.sh      # statusLine command: status line + caches CC's own ctx numbers
 │   ├── handoff_compact_reset.sh   # PostCompact hook: resets ctx sidecars for the freed window
-│   └── handoff_provenance.sh      # sourced lib: HMAC signing/verification + BIND-region extraction (issue #42)
+│   └── handoff_provenance.sh      # sourced lib: HMAC signing/verification + BIND-region extraction + structural skeleton stamp (issue #42, H-A)
 ├── skills/
 │   ├── handoff/
 │   │   ├── SKILL.md               # /handoff slash command spec
