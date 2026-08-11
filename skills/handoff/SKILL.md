@@ -68,8 +68,13 @@ nothing gets lost across the restart boundary.
    # installs), cache glob last (plugin installed but env var not visible to
    # skill Bash); the loop's last match takes the lexically-highest version dir.
    [ -n "$hb" ] || echo "MISSING: handoff scripts not installed (neither ~/.claude/bin nor a plugin install found)"
+   echo "handoff-bin: $hb"
    ```
-   Then, if it did not print MISSING, run it:
+   Then, if it did not print MISSING, run it. **Shell state (env vars)
+   does not persist between separate Bash calls** — either run this in
+   the same Bash call as the resolution snippet above (put both on one
+   Bash invocation), or substitute the literal path the preflight
+   printed after `handoff-bin: ` for `$hb` below:
    ```bash
    bash "$hb/write_handoff.sh"
    ```
@@ -170,8 +175,20 @@ nothing gets lost across the restart boundary.
 3. **Re-sign the edited doc.** Your Edit invalidated the two stamp
    trailers `write_handoff.sh` put on the file at write time (the
    `<!-- HANDOFF_HMAC: … -->` and `<!-- HANDOFF_SKEL_HMAC: … -->` lines —
-   leave both alone; they get replaced). Run:
+   leave both alone; they get replaced). This is a fresh Bash call, far
+   from Step 1's resolution — shell state doesn't carry over, so
+   re-resolve `$hb` here rather than assuming it's still set:
    ```bash
+   hb=""
+   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
+     hb="${CLAUDE_PLUGIN_ROOT}/bin"
+   elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
+     hb="$HOME/.claude/bin"
+   else
+     for d in "$HOME"/.claude/plugins/cache/*/claude-code-handoff/*/bin; do
+       [ -f "$d/write_handoff.sh" ] && hb="$d"
+     done
+   fi
    bash "$hb/write_handoff.sh" --restamp
    ```
    This re-signs `handoff_current.md` in place with the per-machine

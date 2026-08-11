@@ -59,7 +59,10 @@ before each new write.
    # installs), cache glob last (plugin installed but env var not visible to
    # skill Bash); the loop's last match takes the lexically-highest version dir.
    [ -n "$hb" ] || echo "MISSING: handoff scripts not installed (neither ~/.claude/bin nor a plugin install found)"
+   echo "handoff-bin: $hb"
    ```
+   (This skill only reads directories — `$hb` isn't invoked elsewhere
+   in this file, so there's no cross-call persistence concern here.)
    If it prints MISSING, stop and tell the user to clone
    https://github.com/Sting25/claude-code-handoff and run `./install.sh`
    (or install the plugin) — don't try to substitute for the missing

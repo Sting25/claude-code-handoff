@@ -71,7 +71,15 @@ fi
 # installs), cache glob last (plugin installed but env var not visible to
 # skill Bash); the loop's last match takes the lexically-highest version dir.
 [ -n "$hb" ] || echo "MISSING: handoff scripts not installed (neither ~/.claude/bin nor a plugin install found)"
+echo "handoff-bin: $hb"
 ```
+
+**Shell state (env vars) does not persist between separate Bash
+calls.** `$hb` is used again in steps 2 and 7 below, each a fresh Bash
+call — those blocks re-resolve `$hb` themselves rather than assuming
+it survives from here, so they're safe to run standalone. If you ever
+copy just one of those blocks in isolation, you can alternatively
+substitute the literal path this preflight printed after `handoff-bin: `.
 
 If it prints MISSING, **stop here** — tell the user to clone
 https://github.com/Sting25/claude-code-handoff and run `./install.sh`
@@ -135,9 +143,21 @@ final turns.
    JSONL. That last turn is often the most valuable thing to recover
    ("what I was about to do next"). The dump alone silently loses it.
 
-   Run the recovery helper to surface anything the dump missed:
+   Run the recovery helper to surface anything the dump missed. This is
+   a fresh Bash call, separate from the preflight above — re-resolve
+   `$hb` here rather than assuming it's still set:
 
    ```bash
+   hb=""
+   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
+     hb="${CLAUDE_PLUGIN_ROOT}/bin"
+   elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
+     hb="$HOME/.claude/bin"
+   else
+     for d in "$HOME"/.claude/plugins/cache/*/claude-code-handoff/*/bin; do
+       [ -f "$d/write_handoff.sh" ] && hb="$d"
+     done
+   fi
    bash "$hb/handoff_recover_tail.sh" <previous_session_id>
    ```
 
@@ -209,8 +229,20 @@ final turns.
 7. **Re-sign the edited handoff.** Your Edit invalidated the HMAC
    trailer `write_handoff.sh` wrote on the file, which would silently
    demote the pinned/rules blocks from binding to reference data for
-   every subsequent session. Re-stamp it:
+   every subsequent session. This is a fresh Bash call, far from the
+   preflight above — re-resolve `$hb` here rather than assuming it's
+   still set. Re-stamp it:
    ```bash
+   hb=""
+   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
+     hb="${CLAUDE_PLUGIN_ROOT}/bin"
+   elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
+     hb="$HOME/.claude/bin"
+   else
+     for d in "$HOME"/.claude/plugins/cache/*/claude-code-handoff/*/bin; do
+       [ -f "$d/write_handoff.sh" ] && hb="$d"
+     done
+   fi
    bash "$hb/write_handoff.sh" --restamp
    ```
    Best-effort — if it warns (no openssl, older install), continue; the
