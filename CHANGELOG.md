@@ -10,7 +10,7 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
-## [Unreleased]
+## [0.14.0] — 2026-08-11
 
 ### Added — plugin packaging (v0.14.0)
 - **Plugin manifest.** `.claude-plugin/plugin.json` declares the
