@@ -142,4 +142,38 @@ check "guard failure: curated prose survives"        yes \
 check "guard failure: no success path on stdout"     ""  "$out5"
 check "guard failure: still exits 0 (best-effort)"   0   "$rc5"
 
+# --- 6. A NUL byte in the document must not corrupt-then-sign it (L-C) ------
+# handoff_guard_bind_regions runs on awk, and BSD/macOS awk silently
+# truncates a line at its first NUL byte instead of erroring — so a NUL
+# anywhere in the document (a stray binary byte, a paste, prompt-injected
+# content) makes the guard emit a silently-shortened body. When the NUL and
+# everything after it fall on one line, one line goes in and one (shorter)
+# line comes out, so the line-count invariant in case 5 does NOT catch it —
+# this path would sign a fresh, valid HMAC over the corrupted bytes and
+# publish: corruption that verifies as authentic. The fix detects the NUL
+# byte up front and refuses, same shape as case 5 (unchanged file, stderr
+# warning, no stdout, exit 0).
+proj6="$(mk_repo)" || exit 1
+cleanup_on_exit "$proj6"
+( cd "$proj6" && CLAUDE_PROJECT_DIR="$proj6" bash "$REPO_ROOT/bin/write_handoff.sh" \
+    >/dev/null 2>&1 </dev/null )
+doc6="$proj6/.claude/handoff_current.md"
+must test -f "$doc6"
+# Append a line whose tail sits after a raw NUL byte — the exact shape BSD/
+# macOS awk truncates. `cat`+`printf` is used (not awk/sed) so the NUL
+# actually lands on disk rather than being mangled by the setup step itself.
+must bash -c "{ cat '$doc6'; printf 'NUL_BEFORE\000NUL_AFTER_TRUNCATED\n'; } > '$doc6.new'"
+must mv "$doc6.new" "$doc6"
+before6="$(cksum "$doc6")"
+out6="$( cd "$proj6" && CLAUDE_PROJECT_DIR="$proj6" \
+    bash "$REPO_ROOT/bin/write_handoff.sh" --restamp \
+    </dev/null 2>"$proj6/err6" )"; rc6=$?
+err6="$(cat "$proj6/err6")"
+after6="$(cksum "$doc6")"
+check "NUL byte: refusal message on stderr" yes \
+  "$(printf '%s' "$err6" | LC_ALL=C grep -qi 'NUL byte' && echo yes || echo no)"
+check "NUL byte: document left byte-identical"       "$before6" "$after6"
+check "NUL byte: no success path on stdout"          ""  "$out6"
+check "NUL byte: still exits 0 (best-effort)"        0   "$rc6"
+
 finish

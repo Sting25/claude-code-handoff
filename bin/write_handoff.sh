@@ -501,6 +501,40 @@ if (( RESTAMP )); then
     echo "write_handoff.sh: --restamp: $handoff_relpath disappeared while waiting for the write lock; nothing done." >&2
     exit 0
   fi
+  # NUL-byte guard, checked BEFORE the bind-region guard ever sees the
+  # document. handoff_guard_bind_regions runs on awk, and BSD/macOS awk
+  # silently truncates a line at its first NUL byte instead of erroring or
+  # preserving the rest — so a NUL anywhere in the document (a stray binary
+  # byte, a paste, prompt-injected content) would make the guard emit a
+  # silently-shortened body. Unlike the line-count check below (which catches
+  # a truncated OUTPUT), this would NOT trip that invariant when the NUL and
+  # everything after it on its line falls entirely within one line: one line
+  # goes in, one (shorter) line comes out, so line counts still match. This
+  # path then signs a valid fresh HMAC over the corrupted bytes and PUBLISHES
+  # it — the corruption verifies as authentic to every downstream reader.
+  # Refuse up front instead, using the same refusal shape as the line-count
+  # check: the file is left byte-identical, a warning goes to stderr, and the
+  # write exits 0 carrying a stale-but-honest signature (loads as reference
+  # data, not binding) rather than a fresh signature over corrupted content.
+  #
+  # Portable NUL detection (bash 3.2, BSD + GNU): compare the file's raw byte
+  # count against its byte count with NUL bytes stripped. `wc -c` counts
+  # every byte, NUL included, on both BSD and GNU; `LC_ALL=C tr -d '\0'`
+  # removes NUL bytes on both. Equal counts means no NUL was present; a
+  # mismatch means at least one was. `wc -l` cannot substitute here — a NUL
+  # does not change newline counts either way, so it would miss this entirely
+  # (verified: macOS /usr/bin/awk drops "line two\x00rest" down to "line
+  # two", losing 17 bytes with the line count unchanged).
+  raw_bytes="$(LC_ALL=C wc -c < "$handoff_path" | tr -d ' ')"
+  stripped_bytes="$(LC_ALL=C tr -d '\0' < "$handoff_path" | LC_ALL=C wc -c | tr -d ' ')"
+  if [[ "$raw_bytes" != "$stripped_bytes" ]]; then
+    echo "write_handoff.sh: --restamp: $handoff_relpath contains a NUL byte, which BSD/macOS awk silently truncates a line at — refusing to restamp. $handoff_relpath is unchanged and keeps its previous signature; its rules load as reference data, not binding. Remove the NUL byte (or any binary content) and re-run /handoff." >&2
+    if (( write_lock_held )); then
+      rmdir "$write_lock_dir" 2>/dev/null || true
+      write_lock_held=0
+    fi
+    exit 0
+  fi
   # Build the body to be signed, THEN sign it — the document has been edited
   # since it was written (that is why a restamp is needed), so the bytes must
   # be brought back under the writer-only bind invariant before a signature
