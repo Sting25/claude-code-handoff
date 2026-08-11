@@ -1,35 +1,51 @@
 #!/usr/bin/env bash
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
-# What it does:
-#   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
-#      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
-#   2. Patches ~/.claude/settings.json to add six hooks
-#      (SessionStart / SessionEnd / PreCompact / PostCompact / Stop /
-#      UserPromptSubmit), six permission entries, and — only when you
-#      don't already have one — a statusLine command (never overwrites
-#      an existing statusLine; prints the manual step instead).
-#      Requires jq; falls back to printing the snippet if jq is missing.
-#
-# Idempotent. Existing files at symlink targets are backed up to
-# <path>.bak.<timestamp> before being replaced. Existing settings.json
-# is backed up the same way before any patch. Re-runs are safe and only
-# touch what's actually missing.
-#
-# Installing from a volatile path (a /tmp worktree, git-archive extract, CI
-# scratch) auto-switches to copy mode, since symlinks into it would dangle once
-# it's cleaned up and the hooks would then fail silently. Override with --link.
-#
-# Usage:
-#   ./install.sh              # install (symlink from a persistent clone, else copy)
-#   ./install.sh --copy       # force copy mode (good for ephemeral sources)
-#   ./install.sh --link       # force symlinks even from a volatile path
-#   ./install.sh --model 'opus[1m]'  # also pin "model" in settings.json (env: HANDOFF_MODEL)
-#   ./install.sh --doctor     # report any dangling/missing installed hooks
-#   ./install.sh --uninstall  # remove symlinks + strip patched entries
-#   ./install.sh --help
+# Full behavior/usage summary lives in usage() below — that heredoc is the
+# single source of truth for `install.sh --help`, so it stays in sync with
+# reality by construction instead of by discipline. Read it there, or just
+# run `./install.sh --help`.
 
 set -euo pipefail
+
+# Usage text for --help / -h. A heredoc (not a self-read of this file's
+# comments) so it works no matter how the script's bytes arrived: piped in
+# via `curl ... | bash -s -- --help`, BASH_SOURCE[0] is "bash" (there is no
+# real path to sed), so a self-read prints nothing. A heredoc is parsed out
+# of the script text itself and needs no path or working stdin.
+usage() {
+  cat <<'USAGE'
+install.sh — wire this repo's handoff skill into ~/.claude/.
+
+What it does:
+  1. Symlinks (or copies, where symlinks aren't available — e.g. Git
+     Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
+  2. Patches ~/.claude/settings.json to add six hooks
+     (SessionStart / SessionEnd / PreCompact / PostCompact / Stop /
+     UserPromptSubmit), six permission entries, and — only when you
+     don't already have one — a statusLine command (never overwrites
+     an existing statusLine; prints the manual step instead).
+     Requires jq; falls back to printing the snippet if jq is missing.
+
+Idempotent. Existing files at symlink targets are backed up to
+<path>.bak.<timestamp> before being replaced. Existing settings.json
+is backed up the same way before any patch. Re-runs are safe and only
+touch what's actually missing.
+
+Installing from a volatile path (a /tmp worktree, git-archive extract, CI
+scratch) auto-switches to copy mode, since symlinks into it would dangle once
+it's cleaned up and the hooks would then fail silently. Override with --link.
+
+Usage:
+  ./install.sh              # install (symlink from a persistent clone, else copy)
+  ./install.sh --copy       # force copy mode (good for ephemeral sources)
+  ./install.sh --link       # force symlinks even from a volatile path
+  ./install.sh --model 'opus[1m]'  # also pin "model" in settings.json (env: HANDOFF_MODEL)
+  ./install.sh --doctor     # report any dangling/missing installed hooks
+  ./install.sh --uninstall  # remove symlinks + strip patched entries
+  ./install.sh --help
+USAGE
+}
 
 # Everything this installer creates under $claude_home — settings.json and its
 # backups, the bin/skills copies (copy-mode installs), and the dirs themselves —
@@ -133,7 +149,7 @@ while [[ $# -gt 0 ]]; do
       model_pin="$2"; shift ;;
     --model=*)   model_pin="${1#--model=}" ;;
     --help|-h)
-      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
+      usage
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
