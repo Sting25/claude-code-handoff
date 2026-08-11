@@ -924,13 +924,33 @@ unpatch_settings() {
   fi
 }
 
+# Locate an installed plugin form of this tool (v0.14.0+ ships one), if any.
+# Plugin installs live under $HOME/.claude/plugins/cache/<marketplace>/
+# claude-code-handoff/<version>/ — NOTE: this is ALWAYS under $HOME, never
+# under a CLAUDE_HOME override, since the plugin loader has no concept of
+# this installer's CLAUDE_HOME convention. Bash 3.2 has no nullglob, so a
+# non-matching glob expands to its own literal (unexpanded) pattern text; the
+# `-d` test below simply never passes for that literal string, which is what
+# makes this safe without nullglob or an array/compgen dependency. Echoes the
+# first matching directory on stdout and returns 0, or returns 1 if none.
+find_plugin_cache_dir() {
+  local pd
+  for pd in "$HOME"/.claude/plugins/cache/*/claude-code-handoff; do
+    if [[ -d "$pd" ]]; then
+      printf '%s\n' "$pd"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Self-check: verify each installed hook script under $claude_home/bin actually
 # resolves. A dangling symlink (e.g. installed from a temp checkout that was
 # later cleaned up) makes the corresponding hook no-op silently, so surface it
 # loudly here. Exit non-zero if anything is broken so CI / a wrapper can detect
 # it. (issue #21)
 doctor() {
-  local broken=0 dst tgt name mdl secret smode
+  local broken=0 dst tgt name mdl secret smode plugin_dir script_hooks_present
   echo "doctor: checking installed handoff hooks under $claude_home/bin"
   # jq is a RUNTIME dependency of the Stop hook (payload parsing), the ctx
   # nudge, and the /handoff-recover tail rescue — a resolving script link is
@@ -1025,6 +1045,31 @@ doctor() {
     esac
     echo
   fi
+  # Plugin/script coexistence (v0.14.0+ ships a plugin form of this tool).
+  # Plugin hooks and these script-install hooks COEXIST — Claude Code fires
+  # both, no dedup — so a machine with both installed double-fires every
+  # hook. Advisory only: never counts toward `broken`, same as the model and
+  # statusLine checks above, since neither installed form is itself faulty.
+  if plugin_dir="$(find_plugin_cache_dir)"; then
+    script_hooks_present=0
+    if command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
+       && jq -e --arg m "$ss_marker" \
+            '(.hooks.SessionStart // []) | any(.. | .command? // "" | contains($m))' \
+            "$settings" >/dev/null 2>&1; then
+      script_hooks_present=1
+    fi
+    if (( script_hooks_present )); then
+      echo "  WARN    plugin install detected ($plugin_dir) AND this installer's"
+      echo "          script hooks are wired in $settings — every hook fires TWICE"
+      echo "          (Claude Code does not dedupe plugin vs. script hooks). Fix: pick"
+      echo "          one mode — either '/plugin uninstall claude-code-handoff' or"
+      echo "          './install.sh --uninstall'."
+    else
+      echo "  info    plugin install detected ($plugin_dir) — this installer's doctor"
+      echo "          does not manage plugin installs; nothing to do here."
+    fi
+    echo
+  fi
   if (( broken )); then
     echo "doctor: $broken hook(s) broken or missing." >&2
     echo "        Re-run ./install.sh from a persistent clone (not a /tmp checkout)." >&2
@@ -1065,6 +1110,17 @@ elif [[ "$mode" == install ]]; then
      && jq -e 'type == "object" and ((.model // null) == null)' "$settings" >/dev/null 2>&1; then
     echo "NOTE: no model pinned in settings.json — a bare 'opus' selection runs at a"
     echo "      200k context window. Re-run  ./install.sh --model 'opus[1m]'  to pin one."
+    echo
+  fi
+  # Plugin/script coexistence heads-up (v0.14.0+ ships a plugin form of this
+  # tool) — see find_plugin_cache_dir's comment for why this checks $HOME and
+  # not $claude_home. Informational only; the install itself proceeds exactly
+  # as it always has.
+  plugin_cache_dir=""
+  if plugin_cache_dir="$(find_plugin_cache_dir)"; then
+    echo "NOTE: a plugin install of this tool was detected ($plugin_cache_dir)."
+    echo "      Installing the script mode too will double-fire every hook —"
+    echo "      Claude Code runs both plugin and script hooks, no dedup."
     echo
   fi
   echo "done. start a new Claude Code session — /handoff is available now."
