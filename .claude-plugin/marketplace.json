@@ -1,5 +1,6 @@
 {
   "name": "claude-code-handoff",
+  "description": "Session-state handoff between Claude Code sessions: hooks snapshot a curated handoff at SessionEnd/PreCompact and reload it at SessionStart, with HMAC-verified provenance separating trusted local rules from untrusted narrative.",
   "owner": {
     "name": "Christopher Chadwick",
     "url": "https://github.com/Sting25"
