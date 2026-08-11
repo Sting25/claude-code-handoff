@@ -173,6 +173,48 @@ check "dir at archive name: directory left traversable (not chmod 600'd)" yes \
   "$([[ -x "$hist/handoff_2020-03-04_050607.md" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- L-A: rotation exhaustion must not clobber an existing archive ----------
+# After 50 same-second collisions the loop falls through to a loud,
+# unprotected `mv` (no -n) so a REAL errno (EPERM, ENOSPC) surfaces instead of
+# spinning forever. But claimable_archive_name returns true for BOTH "the
+# name is free" and "the name is an existing regular file" (that's what makes
+# it a valid `mv -n` target inside the loop) — the exhaustion branch only
+# re-checked claimable_archive_name, so when the 50th candidate is an
+# existing REGULAR FILE (a real, already-archived handoff — not a directory
+# or fifo), the loud fallback `mv` silently overwrote it. Pre-creating all 50
+# candidate names as regular files forces every `mv -n` in the loop to skip
+# (destination already exists), driving the loop to exhaustion with the 50th
+# candidate itself a real archive.
+repo="$(mk_repo_gitignored)"
+hist="$repo/.claude/handoff_history"; must mkdir -p "$hist"
+must cat > "$repo/.claude/handoff_current.md" <<'EOF'
+# h
+
+## Notes from this session
+
+curated notes MARKER_EXHAUST_SRC
+EOF
+touch -d "2020-03-04T05:06:07Z" "$repo/.claude/handoff_current.md"   # ISO T/Z form: GNU + BSD
+for i in $(seq 1 50); do
+  if [[ "$i" -eq 1 ]]; then
+    name="handoff_2020-03-04_050607.md"
+  else
+    name="handoff_2020-03-04_050607_${i}.md"
+  fi
+  echo "existing archive $i MARKER_EXHAUST_$i" > "$hist/$name"
+done
+rc=0
+err="$( cd "$repo" && bash "$WH" 2>&1 >/dev/null )" || rc=$?
+check "exhaustion: aborts rather than silently succeeding" 1 "$rc"
+check "exhaustion: refusal message on stderr" yes "$(has "$err" "refusing")"
+check "exhaustion: 50th archive survives untouched" yes \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607_50.md" 2>/dev/null)" "MARKER_EXHAUST_50")"
+check "exhaustion: 50th archive NOT clobbered with source content" no \
+  "$(has "$(cat "$hist/handoff_2020-03-04_050607_50.md" 2>/dev/null)" "MARKER_EXHAUST_SRC")"
+check "exhaustion: source handoff_current.md left unrotated (curated content intact)" yes \
+  "$(has "$(cat "$repo/.claude/handoff_current.md" 2>/dev/null)" "MARKER_EXHAUST_SRC")"
+rm -rf "$repo"
+
 # --- Invalid HANDOFF_HISTORY_KEEP falls back to 5 (no history wipe) ----------
 # Regression: KEEP=-1 made prune run `tail -n +0`, which on GNU deletes EVERY
 # history file (silent data loss). A negative/garbage value must clamp to the

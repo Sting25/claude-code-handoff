@@ -793,17 +793,30 @@ rotate_existing_handoff() {
     fi
     attempts=$((attempts + 1))
     if (( attempts >= 50 )); then
-      # Out of attempts. If the name is claimable, the blocker is a real errno,
-      # so move LOUDLY and let set -e surface it. If it is not, moving is the
-      # corruption described above — abort the whole write instead. Aborting is
-      # the safe direction: the publish below never runs, so handoff_current.md
-      # keeps its curated prose (unrotated) rather than being overwritten by a
-      # mechanical snapshot whose predecessor we just failed to archive.
+      # Out of attempts. If the name is truly FREE (nothing at all there), the
+      # blocker is a real errno (EPERM, ENOSPC, ...), so move LOUDLY and let
+      # set -e surface it — that is what this fallback exists for. But
+      # claimable_archive_name also returns true for an EXISTING REGULAR FILE
+      # (that's what makes it a valid `mv -n` target inside the loop above),
+      # and that case must NOT reach the unprotected mv: without `-n` it would
+      # silently overwrite a real, already-archived handoff — exactly the
+      # clobber this rotation exists to prevent. So re-check narrowly for
+      # "truly free" before dropping to the loud mv; a non-free claimable name
+      # (an existing archive) aborts instead, same direction as the
+      # non-claimable (directory/fifo) case below. Aborting is the safe
+      # direction either way: the publish below never runs, so
+      # handoff_current.md keeps its curated prose (unrotated) rather than
+      # being overwritten by a mechanical snapshot whose predecessor we just
+      # failed to archive.
       if ! claimable_archive_name "$candidate"; then
         echo "write_handoff.sh: cannot rotate $handoff_relpath — 50 candidate names under $history_relpath are occupied by non-files; refusing to move the handoff into one. Clear them and re-run." >&2
         exit 1
       fi
-      mv "$handoff_path" "$candidate"        # loud; aborts under set -e on a real error
+      if [[ -e "$candidate" || -L "$candidate" ]]; then
+        echo "write_handoff.sh: cannot rotate $handoff_relpath — 50 candidate names under $history_relpath already exist as archived handoffs; refusing to overwrite $candidate. Clear stale names, raise HANDOFF_HISTORY_KEEP, or re-run later." >&2
+        exit 1
+      fi
+      mv "$handoff_path" "$candidate"        # candidate confirmed free; loud on a real errno
       break
     fi
     n=$((n + 1))
