@@ -65,7 +65,7 @@ if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_han
 elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
   hb="$HOME/.claude/bin"
 else
-  for d in "$HOME"/.claude/plugins/cache/*/claude-code-handoff/*/bin; do
+  for d in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff/*/bin; do
     [ -f "$d/write_handoff.sh" ] && hb="$d"
   done
 fi
@@ -156,7 +156,7 @@ final turns.
    elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
      hb="$HOME/.claude/bin"
    else
-     for d in "$HOME"/.claude/plugins/cache/*/claude-code-handoff/*/bin; do
+     for d in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff/*/bin; do
        [ -f "$d/write_handoff.sh" ] && hb="$d"
      done
    fi
@@ -241,7 +241,7 @@ final turns.
    elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
      hb="$HOME/.claude/bin"
    else
-     for d in "$HOME"/.claude/plugins/cache/*/claude-code-handoff/*/bin; do
+     for d in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff/*/bin; do
        [ -f "$d/write_handoff.sh" ] && hb="$d"
      done
    fi

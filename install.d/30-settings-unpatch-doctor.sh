@@ -204,17 +204,20 @@ unpatch_settings() {
 }
 
 # Locate an installed plugin form of this tool (v0.14.0+ ships one), if any.
-# Plugin installs live under $HOME/.claude/plugins/cache/<marketplace>/
-# claude-code-handoff/<version>/ — NOTE: this is ALWAYS under $HOME, never
-# under a CLAUDE_HOME override, since the plugin loader has no concept of
-# this installer's CLAUDE_HOME convention. Bash 3.2 has no nullglob, so a
+# Plugin installs live under $CLAUDE_CONFIG_DIR/plugins/cache/<marketplace>/
+# claude-code-handoff/<version>/, falling back to $HOME/.claude when
+# CLAUDE_CONFIG_DIR is unset — that's Claude Code's OWN env var for where it
+# keeps its config/cache, unrelated to this installer's CLAUDE_HOME
+# convention. NOTE: this is never under a CLAUDE_HOME override — the plugin
+# loader has no concept of this installer's CLAUDE_HOME convention, only of
+# Claude Code's own CLAUDE_CONFIG_DIR. Bash 3.2 has no nullglob, so a
 # non-matching glob expands to its own literal (unexpanded) pattern text; the
 # `-d` test below simply never passes for that literal string, which is what
 # makes this safe without nullglob or an array/compgen dependency. Echoes the
 # first matching directory on stdout and returns 0, or returns 1 if none.
 find_plugin_cache_dir() {
   local pd
-  for pd in "$HOME"/.claude/plugins/cache/*/claude-code-handoff; do
+  for pd in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff; do
     if [[ -d "$pd" ]]; then
       printf '%s\n' "$pd"
       return 0

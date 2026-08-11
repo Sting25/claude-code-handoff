@@ -179,7 +179,7 @@ it gets wired differs by install mode:
   optional paste into `~/.claude/settings.json`:
 
   ```json
-  "statusLine": { "type": "command", "command": "bash \"$(ls -td \"$HOME\"/.claude/plugins/cache/*/claude-code-handoff/*/bin/handoff_statusline.sh 2>/dev/null | head -1)\" 2>/dev/null" }
+  "statusLine": { "type": "command", "command": "bash \"$(ls -td \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"/plugins/cache/*/claude-code-handoff/*/bin/handoff_statusline.sh 2>/dev/null | head -1)\" 2>/dev/null" }
   ```
 
   `ls -td` picks the newest cached plugin version by directory mtime,
