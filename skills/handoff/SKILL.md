@@ -126,6 +126,14 @@ nothing gets lost across the restart boundary.
    move the markers, and do not put narrative inside them — every line
    there will be treated as a standing rule.
 
+   Writing fences *inside* the existing Rules markers is the sanctioned
+   edit — that region is the one place model-authored rules are meant to
+   bind. But **do not add, move, or duplicate the markers themselves, or
+   the headings, or reorder sections.** The re-sign step (Step 3) records
+   the document's structure and refuses to vouch for a document whose
+   marker/heading/section shape changed outside the Notes and Rules bodies;
+   if that happens your rules silently drop to reference data.
+
    **Write state claims as checks, not verdicts.** When a Note asserts
    something the next session will rely on ("the migration is done", "X
    is wired up"), phrase it as the check that *proves* it, not the
@@ -135,9 +143,10 @@ nothing gets lost across the restart boundary.
    already proves (HEAD, branch, pushed commits) lives in the snapshot
    above — don't restate it as a verdict here.
 
-3. **Re-sign the edited doc.** Your Edit invalidated the HMAC stamp
-   `write_handoff.sh` put on the file at write time (the trailer line
-   `<!-- HANDOFF_HMAC: … -->` — leave it alone; it gets replaced). Run:
+3. **Re-sign the edited doc.** Your Edit invalidated the two stamp
+   trailers `write_handoff.sh` put on the file at write time (the
+   `<!-- HANDOFF_HMAC: … -->` and `<!-- HANDOFF_SKEL_HMAC: … -->` lines —
+   leave both alone; they get replaced). Run:
    ```bash
    bash ~/.claude/bin/write_handoff.sh --restamp
    ```
@@ -145,6 +154,20 @@ nothing gets lost across the restart boundary.
    secret so the next session loads the Rules/pinned blocks as binding.
    Best-effort: if it warns (no openssl, older install), continue — the
    handoff still works, the rules just load as reference data.
+
+   **What re-signing will and won't vouch for.** `--restamp` only re-signs
+   as binding when the document's *structure* is unchanged since it was
+   written — the same structure it recorded in the `HANDOFF_SKEL_HMAC`
+   stamp. You are meant to edit exactly two zones: the **Notes body** and
+   the content **inside the writer's own `## Rules` region** (replacing the
+   `HANDOFF_RULES_PLACEHOLDER` comment with fences). Editing only those is
+   what a normal curation does, and it re-signs cleanly. If instead a
+   `HANDOFF_BIND_BEGIN`/`END` marker, a section heading, or a whole section
+   has been added, moved, or deleted *outside* those zones, `--restamp`
+   refuses and leaves the file byte-identical (its rules then load as
+   reference data). If you see that refusal, do **not** try to hand-fix the
+   markers — re-run `write_handoff.sh` to regenerate a fresh, structurally-
+   stamped document and curate that.
 
 4. **Verify the raw dump.** The `Stop` hook has been appending to
    `<repo-root>/.claude/handoff_backups/handoff_raw_<session_id>.md`
