@@ -16,21 +16,6 @@ run_sl() {  # <repo> <payload-json> [ENV=VAL ...]
 
 has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 
-# A PATH that mirrors the real one but omits a single tool (to force the
-# degraded path). Same idiom as test_portability.sh.
-path_without() {
-  local drop="$1" shim d f b
-  shim="$(mktemp -d)"
-  for d in ${PATH//:/ }; do
-    [[ -d "$d" ]] || continue
-    for f in "$d"/*; do
-      b="$(basename "$f")"
-      [[ "$b" == "$drop" ]] && continue
-      [[ -e "$shim/$b" ]] || ln -s "$f" "$shim/$b" 2>/dev/null || true
-    done
-  done
-  printf '%s\n' "$shim"
-}
 
 echo "handoff_statusline.sh — line rendering + sl cache"
 

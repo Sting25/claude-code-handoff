@@ -141,3 +141,24 @@ mk_repo() {
   fi
   printf '%s\n' "$d"
 }
+
+# Build a PATH shim dir symlinking everything on PATH except the named tool,
+# so a test can run its subject with that tool genuinely absent (a failing
+# stub is not enough when the subject probes `command -v`). Iterates PATH
+# with IFS=':' — the ${PATH//:/ } word-split the per-file copies used broke
+# on entries containing spaces (real on macOS app-bundle paths), silently
+# leaving the shim incomplete. Caller cleans up the returned mktemp dir.
+path_without() {
+  local drop="$1" shim d f b
+  shim="$(mktemp -d)"
+  local IFS=':'
+  for d in $PATH; do
+    [[ -d "$d" ]] || continue
+    for f in "$d"/*; do
+      b="$(basename "$f")"
+      [[ "$b" == "$drop" ]] && continue
+      [[ -e "$shim/$b" ]] || ln -s "$f" "$shim/$b" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$shim"
+}

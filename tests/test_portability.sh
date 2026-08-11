@@ -12,20 +12,6 @@ WH="$REPO_ROOT/bin/write_handoff.sh"
 command -v jq   >/dev/null 2>&1 || { echo "install.sh"; skip "jq missing";   finish; exit; }
 command -v perl >/dev/null 2>&1 || { skip "perl missing — Stop hook needs it"; finish; exit; }
 
-# A PATH that mirrors the real one but omits a single tool (to force a fallback).
-path_without() {
-  local drop="$1" shim d f b
-  shim="$(mktemp -d)"
-  for d in ${PATH//:/ }; do
-    [[ -d "$d" ]] || continue
-    for f in "$d"/*; do
-      b="$(basename "$f")"
-      [[ "$b" == "$drop" ]] && continue
-      [[ -e "$shim/$b" ]] || ln -s "$f" "$shim/$b" 2>/dev/null || true
-    done
-  done
-  printf '%s\n' "$shim"
-}
 
 run_turn() {  # <repo> <session_id> <transcript> [PATH override]
   local repo="$1" sid="$2" tx="$3" pathov="${4:-$PATH}"
