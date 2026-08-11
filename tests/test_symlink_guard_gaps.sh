@@ -114,4 +114,78 @@ must bash -c "printf '%s\n' '# curated' 'ROTATE_ME' > '$proj6/.claude/handoff_cu
 rotated="$(find "$proj6/.claude/handoff_history" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
 check "real history dir: snapshot archived"          1   "$rotated"
 
+# ===========================================================================
+echo "L-10 — ctx_check and compact_reset refuse symlinked parents too"
+
+# These two were the holdouts in the guard sweep: handoff_turn_append.sh and
+# handoff_statusline.sh have always refused a symlinked `.claude` or
+# `handoff_backups`, ctx_check guarded only its individual flag writes, and
+# compact_reset — whose entire job is deleting files — guarded nothing. Added
+# in the v0.13.0 LOW cluster, and initially with NO coverage anywhere in the
+# suite: a mutation pass that disabled both guards left every test green.
+# compact_reset is the one that can destroy data through the link, so it gets
+# the destructive fixture.
+if command -v jq >/dev/null 2>&1; then
+  CC="$REPO_ROOT/bin/handoff_ctx_check.sh"
+  CR="$REPO_ROOT/bin/handoff_compact_reset.sh"
+  sid="symguard1"
+
+  # --- compact_reset: must not delete through a symlinked .claude ---
+  cr_victim="$(mktemp -d)"; cleanup_on_exit "$cr_victim"
+  must mkdir -p "$cr_victim/handoff_backups"
+  # Names the hook deletes verbatim, planted in the victim directory.
+  for n in ".ctx_$sid" ".ctx_tokens_$sid" ".ctx_flagged_$sid" ".ctx_sl_$sid"; do
+    must bash -c "printf 'VICTIM\n' > '$cr_victim/handoff_backups/$n'"
+  done
+  before="$(find "$cr_victim/handoff_backups" -type f | wc -l | tr -d ' ')"
+  check "fixture planted 4 victim sidecars" 4 "$before"
+  crp="$(mk_repo)" || exit 1
+  cleanup_on_exit "$crp"
+  must ln -s "$cr_victim" "$crp/.claude"
+  ( cd "$crp" && bash "$CR" <<<"{\"session_id\":\"$sid\"}" >/dev/null 2>&1 ); rc=$?
+  after="$(find "$cr_victim/handoff_backups" -type f | wc -l | tr -d ' ')"
+  check "compact_reset: victim files NOT deleted through the link" 4 "$after"
+  check "compact_reset: still exits 0 (hook discipline)"           0 "$rc"
+
+  # --- ctx_check: must not write sidecars or nudge through a symlinked
+  #     .claude. The fixture has to be one the hook actually REACHES: it
+  #     exits at `[[ -f "$size_file" ]] || exit 0` when no prior .ctx_<sid>
+  #     exists, so an empty victim directory proves nothing (an earlier
+  #     version of this test made exactly that mistake and passed against
+  #     the unguarded code). Seed a tiny prior size against a large
+  #     transcript so the threshold is crossed and the nudge fires.
+  cc_victim="$(mktemp -d)"; cleanup_on_exit "$cc_victim"
+  must mkdir -p "$cc_victim/handoff_backups"
+  must bash -c "printf '10' > '$cc_victim/handoff_backups/.ctx_$sid'"
+  must bash -c "printf 'tokens=900\n' > '$cc_victim/handoff_backups/.ctx_sl_$sid'"
+  ccp="$(mk_repo)" || exit 1
+  cleanup_on_exit "$ccp"
+  must bash -c "head -c 200000 /dev/zero | tr '\\0' 'x' > '$ccp/tx.jsonl'"
+  must ln -s "$cc_victim" "$ccp/.claude"
+  out_cc="$( cd "$ccp" && env HANDOFF_CTX_WINDOW_TOKENS=1000 bash "$CC" \
+      <<<"{\"session_id\":\"$sid\",\"transcript_path\":\"$ccp/tx.jsonl\"}" \
+      2>/dev/null )"; rc2=$?
+  # Unguarded this lands a new .ctx_flagged_<sid> in the victim directory and
+  # emits a nudge built from the victim's cached numbers.
+  wrote="$(find "$cc_victim" -type f 2>/dev/null | wc -l | tr -d ' ')"
+  check "ctx_check: no new sidecar written through the link"       2 "$wrote"
+  check "ctx_check: no flag file in the victim dir"                no \
+    "$([[ -f "$cc_victim/handoff_backups/.ctx_flagged_$sid" ]] && echo yes || echo no)"
+  check "ctx_check: emits nothing off the victim's data"           ""  "$out_cc"
+  check "ctx_check: still exits 0 (hook discipline)"               0 "$rc2"
+
+  # --- Control: with a REAL .claude, both still do their jobs ---
+  ok="$(mk_repo)" || exit 1
+  cleanup_on_exit "$ok"
+  okbd="$ok/.claude/handoff_backups"
+  must mkdir -p "$okbd"
+  must bash -c "printf '4000' > '$okbd/.ctx_$sid'"
+  must bash -c "printf '4000\n' > '$okbd/.ctx_flagged_$sid'"
+  ( cd "$ok" && bash "$CR" <<<"{\"session_id\":\"$sid\"}" >/dev/null 2>&1 )
+  check "control: compact_reset still clears the real sidecar"     no \
+    "$([[ -f "$okbd/.ctx_$sid" ]] && echo yes || echo no)"
+else
+  skip "jq missing — both hooks parse their payload with jq"
+fi
+
 finish
