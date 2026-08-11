@@ -42,7 +42,12 @@ version_file="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
 check "plugin.json parses"        yes "$(jq -e . "$PLUGIN_JSON" >/dev/null 2>&1 && echo yes || echo no)"
 check "plugin.json name"          claude-code-handoff "$(jq -r '.name' "$PLUGIN_JSON")"
 check "plugin.json version == VERSION" "$version_file" "$(jq -r '.version' "$PLUGIN_JSON")"
-check "plugin.json hooks path"    "./hooks/hooks.json" "$(jq -r '.hooks' "$PLUGIN_JSON")"
+# hooks/hooks.json is auto-loaded by convention; declaring it AGAIN via a
+# manifest "hooks" key is a duplicate-file error that makes the ENTIRE plugin
+# fail to load (found live in the v0.14.0 e2e). The manifest must not carry
+# the key unless it points at ADDITIONAL hook files.
+check "plugin.json does not redeclare auto-loaded hooks" no \
+  "$(jq -e 'has("hooks")' "$PLUGIN_JSON" >/dev/null 2>&1 && echo yes || echo no)"
 
 # --- hooks.json: all six events present ----------------------------------
 check "hooks.json parses" yes "$(jq -e . "$HOOKS_JSON" >/dev/null 2>&1 && echo yes || echo no)"

@@ -16,6 +16,5 @@
     "context",
     "hooks",
     "provenance"
-  ],
-  "hooks": "./hooks/hooks.json"
+  ]
 }
