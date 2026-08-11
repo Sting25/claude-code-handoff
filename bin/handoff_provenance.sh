@@ -54,6 +54,13 @@ HANDOFF_BIND_BEGIN='<!-- HANDOFF_BIND_BEGIN -->'
 # shellcheck disable=SC2034
 HANDOFF_BIND_END='<!-- HANDOFF_BIND_END -->'
 HANDOFF_MAC_PREFIX='<!-- HANDOFF_HMAC: '
+# The out-of-band SKELETON stamp (H-A). A second keyed trailer, computed over
+# the document's STRUCTURE minus the two sanctioned edit zones (see
+# handoff_skeleton). It rides inline like the HMAC trailer — unforgeable because
+# it is keyed with the same per-machine secret — and is excluded from its own
+# input and from the main HMAC's meaning the same way HANDOFF_HMAC is.
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+HANDOFF_SKEL_PREFIX='<!-- HANDOFF_SKEL_HMAC: '
 
 # The section headings write_handoff.sh emits IMMEDIATELY after each of its
 # own BIND_BEGIN lines. They are the shape that tells a legitimate,
@@ -500,6 +507,104 @@ handoff_guard_bind_regions() {
   # nothing. Same reasoning as the deliberate `pin_body="$(cat …)"` capture in
   # write_handoff.sh, which exists so a read error aborts the build rather
   # than publishing a truncated document.
+}
+
+# --- Out-of-band skeleton stamp (H-A) ---------------------------------------
+# handoff_guard_bind_regions can only tell a writer-authored bind region from
+# an editor-authored one by an IN-BAND heuristic (does a BEGIN's next line equal
+# a published heading?). But those headings are printed in every handoff and the
+# attacker IS the model editing the document, so the heuristic is bypassable:
+# duplicate the Rules/Pinned heading above Notes, forge a region at the top, or
+# delete the Notes heading, and the smuggled region reads as writer-owned.
+#
+# The fix is provenance for STRUCTURE, keyed with the same per-machine secret.
+# handoff_skeleton emits the document with its two SANCTIONED edit zones blanked
+# to fixed sentinels — the Notes block body, and the writer's own Rules-region
+# body (the fences /handoff invites the model to author). Everything else — the
+# preamble, the git snapshot, every section heading, the pin region, and every
+# BIND marker POSITION — is emitted verbatim. An HMAC over this output therefore
+# authenticates the document's shape while ignoring the edits /handoff makes
+# legitimately. write_handoff.sh records it at build time and, on --restamp,
+# recomputes it and refuses to publish a binding-capable signature when it has
+# changed (a new/moved/duplicated marker, a forged heading above Notes, a
+# deleted Notes heading). No IN-BAND unauthenticated token decides trust; the
+# keyed record does.
+#
+# Reads a file arg (or stdin). Strips the two machine trailers so the skeleton
+# never depends on them, and returns awk's status so a failed filter (missing/
+# OOM-killed awk, or a NUL byte BSD awk would truncate at) propagates as a
+# refusal rather than a short skeleton that spuriously matches.
+handoff_skeleton() {  # <file, or stdin>
+  LC_ALL=C awk \
+    -v begin_m="$HANDOFF_BIND_BEGIN" \
+    -v end_m="$HANDOFF_BIND_END" \
+    -v rules_h="$HANDOFF_RULES_HEADING" \
+    -v notes_h="$HANDOFF_NOTES_HEADING" '
+    # Drop the two machine trailer lines (well-formed only), exactly as
+    # handoff_mac_compute strips the HMAC one — a stamp must never cover itself.
+    /^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$/ { next }
+    /^<!-- HANDOFF_SKEL_HMAC: [0-9a-f]{64} -->[[:space:]]*$/ { next }
+    # Past the Notes heading everything is the model-authored Notes body (Notes
+    # is the last section): emit ONE sentinel, drop the rest.
+    notes_done { next }
+    $0 == notes_h { print; print "<<SKEL-NOTES-BODY>>"; notes_done = 1; next }
+    # Inside the writer Rules-region body: drop lines to the END marker.
+    rules_skip { if ($0 == end_m) { print; rules_skip = 0 } next }
+    # A BEGIN whose NEXT line is the Rules heading opens the writer fences zone
+    # (the only in-doc edit zone besides Notes): emit BEGIN + heading + ONE
+    # sentinel, then skip the body to END. The PIN region (BEGIN + pin heading)
+    # is deliberately NOT redacted — /handoff never edits it in the document, so
+    # its body is authenticated structure. A duplicate "BEGIN + Rules heading"
+    # region an attacker adds is redacted here too, but its extra BEGIN/heading/
+    # END lines still land in the skeleton and change the digest.
+    $0 == begin_m {
+      if ((getline nxt) > 0) {
+        print begin_m
+        if (nxt == rules_h) { print nxt; print "<<SKEL-RULES-BODY>>"; rules_skip = 1 }
+        else { print nxt }
+        next
+      }
+      print begin_m; next
+    }
+    { print }
+  ' "$@"
+}
+
+# HMAC-SHA256 the skeleton of <file> with the per-machine secret. Echoes 64 hex
+# chars; non-zero when the skeleton filter fails or signing is unavailable.
+# $2 selects the secret source, same as handoff_mac_compute: "ensure" (write
+# path) or anything else (verify path). Reuses handoff_mac_compute over a temp
+# holding the skeleton bytes rather than re-implementing the RFC 2104
+# construction — the skeleton carries no trailers, so mac_compute's trailer
+# strip is a harmless no-op over it.
+handoff_skel_compute() {  # <file> [ensure]
+  local file="$1" mode="${2:-verify}" tmp out
+  tmp="$(mktemp "$(dirname "$file")/.handoff_skel.XXXXXX" 2>/dev/null)" \
+    || tmp="$(mktemp 2>/dev/null)" || return 1
+  if ! handoff_skeleton "$file" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; return 1
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  if out="$(handoff_mac_compute "$tmp" "$mode")"; then
+    rm -f "$tmp"
+    printf '%s\n' "$out"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Read the recorded skeleton stamp from a document (the last well-formed
+# HANDOFF_SKEL_HMAC line). Echoes 64 hex chars; non-zero when absent or
+# malformed (a legacy doc built before this stamp existed, or a tampered line).
+handoff_skel_read() {  # <file>
+  local file="$1" stored hexre='^[0-9a-f]{64}$'
+  [ -f "$file" ] || return 1
+  stored="$(LC_ALL=C grep "^${HANDOFF_SKEL_PREFIX}" "$file" 2>/dev/null \
+    | tail -n 1 \
+    | sed -E 's/^<!-- HANDOFF_SKEL_HMAC: ([0-9a-f]+) -->[[:space:]]*$/\1/')"
+  [[ "$stored" =~ $hexre ]] || return 1
+  printf '%s\n' "$stored"
 }
 
 # Extract the BIND-marked regions (marker lines excluded, single-line

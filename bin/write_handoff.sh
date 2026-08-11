@@ -97,6 +97,7 @@ fi
 HANDOFF_BIND_BEGIN="${HANDOFF_BIND_BEGIN:-<!-- HANDOFF_BIND_BEGIN -->}"
 HANDOFF_BIND_END="${HANDOFF_BIND_END:-<!-- HANDOFF_BIND_END -->}"
 HANDOFF_MAC_PREFIX="${HANDOFF_MAC_PREFIX:-<!-- HANDOFF_HMAC: }"
+HANDOFF_SKEL_PREFIX="${HANDOFF_SKEL_PREFIX:-<!-- HANDOFF_SKEL_HMAC: }"
 # Section headings emitted directly after our own BIND markers; the restamp
 # guard uses them to tell a writer-opened region from an editor-opened one.
 HANDOFF_PIN_HEADING="${HANDOFF_PIN_HEADING:-## 📌 Pinned — carried forward every handoff}"
@@ -535,6 +536,44 @@ if (( RESTAMP )); then
     fi
     exit 0
   fi
+  # H-A structural gate — runs AFTER the NUL refusal (so the skeleton filter,
+  # itself awk, never sees a truncating NUL) and BEFORE the bind-region guard.
+  # The write-time skeleton stamp is an HMAC over the document's structure minus
+  # the two sanctioned edit zones (the Notes body and the writer's own Rules
+  # fences). Recompute it over the current bytes and refuse to publish a
+  # binding-capable signature on any mismatch — a bind marker, heading, or
+  # section added, moved, or deleted OUTSIDE those zones. That is exactly the
+  # class the in-band heuristic guard cannot catch (a duplicated Rules/Pinned
+  # heading above Notes, a forged region at the top, a deleted Notes heading),
+  # because the attacker is the model editing the doc and every in-band token is
+  # published. A LEGACY doc with no recorded stamp refuses too, rather than
+  # silently falling back to the broken heuristic. Same refusal shape as the
+  # NUL / line-count checks: file left byte-identical, warn, exit 0 — its edit
+  # already staled the write-time HMAC, so the rules load as reference data, and
+  # re-running /handoff regenerates a fresh, structurally-stamped document.
+  skel_refused=""
+  if recorded_skel="$(handoff_skel_read "$handoff_path")"; then
+    if skel_now="$(handoff_skel_compute "$handoff_path" verify)"; then
+      [[ "$skel_now" == "$recorded_skel" ]] || skel_refused="structural"
+    else
+      skel_refused="compute"
+    fi
+  else
+    skel_refused="legacy"
+  fi
+  if [[ -n "$skel_refused" ]]; then
+    case "$skel_refused" in
+      legacy) skel_reason="carries no structural (skeleton) stamp — it predates this protection, or the stamp was removed" ;;
+      structural) skel_reason="changed shape since it was built (a bind marker, heading, or section was added, moved, or deleted outside the Notes and Rules edit zones)" ;;
+      *) skel_reason="could not be structurally verified — the skeleton filter failed (check that awk is on PATH)" ;;
+    esac
+    echo "write_handoff.sh: --restamp: $handoff_relpath $skel_reason; refusing to re-sign it as binding. It is unchanged and keeps its previous signature, so its rules load as reference data, not binding. Re-run /handoff to regenerate a fresh, structurally-stamped handoff." >&2
+    if (( write_lock_held )); then
+      rmdir "$write_lock_dir" 2>/dev/null || true
+      write_lock_held=0
+    fi
+    exit 0
+  fi
   # Build the body to be signed, THEN sign it — the document has been edited
   # since it was written (that is why a restamp is needed), so the bytes must
   # be brought back under the writer-only bind invariant before a signature
@@ -546,7 +585,7 @@ if (( RESTAMP )); then
   # prose line that merely starts with the prefix is preserved and stays
   # covered by the digest. `|| true`: grep -v exits 1 on an all-stripped
   # (empty) doc, which under set -e/pipefail would abort the restamp.
-  LC_ALL=C grep -Ev '^<!-- HANDOFF_HMAC: [0-9a-f]{64} -->[[:space:]]*$' \
+  LC_ALL=C grep -Ev '^<!-- HANDOFF_(HMAC|SKEL_HMAC): [0-9a-f]{64} -->[[:space:]]*$' \
     "$handoff_path" > "$restamp_src" || true
   guard_ok=1
   if type handoff_guard_bind_regions >/dev/null 2>&1; then
@@ -582,13 +621,24 @@ if (( RESTAMP )); then
   rm -f "$restamp_src"; restamp_src=""
   chmod 600 "$restamp_tmp" 2>/dev/null || true
   restamp_signed=0
-  if mac="$(handoff_mac_compute "$restamp_tmp" ensure)"; then
-    printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$restamp_tmp"
-    mv -f "$restamp_tmp" "$handoff_path"
-    restamp_tmp=""   # published; nothing left for the EXIT trap to remove
-    restamp_signed=1
+  # Re-emit the skeleton stamp (structure verified intact above, so this equals
+  # the recorded one) BEFORE the main HMAC, which then covers it — the same
+  # order the build path uses, and it keeps the invariant that every signed doc
+  # carries a matching stamp so the NEXT restamp has a baseline. A recompute
+  # failure here refuses the publish rather than shipping a doc with a main HMAC
+  # but no skeleton (which the next restamp would then reject as legacy).
+  if fresh_skel="$(handoff_skel_compute "$restamp_tmp" ensure)"; then
+    printf '%s%s -->\n' "$HANDOFF_SKEL_PREFIX" "$fresh_skel" >> "$restamp_tmp"
+    if mac="$(handoff_mac_compute "$restamp_tmp" ensure)"; then
+      printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$restamp_tmp"
+      mv -f "$restamp_tmp" "$handoff_path"
+      restamp_tmp=""   # published; nothing left for the EXIT trap to remove
+      restamp_signed=1
+    else
+      echo "write_handoff.sh: --restamp: cannot sign (openssl or the per-machine secret unavailable); the rules layer will load as reference data, not binding." >&2
+    fi
   else
-    echo "write_handoff.sh: --restamp: cannot sign (openssl or the per-machine secret unavailable); the rules layer will load as reference data, not binding." >&2
+    echo "write_handoff.sh: --restamp: could not recompute the structural (skeleton) stamp; refusing to publish. $handoff_relpath is unchanged and keeps its previous signature — its rules load as reference data, not binding." >&2
   fi
   # Normal-path lock release, mirroring the main path's; the cleanup trap is
   # only the abort backstop.
@@ -1238,6 +1288,18 @@ EOF
 # isn't possible — an unsigned handoff loads exactly as today (data framing);
 # this must NEVER abort the write.
 if can_sign; then
+  # Skeleton stamp (H-A) FIRST, so the main HMAC below covers it. It records an
+  # HMAC over the document's STRUCTURE minus the two sanctioned edit zones (see
+  # handoff_skeleton), giving --restamp an out-of-band way to prove no structural
+  # smuggling happened since build — the defense the in-band heuristic guard
+  # cannot provide. A skel-compute failure is non-fatal (the main HMAC still
+  # signs): the doc then reads as a legacy no-skeleton doc, which --restamp
+  # refuses to promote after an edit — the fail-closed direction, not a crash.
+  if skel="$(handoff_skel_compute "$handoff_tmp" ensure)"; then
+    printf '%s%s -->\n' "$HANDOFF_SKEL_PREFIX" "$skel" >> "$handoff_tmp"
+  else
+    echo "write_handoff.sh: structural (skeleton) stamp unavailable — after any edit, /handoff must be re-run to restore binding; the rules layer will otherwise load as reference data." >&2
+  fi
   if mac="$(handoff_mac_compute "$handoff_tmp" ensure)"; then
     printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$handoff_tmp"
   else
