@@ -1,6 +1,6 @@
 {
   "name": "claude-code-handoff",
-  "description": "Session-state handoff between Claude Code sessions: hooks snapshot a curated handoff at SessionEnd/PreCompact and reload it at SessionStart, with HMAC-verified provenance separating trusted local rules from untrusted narrative.",
+  "description": "Session-state handoff for Claude Code: hooks auto-snapshot at SessionEnd/PreCompact and auto-load at SessionStart. Rebuilds lost handoffs from per-turn backups, keeps rotating history, nudges at ~40% context, and HMAC-signs handoffs so cloned repos can't inject trusted rules.",
   "owner": {
     "name": "Christopher Chadwick",
     "url": "https://github.com/Sting25"
@@ -9,7 +9,7 @@
     {
       "name": "claude-code-handoff",
       "source": "./",
-      "description": "Session-state handoff between Claude Code sessions via hooks (auto-snapshot on SessionEnd/PreCompact, auto-load on SessionStart) with HMAC-verified provenance.",
+      "description": "Session-state handoff for Claude Code: hooks auto-snapshot at SessionEnd/PreCompact and auto-load at SessionStart. Rebuilds lost handoffs from per-turn backups, keeps rotating history, nudges at ~40% context, and HMAC-signs handoffs so cloned repos can't inject trusted rules.",
       "author": {
         "name": "Christopher Chadwick",
         "url": "https://github.com/Sting25"

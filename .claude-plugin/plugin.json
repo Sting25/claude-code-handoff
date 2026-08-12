@@ -2,7 +2,7 @@
   "name": "claude-code-handoff",
   "displayName": "Claude Code Handoff",
   "version": "0.14.1",
-  "description": "Session-state handoff between Claude Code sessions via hooks (auto-snapshot on SessionEnd/PreCompact, auto-load on SessionStart) with HMAC-verified provenance.",
+  "description": "Session-state handoff for Claude Code: hooks auto-snapshot at SessionEnd/PreCompact and auto-load at SessionStart. Rebuilds lost handoffs from per-turn backups, keeps rotating history, nudges at ~40% context, and HMAC-signs handoffs so cloned repos can't inject trusted rules.",
   "author": {
     "name": "Christopher Chadwick",
     "url": "https://github.com/Sting25"
