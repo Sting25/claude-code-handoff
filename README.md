@@ -12,7 +12,7 @@ digest you never read.
 - **Auto-loads that snapshot into your next session** in the same repo — no copy-paste, no kickoff prompt.
 - **Keeps a per-turn backup**, so a crashed or killed session can be reconstructed afterwards.
 - **Saves a mechanical git-state snapshot on every clean exit**, even if you forget to hand off.
-- **Nudges you when context is filling** (~40% used), while Claude is still sharp enough to write a good summary.
+- **Nudges you when context is filling** (~40% used), while Claude is still sharp enough to write a good summary — so you hand off confidently instead of riding a bloated session, which also means less context re-processing and fewer wasted tokens.
 - **Signs each handoff with a per-machine key**, so a cloned repo can't inject fake standing rules.
 - **Keeps a history of past handoffs** (last 5 by default) that you can pull back into context on demand.
 - **Works in git and non-git projects**, in both the Claude Code CLI and the desktop app.
