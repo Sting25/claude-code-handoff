@@ -50,6 +50,12 @@ hook_cwd="$(printf '%s' "$payload" \
   | LC_ALL=C sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
   | head -n 1 || true)"
 [ -n "$hook_cwd" ] && [ -d "$hook_cwd" ] || hook_cwd=""
+# This session's id, same no-jq extraction; feeds the overwrite-guard origin
+# marker below (issue #63) and the Stop-hook health check further down.
+sess_id="$(printf '%s' "$payload" \
+  | LC_ALL=C sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+  | head -n 1 || true)"
+case "$sess_id" in [A-Za-z0-9_-]*) : ;; *) sess_id="" ;; esac
 
 # --- Project root. Shared resolver (bin/handoff_provenance.sh):
 # CLAUDE_PROJECT_DIR (validated -d) -> payload cwd -> $PWD, then the git
@@ -83,6 +89,32 @@ fi
 current="$repo/.claude/handoff_current.md"
 current_relpath=".claude/handoff_current.md"
 history_dir="$repo/.claude/handoff_history"
+backup_dir="$repo/.claude/handoff_backups"
+
+# Cross-session overwrite guard origin marker (issue #63): record, ONCE, the
+# epoch this session id was first seen here. write_handoff.sh later compares
+# a stale writer's origin against a handoff's write-time stamp to detect an
+# out-of-order overwrite. Create-once is the correctness core: resume/compact
+# re-fire this hook with the SAME session id and must NOT refresh it. Fails
+# open (skip silently) on a symlinked .claude or handoff_backups, same as
+# write_handoff.sh's own guards.
+if [ -n "$sess_id" ] && [ ! -L "$repo/.claude" ] && [ ! -L "$backup_dir" ]; then
+  mkdir -p "$backup_dir" 2>/dev/null || true
+  origin_marker="$backup_dir/.session_started_${sess_id}"
+  if [ -d "$backup_dir" ] && [ ! -L "$backup_dir" ] && [ ! -e "$origin_marker" ]; then
+    origin_tmp="$(mktemp "$backup_dir/.session_started.XXXXXX" 2>/dev/null)" || origin_tmp=""
+    if [ -n "$origin_tmp" ]; then
+      { date +%s > "$origin_tmp"; } 2>/dev/null || true
+      chmod 600 "$origin_tmp" 2>/dev/null || true
+      # `mv -n` skip semantics differ (GNU >=9.2: nonzero exit; BSD: zero exit),
+      # so check the SOURCE rather than the exit code (same idiom as
+      # write_handoff.sh's rotation claim): still there means we lost a
+      # create-once race, so clean up rather than leave tmp litter.
+      mv -n "$origin_tmp" "$origin_marker" 2>/dev/null || true
+      if [ -e "$origin_tmp" ]; then rm -f "$origin_tmp"; fi
+    fi
+  fi
+fi
 
 # Symlink read guard — the read-side twin of write_handoff.sh's write guard.
 # Every read below (`[ -f ]`, sed, cat) FOLLOWS a symlink, and this file is
@@ -305,11 +337,12 @@ fi
 # sidecars (.ctx_<sid>, .ctx_sl_<sid>, .ctx_tokens_<sid>, .ctx_model_<sid>,
 # .ctx_flagged_<sid>, .ctx_flagged_tok_<sid>, .ctx_nojq_<sid>,
 # .ctx_prompts_<sid>, .ctx_health_<sid>, .ss_health_<sid>,
-# .handoff_raw_<sid>.cursor/.lock, .fences_<sid>, .fences_tok_<sid>) that
-# handoff_ctx_check.sh and handoff_statusline.sh drop there on a project's
-# FIRST session — .ctx_sl_<sid> in particular is written by the statusline
-# renderer on every prompt, independent of any Stop-hook fire — long before
-# any handoff exists. A whole-directory `find -type f` treated that bookkeeping
+# .handoff_raw_<sid>.cursor/.lock, .fences_<sid>, .fences_tok_<sid>,
+# .session_started_<sid> — issue #63's overwrite-guard origin marker) that
+# handoff_ctx_check.sh, handoff_statusline.sh, and THIS script drop there on
+# a project's FIRST session — .ctx_sl_<sid> in particular is written by the
+# statusline renderer on every prompt, independent of any Stop-hook fire —
+# long before any handoff exists. A whole-directory `find -type f` treated that bookkeeping
 # as evidence of "prior handoff artifacts" and fired the warning (and its
 # "run /handoff-more or /handoff-recover" instruction) on session #2 of any
 # fresh project whose first session ended via a skipped SessionEnd reason

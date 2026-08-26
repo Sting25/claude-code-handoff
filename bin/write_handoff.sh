@@ -35,6 +35,21 @@
 #                          likewise when another writer holds the write lock —
 #                          a stale-signed document is recoverable, one
 #                          overwritten with pre-rotation bytes is not.
+#   --session-id ID        Writing session's id (issue #63): beats the hook
+#                          payload's .session_id, which beats
+#                          $CLAUDE_CODE_SESSION_ID; charset [A-Za-z0-9_-]+.
+#                          Stamps a HANDOFF_WRITER marker read by the
+#                          overwrite guard below on the NEXT write. No id
+#                          anywhere makes the whole feature inert.
+#   --takeover             Proceed past a firing overwrite guard (below).
+#
+# Cross-session overwrite guard (issue #63): fires on a real curated write
+# (never --restamp, never an --if-curated safety net) when the current
+# handoff was authored by a DIFFERENT session AND its write-time stamp is
+# LATER than this session's own recorded start (handoff_session_start.sh) —
+# i.e. this session is the stale one. HANDOFF_OVERWRITE_GUARD=block (default)
+# refuses with exit 3 unless --takeover; =warn prints the same notice and
+# proceeds; =off disables it.
 #
 # Reason-aware safety net (hook invocations only): when invoked as a hook,
 # stdin carries a JSON payload that MAY include a `reason` field (e.g.
@@ -69,6 +84,7 @@ hook_payload=""
 [[ -t 0 ]] || hook_payload="$(cat 2>/dev/null || true)"
 session_end_reason=""
 payload_cwd=""
+payload_session_id=""
 if [[ -n "$hook_payload" ]] && command -v jq >/dev/null 2>&1; then
   session_end_reason="$(jq -r '.reason // empty' <<<"$hook_payload" 2>/dev/null || true)"
   # Charset guard: known reasons are lowercase words ("clear", "logout",
@@ -80,6 +96,9 @@ if [[ -n "$hook_payload" ]] && command -v jq >/dev/null 2>&1; then
   # empty) and validated as an existing directory before use.
   payload_cwd="$(jq -r '.cwd // empty' <<<"$hook_payload" 2>/dev/null || true)"
   [[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
+  # Middle rung of the writer-identity precedence (issue #63); see --session-id.
+  payload_session_id="$(jq -r '.session_id // empty' <<<"$hook_payload" 2>/dev/null || true)"
+  [[ "$payload_session_id" =~ ^[A-Za-z0-9_-]+$ ]] || payload_session_id=""
 fi
 
 # Shared provenance helpers (issue #42): HMAC signing so the next session's
@@ -195,6 +214,8 @@ can_sign() {
 
 IF_CURATED=0
 RESTAMP=0
+TAKEOVER=0
+OPT_SESSION_ID=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --if-curated)
@@ -203,6 +224,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --restamp)
       RESTAMP=1
+      shift
+      ;;
+    --takeover)
+      TAKEOVER=1
+      shift
+      ;;
+    --session-id)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --session-id requires a value" >&2
+        exit 2
+      fi
+      OPT_SESSION_ID="$2"
+      shift 2
+      ;;
+    --session-id=*)
+      OPT_SESSION_ID="${1#--session-id=}"
       shift
       ;;
     --if-stale-by)
@@ -226,6 +263,16 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Writer identity (issue #63); see --session-id above for precedence.
+writer_session_id=""
+if [[ -n "$OPT_SESSION_ID" && "$OPT_SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  writer_session_id="$OPT_SESSION_ID"
+elif [[ -n "$payload_session_id" ]]; then
+  writer_session_id="$payload_session_id"
+elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" && "${CLAUDE_CODE_SESSION_ID}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  writer_session_id="$CLAUDE_CODE_SESSION_ID"
+fi
 
 # Sentinel embedded in the auto-generated placeholder block; presence means
 # the placeholder is still in place, absence means the /handoff skill (or a
@@ -287,6 +334,8 @@ handoff_is_unedited_placeholder() {
 #   `reason` values that make an --if-curated (safety-net) run skip the
 #   write. Default: "resume". Set to "" to always write; see the
 #   reason-aware note in the header.
+# HANDOFF_OVERWRITE_GUARD — "block" (default), "warn", or "off". Controls the
+#   cross-session overwrite guard (issue #63); see the header for details.
 #
 # Example for someone with a `_shared/` sibling that holds RFCs + ASKs:
 #   export HANDOFF_INFLIGHT_DIRS="docs design"
@@ -790,6 +839,95 @@ if (( IF_CURATED )); then
   fi
 fi
 
+# ----- Cross-session overwrite guard (issue #63) -----------------------------
+# See the header comment above for the firing predicate and env knob.
+overwrite_guard_mode="${HANDOFF_OVERWRITE_GUARD:-block}"
+case "$overwrite_guard_mode" in block | warn | off) ;; *) overwrite_guard_mode=block ;; esac
+overwrite_guard_fired=0
+if (( ! IF_CURATED )) && [[ "$overwrite_guard_mode" != off && -n "$writer_session_id" \
+      && -f "$handoff_path" ]]; then
+  marker_line="$(LC_ALL=C grep -E '^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=[0-9]+ -->[[:space:]]*$' \
+    "$handoff_path" 2>/dev/null | tail -n 1 || true)"
+  doc_author_id="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=([A-Za-z0-9_-]+) t=[0-9]+ -->.*/\1/')"
+  doc_write_epoch="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=([0-9]+) -->.*/\1/')"
+  # Re-validate charset (a non-matching line leaves sed's input unchanged) —
+  # a value that fails validation counts as an absent marker.
+  [[ "$doc_author_id" =~ ^[A-Za-z0-9_-]+$ ]] || doc_author_id=""
+  [[ "$doc_write_epoch" =~ ^[0-9]+$ ]] || doc_write_epoch=""
+  [[ -n "$doc_author_id" && -n "$doc_write_epoch" ]] || { doc_author_id=""; doc_write_epoch=""; }
+  # Clock skew: a stamp too far in the future can't be trusted against a
+  # local origin timestamp — fail open.
+  if [[ -n "$doc_write_epoch" ]]; then
+    now_epoch="$(date +%s)"
+    if (( doc_write_epoch > now_epoch + 300 )); then
+      echo "write_handoff.sh: overwrite guard: $handoff_relpath's HANDOFF_WRITER stamp (t=$doc_write_epoch) is more than 300s ahead of this machine's clock (now=$now_epoch); treating it as unusable and skipping the guard for this write." >&2
+      doc_author_id="" doc_write_epoch=""
+    fi
+  fi
+  # Origin: when THIS session id was first seen here (handoff_session_start.sh,
+  # create-once). Sidecar content if a plain integer, else its mtime, else no
+  # origin (fail open, same as a symlinked handoff_backups).
+  origin_epoch=""
+  backup_dir="$handoff_dir/handoff_backups"
+  if [[ -n "$doc_author_id" && "$doc_author_id" != "$writer_session_id" && ! -L "$backup_dir" ]]; then
+    origin_sidecar="$backup_dir/.session_started_${writer_session_id}"
+    if [[ -f "$origin_sidecar" && ! -L "$origin_sidecar" ]]; then
+      origin_raw="$(cat "$origin_sidecar" 2>/dev/null || true)"
+      if [[ "$origin_raw" =~ ^[0-9]+$ ]]; then
+        origin_epoch="$origin_raw"
+      else
+        origin_epoch="$(stat -c %Y "$origin_sidecar" 2>/dev/null || stat -f %m "$origin_sidecar" 2>/dev/null || true)"
+        [[ "$origin_epoch" =~ ^[0-9]+$ ]] || origin_epoch=""
+      fi
+    fi
+  fi
+  if [[ -n "$origin_epoch" ]] && (( doc_write_epoch > origin_epoch )); then
+    overwrite_guard_fired=1
+  fi
+fi
+if (( overwrite_guard_fired )); then
+  doc_write_utc="$(date -u -d "@$doc_write_epoch" +'%Y-%m-%d %H:%M UTC' 2>/dev/null \
+    || date -u -r "$doc_write_epoch" +'%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "epoch $doc_write_epoch")"
+  trust_label="unsigned/failed to verify"
+  if can_sign && type handoff_mac_verify >/dev/null 2>&1 && handoff_mac_verify "$handoff_path"; then
+    trust_label="provenance verifies"
+  fi
+  {
+    echo "write_handoff.sh: CROSS-SESSION OVERWRITE GUARD"
+    echo "  This session:        $writer_session_id"
+    echo "  $handoff_relpath author: $doc_author_id"
+    echo "  $handoff_relpath written: $doc_write_utc ($trust_label — the recorded author is not proof by itself)"
+    echo "  A different, LATER session wrote the current $handoff_relpath than the one running now; overwriting it would bury that session's curated handoff under this session's older context."
+  } >&2
+  if [[ "$overwrite_guard_mode" == warn ]]; then
+    echo "  HANDOFF_OVERWRITE_GUARD=warn: proceeding anyway." >&2
+  elif (( TAKEOVER )); then
+    echo "  --takeover: proceeding anyway." >&2
+    if [[ "$HISTORY_KEEP" -gt 0 ]]; then
+      to_mtime="$(stat -c %Y "$handoff_path" 2>/dev/null || stat -f %m "$handoff_path" 2>/dev/null || true)"
+      to_stamp=""
+      if [[ "$to_mtime" =~ ^[0-9]+$ ]]; then
+        to_stamp="$(date -u -d "@$to_mtime" +'%Y-%m-%d_%H%M%S' 2>/dev/null \
+          || date -u -r "$to_mtime" +'%Y-%m-%d_%H%M%S' 2>/dev/null || true)"
+      fi
+      if [[ -n "$to_stamp" ]]; then
+        echo "  the fresher $handoff_relpath will be archived to ${history_relpath}handoff_${to_stamp}.md (or a _N suffix on a same-second collision)." >&2
+      else
+        echo "  the fresher $handoff_relpath will be archived under $history_relpath." >&2
+      fi
+    else
+      echo "  HANDOFF_HISTORY_KEEP=0: the fresher $handoff_relpath will NOT be archived; it will be lost." >&2
+    fi
+  else
+    {
+      echo "  Two ways forward:"
+      echo "    1. Start a fresh session (or resume session $doc_author_id) and run /handoff from there."
+      echo "    2. If this session ($writer_session_id) should really take over, re-run with --takeover."
+    } >&2
+    exit 3
+  fi
+fi
+
 # Self-bootstrap: ensure the handoff artifacts are git-ignored so they don't
 # pollute `git status`. Skip if HANDOFF_NO_GITIGNORE_BOOTSTRAP=1.
 bootstrap_gitignore() {
@@ -1076,6 +1214,7 @@ if [[ -n "$SUBSTRATE_NAME" ]]; then
 fi
 
 ts_utc="$(date -u +'%Y-%m-%d %H:%M UTC')"
+write_epoch="$(date +%s)"
 
 git_short() { git -C "$1" rev-parse --short HEAD 2>/dev/null || echo "?"; }
 git_subj()  { git -C "$1" log -1 --pretty=%s 2>/dev/null || echo "?"; }
@@ -1173,7 +1312,15 @@ handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
   # `git init` / arrived with a clone), instead of silently loading a doc
   # that describes some other tree. An inert HTML comment, covered by the
   # HMAC like every other line.
-  printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n\n' "$repo_root" "$in_git"
+  printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n' "$repo_root" "$in_git"
+  # Writer marker (issue #63), read by the guard above on the NEXT write.
+  # Right after HANDOFF_ROOT so it sits in the verbatim preamble both HMACs
+  # cover, and --restamp (never regenerates the preamble) leaves it intact.
+  # Absent when no session id resolved -> the guard is inert on this doc.
+  if [[ -n "$writer_session_id" ]]; then
+    printf '<!-- HANDOFF_WRITER: sid=%s t=%s -->\n' "$writer_session_id" "$write_epoch"
+  fi
+  printf '\n'
 
   cat <<EOF
 $handoff_mode_intro Lives at \`<root>/.claude/handoff_current.md\`, where
