@@ -17,6 +17,17 @@
 #                               above because it removes the model-id-regex
 #                               window guesswork that broke once already
 #                               (c0faf38: 5x over-report on 1M-native ids).
+# This script itself writes the sidecars below, one pair per ledger (see
+# "Progress ledger", issue #69) so a byte count and a token count are never
+# compared as if they were the same quantity:
+#   .ctx_flagged_<session_id>     — byte-ledger nudge cap/cooldown state.
+#   .ctx_flagged_tok_<session_id> — token-ledger nudge cap/cooldown state.
+#   .fences_<session_id>          — byte-ledger rules re-injection cooldown
+#                                    (issue #42).
+#   .fences_tok_<session_id>      — token-ledger rules re-injection cooldown.
+#   .ctx_nojq_<session_id>        — once-per-session jq-missing warning marker
+#                                    (issue #68), shared with
+#                                    handoff_turn_append.sh.
 # This script runs on the next user prompt and, if usage has crossed a
 # configurable threshold, emits a <system-reminder> instructing the assistant
 # to passively flag a /handoff moment.
@@ -172,10 +183,22 @@ if ! command -v jq >/dev/null 2>&1; then
   [[ -d "$nojq_anchor" ]] || nojq_anchor="$PWD"
   nojq_root="$(git -C "$nojq_anchor" rev-parse --show-toplevel 2>/dev/null || true)"
   [[ -n "$nojq_root" ]] || nojq_root="$nojq_anchor"
+  # An empty/invalid session id (unparseable payload, or a value that fails
+  # the charset guard above) used to leave nojq_flag empty, which the check
+  # below treats as "warn every time", the same branch meant for a directory
+  # too unsafe to write a marker into at all. But UserPromptSubmit stdout is
+  # injected into context every turn, so that degraded this ~330-char warning
+  # from once-per-session to once-per-PROMPT for the (also degraded, jq-less)
+  # sessions least able to afford the noise. Fall back to a fixed marker name
+  # so throttling still applies; only the genuinely-unwritable-directory case
+  # (symlinked .claude or handoff_backups) keeps the warn-anyway behavior.
   nojq_flag=""
-  if [[ -n "$nojq_sid" && ! -L "$nojq_root/.claude" \
-        && ! -L "$nojq_root/.claude/handoff_backups" ]]; then
-    nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_${nojq_sid}"
+  if [[ ! -L "$nojq_root/.claude" && ! -L "$nojq_root/.claude/handoff_backups" ]]; then
+    if [[ -n "$nojq_sid" ]]; then
+      nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_${nojq_sid}"
+    else
+      nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_unknown"
+    fi
   fi
   if [[ -z "$nojq_flag" || ! -f "$nojq_flag" ]]; then
     echo "⚠️  handoff: jq not found on PATH — the per-turn backup (Stop hook) and the context nudge are disabled for this session. Nothing is being recorded, so /handoff will have no raw dump to fall back on. Install jq (brew install jq / apt install jq), then start a new session."
@@ -193,7 +216,8 @@ fi
 
 session_id="$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)"
 [[ -z "$session_id" ]] && exit 0
-# session_id is interpolated into the .ctx_/.ctx_tokens_/.ctx_model_/.ctx_flagged_ paths
+# session_id is interpolated into the .ctx_/.ctx_tokens_/.ctx_model_/
+# .ctx_flagged_/.ctx_flagged_tok_/.fences_/.fences_tok_/.ctx_nojq_ paths
 # below, so a value carrying a slash, newline, or ".." could escape backup_dir.
 # Mirror handoff_turn_append.sh's guard (its comment, and the CHANGELOG, describe
 # this validation — but it had only ever been applied to the Stop hook, not to
@@ -341,6 +365,21 @@ if [[ "$ledger" == "tokens" ]]; then
   cooldown_units="${HANDOFF_CTX_COOLDOWN_TOKENS:-$((COOLDOWN_KB * 1024 / 4))}"
   [[ "$cooldown_units" =~ ^[0-9]+$ ]] || cooldown_units=$((COOLDOWN_KB * 1024 / 4))
   flag_file="$backup_dir/.ctx_flagged_tok_${session_id}"
+  # Token occupancy is NOT monotonic like transcript bytes: it DROPS on
+  # compaction/eviction. The cap+cooldown block below assumes growth-only
+  # progress: after a drop, `progress < last_flagged + cooldown_units` stays
+  # true forever and the ledger stalls (no further nudge ever, even well past
+  # the threshold again). If the current count is lower than the value
+  # recorded at the last flag, the drop itself proves the ledger is stale:
+  # clear it and let the next crossing be treated as unflagged. Byte path is
+  # untouched: transcript bytes only grow, so this can't fire there.
+  if [[ -f "$flag_file" ]]; then
+    last_flagged_tok="$(tail -n 1 "$flag_file" 2>/dev/null || echo 0)"
+    [[ "$last_flagged_tok" =~ ^[0-9]+$ ]] || last_flagged_tok=0
+    if (( progress < last_flagged_tok )); then
+      rm -f -- "$flag_file" 2>/dev/null || true
+    fi
+  fi
 else
   progress="$current_bytes"
   cooldown_units=$((COOLDOWN_KB * 1024))
@@ -392,7 +431,11 @@ elif (( FENCES_KB > 0 )) && [[ -f "$handoff_doc" ]] \
     if [[ -f "$fences_flag" ]]; then
       last_fences="$(cat "$fences_flag" 2>/dev/null || echo 0)"
       [[ "$last_fences" =~ ^[0-9]+$ ]] || last_fences=0
-      if (( progress >= last_fences + fences_units )); then
+      if [[ "$ledger" == "tokens" ]] && (( progress < last_fences )); then
+        # Same non-monotonic-drop staleness as the nudge flag above: clear
+        # and let the seed-without-emit branch below re-seed from here.
+        rm -f -- "$fences_flag" 2>/dev/null || true
+      elif (( progress >= last_fences + fences_units )); then
         emit_fences=1
       fi
     fi
@@ -548,7 +591,12 @@ if (( est_tokens == 0 )) && [[ "$ledger" == "bytes" ]]; then
   est_tokens=$((current_bytes / 4))
   token_source="estimated"
 fi
-(( est_tokens > 0 )) || exit 0
+# Tokens-ledger only: sl_tokens is validated > 0 by construction (it is what
+# selected this ledger), so this is unreachable in practice, but it keeps the
+# tokens path from ever emitting on a zero measurement. The byte path has no
+# such guard on main and must not gain one here: a tiny (even zero-byte)
+# .ctx_<sid> with THRESHOLD_PCT=0 still emits, exactly as before #69.
+[[ "$ledger" == "tokens" ]] && (( est_tokens == 0 )) && exit 0
 
 # --- Ratchet: a MEASURED count above 200k tokens cannot fit a 200k window, so
 #     a smaller AUTO-DETECTED window is provably wrong (e.g. a 1M-native model

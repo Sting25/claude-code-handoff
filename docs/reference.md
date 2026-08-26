@@ -119,6 +119,16 @@ use separate flag files, so a byte count and a token count are never
 compared as if they were the same quantity. `HANDOFF_CTX_SL_MAX_AGE_SECS`
 (default 900) bounds how stale that cache may be before the token
 ledger stands down; `0` disables it and restores the old behavior.
+`HANDOFF_CTX_COOLDOWN_TOKENS` is the token ledger's equivalent of
+`HANDOFF_CTX_COOLDOWN_KB` (transcript growth required between re-flags):
+it defaults to `HANDOFF_CTX_COOLDOWN_KB` converted at a 4-bytes-per-token
+ratio, so the one KB knob governs both ledgers' spacing unless you set the
+token knob directly. That 4:1 default is a heuristic bridge, not a measured
+ratio: transcript bytes grow unboundedly (tool output, thinking blocks,
+reminder injections all count), while window occupancy is capped by the
+model's context window; the two quantities don't scale together, so if
+you're tuning re-flag spacing precisely, set `HANDOFF_CTX_COOLDOWN_TOKENS`
+explicitly rather than relying on the KB-derived default.
 This matters most on **plugin installs**, where the statusline is the
 only accurate context signal available (plugins cannot set
 `statusLine`, so it is wired by hand — see [Status line](#status-line)).

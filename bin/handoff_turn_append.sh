@@ -66,10 +66,18 @@ if ! command -v jq >/dev/null 2>&1; then
   [[ -d "$nojq_anchor" ]] || nojq_anchor="$PWD"
   nojq_root="$(git -C "$nojq_anchor" rev-parse --show-toplevel 2>/dev/null || true)"
   [[ -n "$nojq_root" ]] || nojq_root="$nojq_anchor"
+  # Fall back to a fixed marker name when the session id is empty/invalid, so
+  # the once-per-session throttle still applies (an unparseable payload must
+  # not degrade this into a per-fire warning); see handoff_ctx_check.sh's
+  # sibling block for the full reasoning. Only a genuinely-unwritable
+  # directory (symlinked .claude or handoff_backups) keeps warn-anyway.
   nojq_flag=""
-  if [[ -n "$nojq_sid" && ! -L "$nojq_root/.claude" \
-        && ! -L "$nojq_root/.claude/handoff_backups" ]]; then
-    nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_${nojq_sid}"
+  if [[ ! -L "$nojq_root/.claude" && ! -L "$nojq_root/.claude/handoff_backups" ]]; then
+    if [[ -n "$nojq_sid" ]]; then
+      nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_${nojq_sid}"
+    else
+      nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_unknown"
+    fi
   fi
   if [[ -z "$nojq_flag" || ! -f "$nojq_flag" ]]; then
     echo "⚠️  handoff: jq not found on PATH — the per-turn backup (Stop hook) and the context nudge are disabled for this session. Nothing is being recorded, so /handoff will have no raw dump to fall back on. Install jq (brew install jq / apt install jq), then start a new session."
@@ -642,8 +650,11 @@ while IFS= read -r old; do
   rm -f  -- "$backup_dir/.ctx_tokens_${id}"
   rm -f  -- "$backup_dir/.ctx_model_${id}"
   rm -f  -- "$backup_dir/.ctx_flagged_${id}"
+  rm -f  -- "$backup_dir/.ctx_flagged_tok_${id}"  # token-ledger nudge cap/cooldown (issue #69)
   rm -f  -- "$backup_dir/.ctx_sl_${id}"        # statusline cache sidecar
   rm -f  -- "$backup_dir/.fences_${id}"        # rules re-injection cooldown state (issue #42)
+  rm -f  -- "$backup_dir/.fences_tok_${id}"    # token-ledger rules re-injection cooldown (issue #69)
+  rm -f  -- "$backup_dir/.ctx_nojq_${id}"      # jq-missing once-per-session warning marker (issue #68)
 done < <(list_our_dumps | tail -n +4)
 
 exit 0

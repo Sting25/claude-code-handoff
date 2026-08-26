@@ -261,7 +261,8 @@ fi
 # Stop hook (handoff_turn_append.sh) writes on its first fire — NOT "any file
 # in the directory". handoff_backups/ also holds dot-prefixed bookkeeping
 # sidecars (.ctx_<sid>, .ctx_sl_<sid>, .ctx_tokens_<sid>, .ctx_model_<sid>,
-# .ctx_flagged_<sid>, .handoff_raw_<sid>.cursor/.lock, .fences_<sid>) that
+# .ctx_flagged_<sid>, .ctx_flagged_tok_<sid>, .ctx_nojq_<sid>,
+# .handoff_raw_<sid>.cursor/.lock, .fences_<sid>, .fences_tok_<sid>) that
 # handoff_ctx_check.sh and handoff_statusline.sh drop there on a project's
 # FIRST session — .ctx_sl_<sid> in particular is written by the statusline
 # renderer on every prompt, independent of any Stop-hook fire — long before

@@ -127,5 +127,44 @@ out="$( cd "$proj2" && printf '{"session_id":"CCSESSION","cwd":"%s","transcript_
     | PATH="$nojq" CLAUDE_PROJECT_DIR="$proj2" bash "$REPO_ROOT/bin/handoff_turn_append.sh" 2>/dev/null )"
 check "shared marker: Stop hook quiet after ctx"  no  "$(has "$out" "jq not found")"
 
+# --- F6: an empty/invalid session id must still throttle -----------------
+# Before the fix, an unparseable/invalid session_id left the once-per-session
+# marker path empty, which the "warn anyway" branch treats identically to a
+# genuinely-unwritable directory, so EVERY UserPromptSubmit re-emitted the
+# ~330-char jq warning into context for a session whose id never parses. The
+# fix falls back to a fixed `.ctx_nojq_unknown` marker so throttling still
+# applies; only a truly unwritable backups dir keeps the warn-every-time path.
+proj3="$(mk_repo)"; cleanup_on_exit "$proj3"
+run_cc_nojq_badsid() {  # <session_id (raw, may be invalid/absent)>
+  ( cd "$proj3" && printf '{"session_id":"%s","cwd":"%s"}' "$1" "$proj3" \
+      | PATH="$nojq" CLAUDE_PROJECT_DIR="$proj3" bash "$REPO_ROOT/bin/handoff_ctx_check.sh" 2>/dev/null )
+}
+# A slash fails the [A-Za-z0-9_-]+ charset guard -> nojq_sid ends up empty.
+out="$(run_cc_nojq_badsid "in/valid")"; rc=$?
+check "invalid sid w/o jq: exit 0"            0   "$rc"
+check "invalid sid w/o jq: warns first time"  yes "$(has "$out" "jq not found")"
+check "invalid sid w/o jq: marker recorded"   yes \
+  "$([[ -f "$proj3/.claude/handoff_backups/.ctx_nojq_unknown" ]] && echo yes || echo no)"
+out="$(run_cc_nojq_badsid "another/invalid")"
+check "invalid sid w/o jq: silent on re-fire" no  "$(has "$out" "jq not found")"
+rm -rf "$proj3"
+
+# Same fallback applies to handoff_turn_append.sh's identical preflight.
+proj4="$(mk_repo)"; cleanup_on_exit "$proj4"
+tp4="$proj4/transcript.jsonl"
+must printf '%s\n' '{"type":"user","message":{"content":"hi"}}' > "$tp4"
+run_ta_badsid() {
+  ( cd "$proj4" && printf '{"session_id":"in/valid","cwd":"%s","transcript_path":"%s"}' "$proj4" "$tp4" \
+      | PATH="$nojq" CLAUDE_PROJECT_DIR="$proj4" bash "$REPO_ROOT/bin/handoff_turn_append.sh" 2>/dev/null )
+}
+out="$(run_ta_badsid)"; rc=$?
+check "turn_append invalid sid w/o jq: exit 0"           0   "$rc"
+check "turn_append invalid sid w/o jq: warns first time" yes "$(has "$out" "jq not found")"
+check "turn_append invalid sid w/o jq: marker recorded"  yes \
+  "$([[ -f "$proj4/.claude/handoff_backups/.ctx_nojq_unknown" ]] && echo yes || echo no)"
+out="$(run_ta_badsid)"
+check "turn_append invalid sid w/o jq: silent on re-fire" no "$(has "$out" "jq not found")"
+rm -rf "$proj4"
+
 rm -rf "$nojq"
 finish

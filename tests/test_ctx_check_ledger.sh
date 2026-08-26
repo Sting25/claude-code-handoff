@@ -117,4 +117,31 @@ out="$(run_cc "$repo" NONE)"; rc=$?
 check "no ctx_ and no sl cache -> exit 0"      0   "$rc"
 check "no ctx_ and no sl cache -> silent"      ""  "$out"
 
+echo "handoff_ctx_check.sh — token ledger survives a context DROP (F3)"
+
+# --- context occupancy drops on compaction/eviction; the ledger must not
+#     stall reading a smaller "now" against a stale high-water mark forever.
+#     Seed a tok flag recorded at a HIGH count, then present a LOWER current
+#     count that is still over threshold: without the staleness reset the
+#     cooldown math (progress < last_flagged + cooldown_units) stays true
+#     forever and the ledger never fires again.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; seed_sl_only "$repo" TOKDROP 900
+must printf '900\n' > "$(bd "$repo")/.ctx_flagged_tok_TOKDROP"
+seed_sl_only "$repo" TOKDROP 600   # drop: 900 -> 600, still over the 400 threshold
+out="$(run_cc "$repo" TOKDROP HANDOFF_CTX_MAX_FLAGS=0)"
+check "token drop below last-flagged -> nudge fires" yes "$(has "$out" "<system-reminder>")"
+check "token drop -> reports the new (lower) count"  yes "$(has "$out" "600 tokens")"
+
+echo "handoff_ctx_check.sh — byte-path est_tokens==0 guard (F4)"
+
+# --- Regression: the shared `est_tokens > 0` guard the token ledger needs
+#     must NOT apply to the byte path. On main, a tiny/empty .ctx_<sid> with
+#     THRESHOLD_PCT=0 still emits (est_tokens=0, threshold_tokens=0, 0<0 is
+#     false, so the hook proceeds); the branch's fix must restore that exactly.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$(bd "$repo")"
+must printf '0' > "$(bd "$repo")/.ctx_BYTZ"
+out="$(cd "$repo" && env HANDOFF_CTX_WINDOW_TOKENS=1000 HANDOFF_CTX_THRESHOLD_PCT=0 \
+    bash "$CC" <<<'{"session_id":"BYTZ"}' 2>/dev/null)"
+check "byte ledger, tiny .ctx_, threshold 0 -> still emits" yes "$(has "$out" "<system-reminder>")"
+
 finish
