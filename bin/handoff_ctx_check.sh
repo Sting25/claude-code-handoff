@@ -61,6 +61,23 @@
 #                               flagging again so we don't nag every turn).
 #                               Only relevant once re-flags are allowed —
 #                               see HANDOFF_CTX_MAX_FLAGS.
+#   HANDOFF_CTX_COOLDOWN_TOKENS same, for the token-denominated ledger used
+#                               when the Stop hook has recorded nothing and the
+#                               nudge is running off the statusline cache alone
+#                               (see "Progress ledger" below). Defaults to
+#                               HANDOFF_CTX_COOLDOWN_KB converted at the same
+#                               4:1 bytes-per-token ratio this script already
+#                               uses for its estimate fallback, so one knob
+#                               governs both ledgers unless you split them.
+#   HANDOFF_CTX_SL_MAX_AGE_SECS how recent .ctx_sl_<sid> must be to drive the
+#                               nudge on its own, with no Stop-hook data to
+#                               cross-check it against (default: 900). A
+#                               statusLine that stops rendering leaves a frozen
+#                               cache behind; without an age horizon the hook
+#                               would keep nudging off a number that can no
+#                               longer change. 0 disables the token ledger
+#                               entirely, restoring the pre-#69 behavior of
+#                               exiting whenever .ctx_<sid> is absent.
 #   HANDOFF_FENCES_REINJECT_KB  transcript growth (KB) between re-injections
 #                               of the handoff's provenance-verified rules
 #                               block (default: 200; 0 disables). See the
@@ -120,6 +137,59 @@ fi
 # --- Read hook payload ---
 payload="$(cat 2>/dev/null || true)"
 [[ -z "$payload" ]] && exit 0
+
+# --- jq preflight (issue #68) -----------------------------------------------
+# Every jq call below is wired `2>/dev/null || true`, so a missing jq does not
+# error here — it yields an empty session_id and this hook exits 0 having done
+# nothing, for every prompt of every session, forever. install.sh refuses to
+# install without jq (install.d/40-main.sh) and --doctor reports it BROKEN, but
+# a PLUGIN install runs neither: `/plugin install` wires hooks/hooks.json and
+# never executes the installer, so nothing on that path has ever checked.
+# handoff_session_start.sh and handoff_recover_tail.sh already say so out loud;
+# this hook and the Stop hook were the two holdouts.
+#
+# UserPromptSubmit stdout is injected into the session, so this is the one
+# place the user reliably reads. Say it ONCE per session (a per-prompt repeat
+# of an install-level problem is nagging, not information) and exit clean —
+# never break the prompt.
+if ! command -v jq >/dev/null 2>&1; then
+  # session_id/cwd without jq, the handoff_session_start.sh way: a fixed-shape
+  # JSON string field is exactly extractable with sed, and the capture cannot
+  # run past the value's closing quote. Only used to key the once-per-session
+  # marker and locate the backup dir; anything unparseable degrades to "warn
+  # every time", which is the safe direction for a broken install.
+  nojq_sid="$(printf '%s' "$payload" \
+    | LC_ALL=C sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+    | head -n 1 || true)"
+  [[ "$nojq_sid" =~ ^[A-Za-z0-9_-]+$ ]] || nojq_sid=""
+  nojq_cwd="$(printf '%s' "$payload" \
+    | LC_ALL=C sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+    | head -n 1 || true)"
+  [[ -n "$nojq_cwd" && -d "$nojq_cwd" ]] || nojq_cwd=""
+  # Same anchor precedence as the shared resolver below, inlined: the lib is
+  # sourced further down and this block must stay ahead of every jq consumer.
+  nojq_anchor="${CLAUDE_PROJECT_DIR:-${nojq_cwd:-$PWD}}"
+  [[ -d "$nojq_anchor" ]] || nojq_anchor="$PWD"
+  nojq_root="$(git -C "$nojq_anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$nojq_root" ]] || nojq_root="$nojq_anchor"
+  nojq_flag=""
+  if [[ -n "$nojq_sid" && ! -L "$nojq_root/.claude" \
+        && ! -L "$nojq_root/.claude/handoff_backups" ]]; then
+    nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_${nojq_sid}"
+  fi
+  if [[ -z "$nojq_flag" || ! -f "$nojq_flag" ]]; then
+    echo "⚠️  handoff: jq not found on PATH — the per-turn backup (Stop hook) and the context nudge are disabled for this session. Nothing is being recorded, so /handoff will have no raw dump to fall back on. Install jq (brew install jq / apt install jq), then start a new session."
+    # Not `mkdir && : > f || true`: that is A && B || C, where C also runs
+    # when A succeeds and B fails — shellcheck SC2015, and here it would mean
+    # a failed marker write looked identical to a successful one.
+    if [[ -n "$nojq_flag" && ! -L "$nojq_flag" ]]; then
+      if mkdir -p "$(dirname "$nojq_flag")" 2>/dev/null; then
+        : > "$nojq_flag" 2>/dev/null || true
+      fi
+    fi
+  fi
+  exit 0
+fi
 
 session_id="$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)"
 [[ -z "$session_id" ]] && exit 0
@@ -202,14 +272,79 @@ if [[ "${HANDOFF_CTX_NO_STATUSLINE:-0}" != "1" && -f "$sl_file" ]]; then
   fi
 fi
 
-# Nothing recorded yet — first prompt of the session, before any Stop fire.
-# Deliberately still gated on the Stop hook's size file even when statusline
-# data exists: the cooldown ledger below is byte-denominated, so statusline
-# data alone (Stop hook broken/uninstalled) must not activate nudging.
-[[ -f "$size_file" ]] || exit 0
+# --- Progress ledger (issue #69) --------------------------------------------
+# Everything below — the nudge cooldown, the flag file, and the fences
+# re-injection cadence — needs a monotonically growing "how far has this
+# session come" number. Historically that was ONLY the Stop hook's transcript
+# byte count (.ctx_<sid>), and its absence exited the hook outright:
+#
+#     [[ -f "$size_file" ]] || exit 0
+#
+# The reasoning was sound (a byte-denominated ledger cannot be fed by the
+# statusline cache, which carries no byte count) but the consequence was that a
+# dead Stop hook did not degrade context watching, it deleted it — silently, at
+# any context level, even with Claude Code's own numbers sitting unread in
+# .ctx_sl_<sid>. That matters most exactly where the Stop hook is most likely
+# to be missing: a plugin install, where the statusline is the only accurate
+# context signal there is.
+#
+# So the ledger is now chosen rather than assumed:
+#
+#   bytes  — .ctx_<sid> present. IDENTICAL to the previous behavior in every
+#            respect: same numbers, same flag files, same cooldown semantics.
+#   tokens — .ctx_<sid> absent, but the statusline cache carries a usable token
+#            count AND is recent enough to still be live. Cooldowns are then
+#            denominated in tokens, and the flag/fences ledgers use SEPARATE
+#            paths (.ctx_flagged_tok_/.fences_tok_) so a byte count and a token
+#            count can never be compared as if they were the same quantity.
+#   neither — exit 0, as before.
+#
+# The token cooldown derives from HANDOFF_CTX_COOLDOWN_KB at the same 4:1
+# bytes-per-token ratio this script already uses for its estimate fallback, so
+# one knob keeps governing re-flag spacing in both ledgers; override it
+# directly with HANDOFF_CTX_COOLDOWN_TOKENS.
+#
+# Freshness matters more here than on the preferred-tokens path above. That one
+# compares the sl cache against the Stop hook's tokens file; with no Stop hook
+# there is nothing to compare against, so a statusline that stopped rendering
+# would otherwise freeze a count and keep nudging off it forever. Hence an
+# absolute age horizon.
+SL_MAX_AGE="${HANDOFF_CTX_SL_MAX_AGE_SECS:-900}"
+[[ "$SL_MAX_AGE" =~ ^[0-9]+$ ]] || SL_MAX_AGE=900
 
-current_bytes="$(cat "$size_file" 2>/dev/null || echo 0)"
-[[ "$current_bytes" =~ ^[0-9]+$ ]] || exit 0
+ledger="bytes"
+current_bytes=0
+if [[ -f "$size_file" ]]; then
+  current_bytes="$(cat "$size_file" 2>/dev/null || echo 0)"
+  [[ "$current_bytes" =~ ^[0-9]+$ ]] || exit 0
+elif [[ -n "$sl_tokens" ]] && (( sl_tokens > 0 )) && (( SL_MAX_AGE > 0 )); then
+  # Portable mtime, same GNU/BSD idiom as the freshness guard above. An
+  # unreadable mtime (0) is treated as stale — fail quiet, not fail loud.
+  sl_age_mtime="$(stat -c %Y "$sl_file" 2>/dev/null || stat -f %m "$sl_file" 2>/dev/null || echo 0)"
+  sl_now="$(date +%s 2>/dev/null || echo 0)"
+  [[ "$sl_age_mtime" =~ ^[0-9]+$ ]] || sl_age_mtime=0
+  [[ "$sl_now" =~ ^[0-9]+$ ]] || sl_now=0
+  if (( sl_age_mtime > 0 && sl_now > 0 && sl_now - sl_age_mtime <= SL_MAX_AGE )); then
+    ledger="tokens"
+  else
+    exit 0
+  fi
+else
+  exit 0
+fi
+
+# Ledger-specific units. `progress` is what the cooldown/fences arithmetic
+# below measures growth in; the flag paths are disjoint per ledger so the two
+# numbering systems never meet in one file.
+if [[ "$ledger" == "tokens" ]]; then
+  progress="$sl_tokens"
+  cooldown_units="${HANDOFF_CTX_COOLDOWN_TOKENS:-$((COOLDOWN_KB * 1024 / 4))}"
+  [[ "$cooldown_units" =~ ^[0-9]+$ ]] || cooldown_units=$((COOLDOWN_KB * 1024 / 4))
+  flag_file="$backup_dir/.ctx_flagged_tok_${session_id}"
+else
+  progress="$current_bytes"
+  cooldown_units=$((COOLDOWN_KB * 1024))
+fi
 
 # --- Rules re-injection against decay (issue #42) ----------------------------
 # SessionStart loads the handoff's BIND-marked rules with binding framing (see
@@ -246,12 +381,18 @@ elif (( FENCES_KB > 0 )) && [[ -f "$handoff_doc" ]] \
   . "$prov_dir/handoff_provenance.sh"
   if handoff_provenance_ok "$handoff_doc" "$repo_root" ".claude/handoff_current.md" \
      && handoff_bind_has_content "$handoff_doc"; then
-    fences_flag="$backup_dir/.fences_${session_id}"
+    if [[ "$ledger" == "tokens" ]]; then
+      fences_flag="$backup_dir/.fences_tok_${session_id}"
+      fences_units=$((FENCES_KB * 1024 / 4))
+    else
+      fences_flag="$backup_dir/.fences_${session_id}"
+      fences_units=$((FENCES_KB * 1024))
+    fi
     emit_fences=0
     if [[ -f "$fences_flag" ]]; then
       last_fences="$(cat "$fences_flag" 2>/dev/null || echo 0)"
       [[ "$last_fences" =~ ^[0-9]+$ ]] || last_fences=0
-      if (( current_bytes >= last_fences + FENCES_KB * 1024 )); then
+      if (( progress >= last_fences + fences_units )); then
         emit_fences=1
       fi
     fi
@@ -263,7 +404,7 @@ elif (( FENCES_KB > 0 )) && [[ -f "$handoff_doc" ]] \
         # Guard the write+rename so a full disk / unwritable dir can't abort the
         # hook under set -e (the ctx nudge below must still run). Clean up the
         # temp on any failure so we don't leak .fences.XXXXXX orphans.
-        { printf '%s\n' "$current_bytes" > "$fences_tmp" \
+        { printf '%s\n' "$progress" > "$fences_tmp" \
             && mv -f "$fences_tmp" "$fences_flag"; } 2>/dev/null \
           || rm -f "$fences_tmp" 2>/dev/null || true
       fi
@@ -399,10 +540,15 @@ elif [[ -f "$tokens_file" ]]; then
   est_tokens="$(cat "$tokens_file" 2>/dev/null || echo 0)"
   [[ "$est_tokens" =~ ^[0-9]+$ ]] || est_tokens=0
 fi
-if (( est_tokens == 0 )); then
+# The bytes/4 estimate exists only on the bytes ledger; on the tokens ledger
+# sl_tokens is non-zero by construction (it is what selected that ledger), so
+# est_tokens is already a real measurement and there is no byte count to
+# estimate from.
+if (( est_tokens == 0 )) && [[ "$ledger" == "bytes" ]]; then
   est_tokens=$((current_bytes / 4))
   token_source="estimated"
 fi
+(( est_tokens > 0 )) || exit 0
 
 # --- Ratchet: a MEASURED count above 200k tokens cannot fit a 200k window, so
 #     a smaller AUTO-DETECTED window is provably wrong (e.g. a 1M-native model
@@ -440,10 +586,9 @@ if [[ -f "$flag_file" ]]; then
   if (( MAX_FLAGS > 0 && flag_count >= MAX_FLAGS )); then
     exit 0
   fi
-  last_flagged_bytes="$(tail -n 1 "$flag_file" 2>/dev/null || echo 0)"
-  [[ "$last_flagged_bytes" =~ ^[0-9]+$ ]] || last_flagged_bytes=0
-  cooldown_bytes=$((COOLDOWN_KB * 1024))
-  if (( current_bytes < last_flagged_bytes + cooldown_bytes )); then
+  last_flagged="$(tail -n 1 "$flag_file" 2>/dev/null || echo 0)"
+  [[ "$last_flagged" =~ ^[0-9]+$ ]] || last_flagged=0
+  if (( progress < last_flagged + cooldown_units )); then
     exit 0
   fi
 fi
@@ -459,7 +604,11 @@ pct=$((est_tokens * 100 / WINDOW_TOKENS))
 if (( MAX_FLAGS > 0 && flag_count + 1 >= MAX_FLAGS )); then
   repeat_note="Automatic-nudge cap reached (HANDOFF_CTX_MAX_FLAGS=${MAX_FLAGS}): this reminder will not re-fire this session."
 else
-  repeat_note="This reminder will not re-fire for at least another ${COOLDOWN_KB}KB of transcript growth."
+  if [[ "$ledger" == "tokens" ]]; then
+    repeat_note="This reminder will not re-fire for at least another ${cooldown_units} tokens of context growth."
+  else
+    repeat_note="This reminder will not re-fire for at least another ${COOLDOWN_KB}KB of transcript growth."
+  fi
 fi
 
 # On the bytes/4 fallback, mark the figure as an estimate so a reader (and the
@@ -500,7 +649,7 @@ if [[ ! -L "$flag_file" ]]; then
   if [[ -s "$flag_file" ]] && [[ "$(tail -c1 "$flag_file" | wc -l)" -eq 0 ]]; then
     printf '\n' >> "$flag_file"
   fi
-  printf '%s\n' "$current_bytes" >> "$flag_file"
+  printf '%s\n' "$progress" >> "$flag_file"
 fi
 
 exit 0

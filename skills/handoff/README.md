@@ -344,6 +344,23 @@ export HANDOFF_CTX_THRESHOLD_PCT=40
 # suggest-mode cap of 1 there is nothing for the cooldown to gate.
 export HANDOFF_CTX_COOLDOWN_KB=100
 
+# Same spacing, for the token-denominated ledger the nudge falls back to
+# when the Stop hook has recorded nothing and the statusline cache is the
+# only context signal available (see HANDOFF_CTX_SL_MAX_AGE_SECS below).
+# Default: HANDOFF_CTX_COOLDOWN_KB converted at 4 bytes per token, i.e.
+# 25600 at the default 100KB — so one knob governs both ledgers unless
+# you deliberately split them.
+export HANDOFF_CTX_COOLDOWN_TOKENS=25600
+
+# How recent the statusline cache (.ctx_sl_*) must be to drive the nudge
+# ON ITS OWN, with no Stop-hook data to cross-check it against. Default:
+# 900 (15 minutes). A statusLine that stops rendering leaves a frozen
+# cache behind, and without an age horizon the nudge would keep firing
+# off a number that can no longer change. Set 0 to disable the token
+# ledger entirely, restoring the pre-0.14.2 behavior where an absent
+# .ctx_<session_id> silenced the nudge outright.
+export HANDOFF_CTX_SL_MAX_AGE_SECS=900
+
 # Hard cap on how many times a single session flags, regardless of
 # growth. Default: 1 in "suggest" mode (one nudge per session, then
 # silence — a long or idle session won't keep nagging; added in 0.8.4),

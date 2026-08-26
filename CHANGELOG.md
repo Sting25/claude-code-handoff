@@ -10,6 +10,57 @@ after `git pull` re-patches settings.json idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 
+## [Unreleased]
+
+Plugin-mode context watching. No hook-command or permission-entry
+changes — nothing to re-patch in `~/.claude/settings.json`; plugin
+installs pick this up on update, bare-scripts installs on `git pull`
+(symlink mode) or re-run `./install.sh` (copy mode).
+
+### Fixed
+- **The Stop hook and the ctx nudge failed silently without `jq`
+  (#68).** `install.sh` refuses to install without `jq` and
+  `--doctor` reports it BROKEN, but a **plugin** install runs
+  neither: `/plugin install` wires `hooks/hooks.json` and never
+  executes the installer. On that path nothing had ever checked.
+  `handoff_turn_append.sh` called `jq` unguarded under `set -euo
+  pipefail` and died at exit 127; `handoff_ctx_check.sh` had its
+  calls `|| true`-guarded and exited 0 having emitted nothing. Both
+  wirings end `2>/dev/null || true`, so the message and the status
+  were discarded either way — a session accumulated no per-turn
+  backup and no context sidecars, and only found out at `/handoff`
+  time. Both hooks now preflight `jq` and say so on **stdout**
+  (stderr is what the wiring throws away), once per session via a
+  shared `.ctx_nojq_<session_id>` marker. Neither ever breaks the
+  turn: both still exit 0.
+- **A dead Stop hook silenced the context nudge entirely, at any
+  context level (#69).** The nudge was hard-gated on
+  `.ctx_<session_id>` — a file only the Stop hook writes — because
+  its cooldown ledger is denominated in transcript bytes and the
+  statusline cache carries no byte count. Measured consequence: at
+  ~90% of context, with Claude Code's own window and usage numbers
+  present and fresh in `.ctx_sl_<session_id>`, the hook emitted zero
+  bytes. It now selects a ledger rather than assuming one — **bytes**
+  when `.ctx_<session_id>` exists (identical numbers, flag files and
+  cooldown semantics to before), **tokens** from the statusline cache
+  when it does not. The rules re-injection downstream of the same
+  gate (#42) is restored with it. The two ledgers use disjoint flag
+  paths (`.ctx_flagged_tok_`, `.fences_tok_`) so the two quantities
+  can never be compared as one. This matters most on plugin installs,
+  where the statusline is the only accurate context signal available.
+
+### Added
+- `HANDOFF_CTX_COOLDOWN_TOKENS` — re-flag spacing for the token
+  ledger. Defaults to `HANDOFF_CTX_COOLDOWN_KB` converted at the same
+  4:1 bytes-per-token ratio the estimate fallback already uses, so one
+  knob keeps governing both unless you split them.
+- `HANDOFF_CTX_SL_MAX_AGE_SECS` (default 900) — how recent the
+  statusline cache must be to drive the nudge on its own. A statusLine
+  that stops rendering leaves a frozen cache behind, and with no
+  Stop-hook data to cross-check against there is nothing else to catch
+  it. `0` disables the token ledger, restoring the previous behavior
+  exactly.
+
 ## [0.14.1] — 2026-08-11
 
 Patch release from the post-0.14.0 adversarial review (three

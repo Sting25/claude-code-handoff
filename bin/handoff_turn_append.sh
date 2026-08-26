@@ -33,6 +33,58 @@ umask 077
 
 # --- Read hook payload ---
 payload="$(cat)"
+
+# --- jq preflight (issue #68) -----------------------------------------------
+# The two jq calls below are UNGUARDED (no `2>/dev/null || true`) and this
+# script runs under `set -euo pipefail`, so a missing jq kills the hook at
+# exit 127 — and every wiring of it, in hooks/hooks.json and in install.sh's
+# canonical settings block alike, ends `2>/dev/null || true`, which discards
+# both the message and the status. The result is a session that silently
+# accumulates no per-turn backup and no context sidecars, and only finds out
+# at /handoff time.
+#
+# install.sh refuses to install without jq and --doctor reports it BROKEN, but
+# a PLUGIN install runs neither, so nothing on that path has ever checked. Fail
+# the same way we already fail here (exit 0, never break the turn) but say so
+# first, on STDOUT — stderr is what the hook wiring throws away.
+#
+# Once per session: the marker is shared with handoff_ctx_check.sh, so whichever
+# hook reaches it first speaks and the other stays quiet. In practice that is
+# the ctx check (UserPromptSubmit precedes the first Stop), which is the better
+# outcome — its stdout is injected into the session rather than only surfacing
+# in the transcript.
+if ! command -v jq >/dev/null 2>&1; then
+  nojq_sid="$(printf '%s' "$payload" \
+    | LC_ALL=C sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+    | head -n 1 || true)"
+  [[ "$nojq_sid" =~ ^[A-Za-z0-9_-]+$ ]] || nojq_sid=""
+  nojq_cwd="$(printf '%s' "$payload" \
+    | LC_ALL=C sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+    | head -n 1 || true)"
+  [[ -n "$nojq_cwd" && -d "$nojq_cwd" ]] || nojq_cwd=""
+  nojq_anchor="${CLAUDE_PROJECT_DIR:-${nojq_cwd:-$PWD}}"
+  [[ -d "$nojq_anchor" ]] || nojq_anchor="$PWD"
+  nojq_root="$(git -C "$nojq_anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$nojq_root" ]] || nojq_root="$nojq_anchor"
+  nojq_flag=""
+  if [[ -n "$nojq_sid" && ! -L "$nojq_root/.claude" \
+        && ! -L "$nojq_root/.claude/handoff_backups" ]]; then
+    nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_${nojq_sid}"
+  fi
+  if [[ -z "$nojq_flag" || ! -f "$nojq_flag" ]]; then
+    echo "⚠️  handoff: jq not found on PATH — the per-turn backup (Stop hook) and the context nudge are disabled for this session. Nothing is being recorded, so /handoff will have no raw dump to fall back on. Install jq (brew install jq / apt install jq), then start a new session."
+    # Not `mkdir && : > f || true`: that is A && B || C, where C also runs
+    # when A succeeds and B fails — shellcheck SC2015, and here it would mean
+    # a failed marker write looked identical to a successful one.
+    if [[ -n "$nojq_flag" && ! -L "$nojq_flag" ]]; then
+      if mkdir -p "$(dirname "$nojq_flag")" 2>/dev/null; then
+        : > "$nojq_flag" 2>/dev/null || true
+      fi
+    fi
+  fi
+  exit 0
+fi
+
 session_id="$(jq -r '.session_id // empty'      <<<"$payload")"
 transcript_path="$(jq -r '.transcript_path // empty' <<<"$payload")"
 # Payload `cwd`: second-rung anchor for the shared root resolver below.

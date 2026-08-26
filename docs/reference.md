@@ -108,6 +108,21 @@ statusLine payload) over the model-regex auto-detection — the env
 pin `HANDOFF_CTX_WINDOW_TOKENS` still overrides everything, and
 `HANDOFF_CTX_NO_STATUSLINE=1` restores the regex-only chain.
 
+The nudge needs a growth measure to space its reminders, and until
+0.14.2 that could only be the Stop hook's transcript byte count
+(`.ctx_<session_id>`) — so if the Stop hook was not running, the
+nudge exited silently no matter how full the context was, even with
+the statusline cache sitting right beside it. It now selects a
+ledger: **bytes** when `.ctx_<session_id>` exists (unchanged), or
+**tokens** from a fresh statusline cache when it does not. The two
+use separate flag files, so a byte count and a token count are never
+compared as if they were the same quantity. `HANDOFF_CTX_SL_MAX_AGE_SECS`
+(default 900) bounds how stale that cache may be before the token
+ledger stands down; `0` disables it and restores the old behavior.
+This matters most on **plugin installs**, where the statusline is the
+only accurate context signal available (plugins cannot set
+`statusLine`, so it is wired by hand — see [Status line](#status-line)).
+
 ## Status line
 
 `bin/handoff_statusline.sh` is an optional statusLine command that
