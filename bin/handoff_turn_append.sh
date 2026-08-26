@@ -33,6 +33,66 @@ umask 077
 
 # --- Read hook payload ---
 payload="$(cat)"
+
+# --- jq preflight (issue #68) -----------------------------------------------
+# The two jq calls below are UNGUARDED (no `2>/dev/null || true`) and this
+# script runs under `set -euo pipefail`, so a missing jq kills the hook at
+# exit 127 — and every wiring of it, in hooks/hooks.json and in install.sh's
+# canonical settings block alike, ends `2>/dev/null || true`, which discards
+# both the message and the status. The result is a session that silently
+# accumulates no per-turn backup and no context sidecars, and only finds out
+# at /handoff time.
+#
+# install.sh refuses to install without jq and --doctor reports it BROKEN, but
+# a PLUGIN install runs neither, so nothing on that path has ever checked. Fail
+# the same way we already fail here (exit 0, never break the turn) but say so
+# first, on STDOUT — stderr is what the hook wiring throws away.
+#
+# Once per session: the marker is shared with handoff_ctx_check.sh, so whichever
+# hook reaches it first speaks and the other stays quiet. In practice that is
+# the ctx check (UserPromptSubmit precedes the first Stop), which is the better
+# outcome — its stdout is injected into the session rather than only surfacing
+# in the transcript.
+if ! command -v jq >/dev/null 2>&1; then
+  nojq_sid="$(printf '%s' "$payload" \
+    | LC_ALL=C sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+    | head -n 1 || true)"
+  [[ "$nojq_sid" =~ ^[A-Za-z0-9_-]+$ ]] || nojq_sid=""
+  nojq_cwd="$(printf '%s' "$payload" \
+    | LC_ALL=C sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+    | head -n 1 || true)"
+  [[ -n "$nojq_cwd" && -d "$nojq_cwd" ]] || nojq_cwd=""
+  nojq_anchor="${CLAUDE_PROJECT_DIR:-${nojq_cwd:-$PWD}}"
+  [[ -d "$nojq_anchor" ]] || nojq_anchor="$PWD"
+  nojq_root="$(git -C "$nojq_anchor" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$nojq_root" ]] || nojq_root="$nojq_anchor"
+  # Fall back to a fixed marker name when the session id is empty/invalid, so
+  # the once-per-session throttle still applies (an unparseable payload must
+  # not degrade this into a per-fire warning); see handoff_ctx_check.sh's
+  # sibling block for the full reasoning. Only a genuinely-unwritable
+  # directory (symlinked .claude or handoff_backups) keeps warn-anyway.
+  nojq_flag=""
+  if [[ ! -L "$nojq_root/.claude" && ! -L "$nojq_root/.claude/handoff_backups" ]]; then
+    if [[ -n "$nojq_sid" ]]; then
+      nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_${nojq_sid}"
+    else
+      nojq_flag="$nojq_root/.claude/handoff_backups/.ctx_nojq_unknown"
+    fi
+  fi
+  if [[ -z "$nojq_flag" || ! -f "$nojq_flag" ]]; then
+    echo "⚠️  handoff: jq not found on PATH — the per-turn backup (Stop hook) and the context nudge are disabled for this session. Nothing is being recorded, so /handoff will have no raw dump to fall back on. Install jq (brew install jq / apt install jq), then start a new session."
+    # Not `mkdir && : > f || true`: that is A && B || C, where C also runs
+    # when A succeeds and B fails — shellcheck SC2015, and here it would mean
+    # a failed marker write looked identical to a successful one.
+    if [[ -n "$nojq_flag" && ! -L "$nojq_flag" ]]; then
+      if mkdir -p "$(dirname "$nojq_flag")" 2>/dev/null; then
+        : > "$nojq_flag" 2>/dev/null || true
+      fi
+    fi
+  fi
+  exit 0
+fi
+
 session_id="$(jq -r '.session_id // empty'      <<<"$payload")"
 transcript_path="$(jq -r '.transcript_path // empty' <<<"$payload")"
 # Payload `cwd`: second-rung anchor for the shared root resolver below.
@@ -590,8 +650,11 @@ while IFS= read -r old; do
   rm -f  -- "$backup_dir/.ctx_tokens_${id}"
   rm -f  -- "$backup_dir/.ctx_model_${id}"
   rm -f  -- "$backup_dir/.ctx_flagged_${id}"
+  rm -f  -- "$backup_dir/.ctx_flagged_tok_${id}"  # token-ledger nudge cap/cooldown (issue #69)
   rm -f  -- "$backup_dir/.ctx_sl_${id}"        # statusline cache sidecar
   rm -f  -- "$backup_dir/.fences_${id}"        # rules re-injection cooldown state (issue #42)
+  rm -f  -- "$backup_dir/.fences_tok_${id}"    # token-ledger rules re-injection cooldown (issue #69)
+  rm -f  -- "$backup_dir/.ctx_nojq_${id}"      # jq-missing once-per-session warning marker (issue #68)
 done < <(list_our_dumps | tail -n +4)
 
 exit 0

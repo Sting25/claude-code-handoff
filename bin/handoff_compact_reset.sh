@@ -10,27 +10,35 @@
 # Stop fire repopulate real post-compact numbers.
 #
 # What is deleted, and why each one:
-#   .ctx_<sid>         — byte size. LOAD-BEARING delete: ctx-check gates on
-#                        this file ("nothing recorded yet" -> exit 0), so
-#                        removing it guarantees NO nudge can fire in the gap
-#                        between compaction and the next Stop fire — not even
-#                        off a stale estimate.
-#   .ctx_tokens_<sid>  — pre-compact usage; wrong by definition now.
-#   .ctx_flagged_<sid> — the nudge cap/cooldown ledger; clearing it re-arms
-#                        one nudge for the freed window (the point of this).
-#   .ctx_sl_<sid>      — statusline cache; also pre-compact (the statusline
-#                        will overwrite it within a second anyway).
+#   .ctx_<sid>             — byte size. LOAD-BEARING delete: ctx-check gates
+#                            on this file ("nothing recorded yet" -> exit 0),
+#                            so removing it guarantees NO nudge can fire in
+#                            the gap between compaction and the next Stop
+#                            fire — not even off a stale estimate.
+#   .ctx_tokens_<sid>      — pre-compact usage; wrong by definition now.
+#   .ctx_flagged_<sid>     — the byte-ledger nudge cap/cooldown; clearing it
+#                            re-arms one nudge for the freed window (the
+#                            point of this).
+#   .ctx_flagged_tok_<sid> — the TOKEN ledger's nudge cap/cooldown (issue
+#                            #69's fallback path, used when the Stop hook's
+#                            byte sidecar above is absent). Same re-arm
+#                            reasoning as .ctx_flagged_<sid>: without this
+#                            clear, the default suggest-mode MAX_FLAGS=1 nudge
+#                            on the token ledger fires exactly once per
+#                            session ever, never again after a compaction.
+#   .ctx_sl_<sid>          — statusline cache; also pre-compact (the
+#                            statusline will overwrite it within a second
+#                            anyway).
 # KEPT: .ctx_model_<sid> — the model didn't change across compaction, and
 # keeping it preserves window auto-detection until the next Stop fire.
-# KEPT: .fences_<sid> — the rules re-injection cooldown (handoff_ctx_check.sh
-#                       writes it). Deliberate, and stated here because this
-#                       header's job is to account for EVERY sidecar and it
-#                       previously omitted this one entirely. Its state is a
-#                       transcript-byte watermark, and the transcript keeps
-#                       growing across compaction, so the delta comparison
-#                       still advances correctly; handoff_session_start.sh
-#                       also re-injects on source=compact, which would make a
-#                       reset here a double injection.
+# KEPT: .fences_<sid> and .fences_tok_<sid> — the rules re-injection cooldown
+# (handoff_ctx_check.sh writes these, one per ledger). Deliberate, and stated
+# here because this header's job is to account for EVERY sidecar and it
+# previously omitted these entirely. Their state is a transcript-byte (or
+# token) watermark, and the underlying progress keeps growing across
+# compaction, so the delta comparison still advances correctly;
+# handoff_session_start.sh also re-injects on source=compact, which would
+# make a reset here a double injection.
 #
 # Degradation: PostCompact only exists on CC >= 2.1.76 (older builds simply
 # never fire this). jq missing -> exit 0; the sidecars then age out via the
@@ -91,6 +99,7 @@ backup_dir="$repo_root/.claude/handoff_backups"
 rm -f -- "$backup_dir/.ctx_${session_id}" \
          "$backup_dir/.ctx_tokens_${session_id}" \
          "$backup_dir/.ctx_flagged_${session_id}" \
+         "$backup_dir/.ctx_flagged_tok_${session_id}" \
          "$backup_dir/.ctx_sl_${session_id}"
 
 exit 0

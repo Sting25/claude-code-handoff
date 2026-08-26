@@ -136,12 +136,22 @@ repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; mkdir -p "$bd"; tx="$repo
 printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
 for i in 1 2 3; do
   must eval "echo d > '$bd/handoff_raw_OLD$i.md'; echo s > '$bd/.ctx_sl_OLD$i'; echo 0 > '$bd/.handoff_raw_OLD$i.cursor'"
+  # The token-ledger sidecars added by issue #69/#72 (.ctx_flagged_tok_,
+  # .fences_tok_) and the jq-missing marker (.ctx_nojq_) previously had no
+  # prune coverage at all and accumulated one per session forever.
+  must eval "echo f > '$bd/.ctx_flagged_tok_OLD$i'; echo f > '$bd/.fences_tok_OLD$i'; echo n > '$bd/.ctx_nojq_OLD$i'"
   must touch -t "20200101000$i" "$bd/handoff_raw_OLD$i.md"
 done
 run_turn "$repo" NEWSL "$tx"
 check "prune: oldest dump evicted"        no  "$([[ -f "$bd/handoff_raw_OLD1.md" ]] && echo yes || echo no)"
 check "prune: evicted .ctx_sl_ removed"   no  "$([[ -f "$bd/.ctx_sl_OLD1" ]] && echo yes || echo no)"
 check "prune: surviving .ctx_sl_ kept"    yes "$([[ -f "$bd/.ctx_sl_OLD3" ]] && echo yes || echo no)"
+check "prune: evicted .ctx_flagged_tok_ removed" no  "$([[ -f "$bd/.ctx_flagged_tok_OLD1" ]] && echo yes || echo no)"
+check "prune: surviving .ctx_flagged_tok_ kept"  yes "$([[ -f "$bd/.ctx_flagged_tok_OLD3" ]] && echo yes || echo no)"
+check "prune: evicted .fences_tok_ removed"      no  "$([[ -f "$bd/.fences_tok_OLD1" ]] && echo yes || echo no)"
+check "prune: surviving .fences_tok_ kept"       yes "$([[ -f "$bd/.fences_tok_OLD3" ]] && echo yes || echo no)"
+check "prune: evicted .ctx_nojq_ removed"        no  "$([[ -f "$bd/.ctx_nojq_OLD1" ]] && echo yes || echo no)"
+check "prune: surviving .ctx_nojq_ kept"         yes "$([[ -f "$bd/.ctx_nojq_OLD3" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
 # --- .gitignore bootstrap lock (shared with write_handoff.sh) ----------------
