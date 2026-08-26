@@ -395,9 +395,10 @@ export HANDOFF_SESSIONEND_SKIP_REASONS=resume
 # --- Trusted-rules tier (issue #42) ---
 
 # Path of the per-machine HMAC secret used to sign handoffs so the next
-# session can load the Rules/pinned blocks as BINDING (see the main
-# README's "Trusted rules" section). Default: ~/.claude/handoff_secret —
-# auto-generated 0600 on first signed write; never commit it anywhere.
+# session can load the Rules/pinned blocks as BINDING (see
+# docs/reference.md's "Trusted rules" section). Default:
+# ~/.claude/handoff_secret — auto-generated 0600 on first signed write;
+# never commit it anywhere.
 export HANDOFF_SECRET_FILE=~/.claude/handoff_secret
 
 # Set to 1 to turn the trusted-rules tier off entirely: handoffs aren't

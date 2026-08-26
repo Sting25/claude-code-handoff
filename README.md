@@ -6,6 +6,8 @@ automatically when the next session starts — so you pick up where you
 left off instead of starting from a blank slate or an auto-compacted
 digest you never read.
 
+**Technical reference:** [docs/reference.md](docs/reference.md)
+
 ## What it does
 
 - **Snapshots where you left off** — git state plus a written summary of decisions, open questions, and next steps.
@@ -45,7 +47,8 @@ the plugin's own `bin/`, wherever Claude Code checks the plugin out
 `${CLAUDE_CONFIG_DIR:-~/.claude}/plugins/cache/<marketplace>/claude-code-handoff/<version>/bin/`).
 
 The one thing a plugin install can't wire up for you is the optional
-status line — details below, under **How it works → Status line**.
+status line: see [docs/reference.md](docs/reference.md#status-line)
+for how to wire it in by hand.
 
 ### Bare-scripts install (legacy / alternative)
 
@@ -120,136 +123,39 @@ once — run it if you're unsure which mode you're in.
 
 ## How it works
 
-Six hooks. A bare-scripts install writes these into
-`~/.claude/settings.json` via `./install.sh`; a plugin install ships
-the same six in [`hooks/hooks.json`](hooks/hooks.json) and Claude Code
-loads them automatically — no settings.json patching either way:
+Six hooks drive it, wired up by either install mode (the plugin ships
+them in `hooks/hooks.json`; the bare-scripts installer patches them
+into `~/.claude/settings.json`):
+`SessionStart` loads the latest handoff into a new session,
+`SessionEnd` and `PreCompact` write a mechanical git-state safety net
+before an ending or a compaction, `Stop` appends each turn to a
+backup and records context usage, `UserPromptSubmit` nudges you
+toward `/handoff` once usage crosses roughly 40% of the window, and
+`PostCompact` resets those measurements so the freed window is
+treated as fresh. Handoffs are signed with a per-machine HMAC key, so
+a cloned repo can't inject fake standing rules: only rules with a
+valid signature load as binding, everything else loads as inert
+reference text.
 
-| Hook | Job |
-| --- | --- |
-| `SessionStart` | Loads the latest handoff into the new session; prints an `ACTION: RUN /handoff-recover` banner if the last session ended without curated notes. |
-| `SessionEnd` | Safety-net git-state snapshot on clean exit. No-op if you already ran `/handoff`; skipped on `/resume` session-switches. |
-| `Stop` | After each assistant turn: appends the turn to a raw-dump backup and records context measurements. |
-| `UserPromptSubmit` | Injects an advisory `/handoff` nudge once usage crosses ~40% of the window; periodically re-injects verified rules so they don't decay. |
-| `PreCompact` | Same safety-net snapshot before compaction destroys the conversation. |
-| `PostCompact` | Resets context measurements so the freed window is treated as fresh. |
-
-**Files.** The latest snapshot lives at
-`<repo>/.claude/handoff_current.md`; each new write rotates the old one
-into `.claude/handoff_history/` (last 5 kept; `HANDOFF_HISTORY_KEEP=N`
-to change, `0` disables pruning entirely). Per-turn raw dumps and
-context measurements live under `.claude/handoff_backups/`. Both dirs
-are gitignored on first write — handoffs are per-developer, not
-checked-in artifacts. Retention only ever deletes files this tool
-generated; anything you drop into those directories yourself is left
-alone.
-
-**The handoff doc.** Above the fold: mechanical git state (HEAD,
-branch, recent commits, working tree, in-flight docs). Below: the
-"Notes from this session" block — decisions, open questions, next
-steps — which only `/handoff` fills in (the automatic safety net
-leaves it as a placeholder). An HMAC trailer proves the doc was
-written locally. Full example in
-[docs/reference.md](docs/reference.md#what-the-handoff-actually-looks-like).
-
-**Trusted rules.** A handoff can carry standing rules (a pinned file at
-`.claude/handoff_pinned.md` plus a `## Rules` section) meant to bind the
-next session. They load as binding only when provenance is proven: the
-file is untracked in git AND carries a valid HMAC-SHA256 signature made
-with a per-machine secret (`~/.claude/handoff_secret`, never in any
-repo) — so a cloned repo can't inject fake rules. Anything less (no
-`openssl`, tracked file, bad signature, `HANDOFF_TRUST_DISABLE=1`)
-loads the whole file as defanged reference data. Model-authored notes
-never bind. Verified rules are re-injected as the transcript grows so
-they don't decay. Full design:
-[docs/reference.md](docs/reference.md#trusted-rules-when-the-fences-actually-bind).
-
-**Why the cryptography (in one paragraph).** Prompt injection can't be
-fully prevented — a session that reads a poisoned README or web page can
-be manipulated. What the signing prevents is that compromise *persisting*:
-the handoff would be the natural place for a manipulated session to plant
-standing orders for every future session, so nothing gets promoted to
-binding without a seal only this machine's writer can produce. Since
-v0.13.0 that includes a structural fingerprint recorded at publish time —
-`--restamp` (re-signing after the model curates its notes) refuses to
-bless a document whose structure changed outside the two zones the model
-is allowed to edit. The failure mode is always a *downgrade*: tampered or
-unverifiable rules still load, but as visibly untrusted reference notes.
-One boundary is deliberate: rules the model writes in its own sanctioned
-Rules section (that's the carry-your-fences-forward feature) do bind —
-review them when they change.
-
-**Status line (optional).** `handoff_statusline.sh` renders
-`Fable | ctx 34% (340k/1000k) | handoff: curated` and caches Claude
-Code's own context numbers (`.ctx_sl_<session_id>`) so the nudge uses
-real usage instead of model-id guessing. `statusLine` is a single slot
-in `~/.claude/settings.json` — only one command can occupy it — so how
-it gets wired differs by install mode:
-
-- **Bare-scripts install** — `./install.sh` wires it for you, but only
-  if you don't already have a statusLine (an existing one is never
-  overwritten; the installer prints the manual step instead).
-- **Plugin install** — plugins cannot set `statusLine` at all (Claude
-  Code has no per-plugin mechanism for it); wiring it is a manual,
-  optional paste into `~/.claude/settings.json`:
-
-  ```json
-  "statusLine": { "type": "command", "command": "bash \"$(ls -td \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"/plugins/cache/*/claude-code-handoff/*/bin/handoff_statusline.sh 2>/dev/null | head -1)\" 2>/dev/null" }
-  ```
-
-  `ls -td` picks the newest cached plugin version by directory mtime,
-  not by version number, so it can pick the wrong script if an older
-  version's cache directory was touched more recently than the current
-  one.
-
-Details: [docs/reference.md](docs/reference.md#status-line).
+See [docs/reference.md](docs/reference.md) for the full technical
+reference: hook internals, file formats, the signing design, and the
+optional status line.
 
 ## Configuration
 
-Common env vars (set in `~/.bashrc` / `~/.zshrc`):
+Configuration is entirely through `HANDOFF_*` environment variables
+set in your shell rc file (`~/.bashrc`, `~/.zshrc`): how many old
+handoffs to keep, the context-window size the nudge uses, whether
+trusted rules are enabled, and more. Defaults work for a normal
+single-repo project; you only need to touch these for non-default
+setups (a shared substrate repo, a custom pinned-context path, tuning
+how aggressively the nudge fires).
 
-- `HANDOFF_HISTORY_KEEP` — snapshots kept in history (default 5; `0` disables pruning entirely).
-- `HANDOFF_CTX_WINDOW_TOKENS` — pin the context-window size the nudge assumes; overrides all auto-detection.
-- `HANDOFF_PINNED_FILE` — alternate path for the pinned-context file.
-- `HANDOFF_TRUST_DISABLE=1` — disable binding rules; everything loads as reference data.
-- `HANDOFF_FENCES_REINJECT_KB` — transcript growth between rule re-injections (default ~200KB; `0` disables).
-- `HANDOFF_SESSIONEND_SKIP_REASONS` — SessionEnd reasons treated as a pause, not an ending (default: `resume`).
-
-Full list in [skills/handoff/README.md](skills/handoff/README.md).
-Test/debug overrides:
-
-```bash
-# Override where handoff_recover_tail.sh (and ONLY that script) looks for the
-# per-session cursor file used by /handoff-recover. Default:
-# <repo>/.claude/handoff_backups. This does NOT relocate the backup directory
-# project-wide: the Stop hook, ctx-check, compact-reset, and statusline hooks
-# each resolve <repo>/.claude/handoff_backups independently and ignore this
-# var, so setting it to anything but the real write location desyncs
-# recover_tail from its own cursor file (it warns on stderr if it detects
-# this). Meant for tests that stage a throwaway cursor file, not for
-# relocating handoffs.
-export HANDOFF_BACKUP_DIR=/custom/path
-
-# Override the projects root searched by /handoff-recover to find the
-# current session's transcript. Default: $HOME/.claude/projects.
-export HANDOFF_PROJECTS_DIR=/custom/projects/path
-
-# Use this exact JSONL path as the transcript, skipping the projects-dir
-# search. Useful for testing or when the transcript lives outside the
-# normal Claude Code structure.
-export HANDOFF_RECOVER_TRANSCRIPT=/path/to/transcript.jsonl
-
-# How old a lock must be before it is presumed ORPHANED and forcibly
-# reclaimed. Not a timeout: nothing waits this long, and lowering it does
-# not make anything give up faster — it makes locks get STOLEN from
-# holders that are slow but alive, which interleaves dump content and
-# clobbers the cursor. Read by the Stop hook's per-turn dump lock AND by
-# write_handoff.sh's whole-run and .gitignore locks. Default: 300, chosen
-# to sit comfortably above Claude Code's 60s hook timeout. Raise it if you
-# see dumps interleaving on a very slow machine; there is no reason to
-# lower it. Must be a plain integer — anything else falls back to 300.
-export HANDOFF_LOCK_STALE_SECS=600
-```
+See [docs/reference.md](docs/reference.md) for the full technical
+reference (hook internals, file formats, signing design, every
+environment variable) and
+[skills/handoff/README.md](skills/handoff/README.md) for the complete
+`/handoff` env-var list.
 
 ## Updating, doctor, uninstall
 
