@@ -92,6 +92,71 @@ if [[ -n "$self_dir" && -f "$self_dir/handoff_provenance.sh" ]]; then
   # shellcheck source=bin/handoff_provenance.sh
   . "$self_dir/handoff_provenance.sh"
 fi
+
+# Install-mode detection for the header block emitted below (issue #66): the
+# header used to hardcode bare-scripts wording ("~/.claude/bin",
+# "~/.claude/settings.json") unconditionally, which misdescribes a plugin
+# install (the writer lives under the plugin cache, hooks come from the
+# plugin's hooks/hooks.json, never ~/.claude/settings.json) and, per the
+# issue follow-up, misdescribes a third shape too: a git clone run directly
+# (this repo dogfoods itself that way) or a --copy/relocated install that
+# matches neither convention.
+#
+# This MUST be computed here, before the `cat <<EOF` header below, and MUST
+# NOT be patched in by --restamp: the header sits inside the skeleton-HMAC
+# preamble (everything before the Notes/Rules bind regions), so both the
+# main HMAC and the structural skeleton stamp cover these exact bytes.
+# --restamp re-signs an existing document in place and never regenerates the
+# preamble (see the --restamp handling below), so a handoff written before
+# this change keeps its original (bare-scripts-worded) preamble forever:
+# its skeleton digest is unaffected by this file changing, and it keeps
+# verifying unmodified. See tests/test_mode_aware_header.sh for the
+# before/after proof.
+#
+# Detection reuses the exact self_dir-based idiom handoff_session_start.sh
+# already established for this (issue #71's `case "$self_dir" in
+# */plugins/cache/*)`), rather than inventing a new one: a marketplace
+# segment could in principle be named "bin", so the plugins/cache/ glob is
+# checked first and wins over the bare-scripts equality check below it. The
+# bare-scripts comparison mirrors handoff_provenance.sh's own
+# claude_home="${CLAUDE_HOME:-$HOME/.claude}" convention. Anything else
+# (clone run directly, relocated bin/, unusual --copy target) names the
+# resolved directory literally instead of guessing a channel, per the
+# issue's "there are three states, not two" note.
+handoff_bare_scripts_bin="${CLAUDE_HOME:-$HOME/.claude}/bin"
+if [[ -z "$self_dir" ]]; then
+  handoff_mode_intro="Auto-written by write_handoff.sh (its own directory could not be
+resolved from \`\$BASH_SOURCE\`, so its exact location and hook wiring cannot
+be named here). Auto-loaded into the next session by whichever
+\`SessionStart\` hook this install wired."
+else
+  case "$self_dir" in
+    */plugins/cache/*)
+      handoff_mode_intro="Auto-written by the claude-code-handoff plugin's \`bin/write_handoff.sh\`
+(called from the \`/handoff\` skill + the \`SessionEnd\` hook wired in the
+plugin's own \`hooks/hooks.json\`, not \`~/.claude/settings.json\`).
+Auto-loaded into the next session by the \`SessionStart\` hook in that same
+file. Running from \`$self_dir\`."
+      ;;
+    "$handoff_bare_scripts_bin")
+      handoff_mode_intro="Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
+\`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).
+Auto-loaded into the next session by the \`SessionStart\` hook in the
+same settings file."
+      ;;
+    *)
+      handoff_mode_intro="Auto-written by \`$self_dir/write_handoff.sh\`, which matches neither the
+plugin cache layout (\`plugins/cache/\`) nor the bare-scripts
+\`~/.claude/bin\` convention, so the hook wiring cannot be named
+generically here (a git clone run directly, and a relocated or
+\`--copy\`/\`--link\` install pointed somewhere unusual, both land here).
+Check \`hooks/hooks.json\` next to this script if this looks like a plugin
+install, or \`~/.claude/settings.json\` (honoring any \`CLAUDE_HOME\`
+override) otherwise. Auto-loaded into the next session by whichever
+\`SessionStart\` hook this install wired."
+      ;;
+  esac
+fi
 # Fallback marker/prefix definitions keep `set -u` happy when the lib is
 # absent (the markers are inert scaffolding without a valid MAC anyway).
 HANDOFF_BIND_BEGIN="${HANDOFF_BIND_BEGIN:-<!-- HANDOFF_BIND_BEGIN -->}"
@@ -1093,10 +1158,7 @@ handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
   printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n\n' "$repo_root" "$in_git"
 
   cat <<EOF
-Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
-\`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).
-Auto-loaded into the next session by the \`SessionStart\` hook in the
-same settings file. Lives at \`<root>/.claude/handoff_current.md\`, where
+$handoff_mode_intro Lives at \`<root>/.claude/handoff_current.md\`, where
 \`<root>\` is resolved from the Claude Code project dir (falling back to
 the hook payload's cwd, then the process cwd) and then anchored on that
 dir's git toplevel — the same resolution the loader uses, recorded in the
