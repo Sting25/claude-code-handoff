@@ -123,6 +123,24 @@ fi
 # (clone run directly, relocated bin/, unusual --copy target) names the
 # resolved directory literally instead of guessing a channel, per the
 # issue's "there are three states, not two" note.
+#
+# self_dir is embedded verbatim into this signed preamble below (the plugin
+# and "anything else" branches both name it), and a directory NAME can
+# legally contain a newline on a POSIX filesystem (only NUL and `/` are
+# forbidden), so a self_dir crafted with an embedded newline followed by
+# `<!-- HANDOFF_BIND_BEGIN -->`, a rule line, and `<!-- HANDOFF_BIND_END -->`
+# would otherwise plant a real, balanced bind region of its own inside the
+# signed document. handoff_bind_markers_balanced only checks that BEGIN/END
+# pairs balance, not where they sit, so that smuggled pair would verify and
+# the loader would present the planted line inside the trusted rules block
+# alongside the writer's own Pin/Rules regions. This is exactly the class of
+# embedded-content injection handoff_sanitize_markers exists to close (it
+# already guards the pin body the same way, below): apply it here too
+# rather than trusting self_dir as inert.
+handoff_self_dir_safe="$self_dir"
+if [[ -n "$self_dir" ]] && type handoff_sanitize_markers >/dev/null 2>&1; then
+  handoff_self_dir_safe="$(printf '%s' "$self_dir" | handoff_sanitize_markers)"
+fi
 handoff_bare_scripts_bin="${CLAUDE_HOME:-$HOME/.claude}/bin"
 if [[ -z "$self_dir" ]]; then
   handoff_mode_intro="Auto-written by write_handoff.sh (its own directory could not be
@@ -136,7 +154,7 @@ else
 (called from the \`/handoff\` skill + the \`SessionEnd\` hook wired in the
 plugin's own \`hooks/hooks.json\`, not \`~/.claude/settings.json\`).
 Auto-loaded into the next session by the \`SessionStart\` hook in that same
-file. Running from \`$self_dir\`."
+file. Running from \`$handoff_self_dir_safe\`."
       ;;
     "$handoff_bare_scripts_bin")
       handoff_mode_intro="Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
@@ -145,7 +163,7 @@ Auto-loaded into the next session by the \`SessionStart\` hook in the
 same settings file."
       ;;
     *)
-      handoff_mode_intro="Auto-written by \`$self_dir/write_handoff.sh\`, which matches neither the
+      handoff_mode_intro="Auto-written by \`$handoff_self_dir_safe/write_handoff.sh\`, which matches neither the
 plugin cache layout (\`plugins/cache/\`) nor the bare-scripts
 \`~/.claude/bin\` convention, so the hook wiring cannot be named
 generically here (a git clone run directly, and a relocated or
