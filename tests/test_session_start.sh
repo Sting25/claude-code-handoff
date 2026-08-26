@@ -213,6 +213,14 @@ check "origin marker: content unchanged on 2nd fire (same id)" "111222333" "$(ca
 check "origin marker: mtime unchanged on 2nd fire (same id)" "$mtime1" \
   "$(stat -f %m "$marker" 2>/dev/null || stat -c %Y "$marker" 2>/dev/null)"
 # A DIFFERENT session id still gets its own marker, independent of the first.
+# Reset the first marker's mtime off its year-2020 stamp before this fire —
+# a REAL 7+-day-old marker is exactly what the orphaned-marker sweep (issue
+# #76, a different session's fire reaping a stale sibling) is SUPPOSED to
+# reap, and that behavior is covered on its own in
+# tests/test_session_start_marker_sweep.sh. This assertion is about a
+# narrower thing: a DIFFERENT session id's fire must not touch a sibling
+# marker that is not (yet) sweep-eligible.
+touch "$marker"
 sid2="sidCreateOnce63b"
 marker2="$proj/.claude/handoff_backups/.session_started_${sid2}"
 fire_ss_sid "$proj" "$sid2"
