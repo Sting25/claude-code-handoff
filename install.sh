@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: a550607ddbbf5180d538d719b53be01ec2646d52a62ad2c1c726abf326f08123
+# SOURCE-SHA256: 0f26a123827b768f7727c224b47a469aed2e792f6d9b6e4845886d5d79f55c30
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1048,8 +1048,9 @@ signing_status_reason() {
 # remedy, when a plugin cache is present and no bare-scripts artifact is.
 doctor() {
   local broken=0 dst tgt name mdl secret smode sign_reason
-  local plugin_dir bare_present plugin_only script_hooks_present
+  local plugin_dir bare_wired plugin_only script_hooks_present dangling_list
   local vdir vcount hooks_json missing_scripts events_str expected_events
+  local missing_events extra_events ev rest
 
   # Plugin cache detection lives up front now (used by several sections
   # below), via the `|| true` idiom already used elsewhere in this file so a
@@ -1079,23 +1080,27 @@ doctor() {
   fi
   echo
 
-  # bare_present: is there ANY evidence of a bare-scripts install at all,
-  # either a script under $claude_home/bin (even a dangling symlink, which
-  # is real breakage worth reporting, not absence) or a hook wired into
-  # settings.json? Deliberately broader than the six-marker jq lookup below
-  # (script_hooks_present, unchanged, keyed on SessionStart only, matching
-  # what the coexistence WARN has always used): this one only decides
-  # whether the per-script loop applies at all, not whether both modes are
-  # double-firing.
-  bare_present=0
+  # bare_wired: is there a REAL bare-scripts install, not just leftover
+  # cruft? Either a hook wired into settings.json, or at least one bin/
+  # script that actually resolves. `-e` alone (not `-e || -L`) is
+  # deliberate: for a symlink it follows the link and requires the target to
+  # exist, so a lone DANGLING symlink does not flip this true on its own.
+  # Before this fix, any one of the eight paths existing (dangling or not)
+  # was enough, so a plugin-only machine with a single stale dangling
+  # `write_handoff.sh` left behind by a hand-removed bare install got
+  # dragged into the per-script loop below and reported the other seven as
+  # MISSING, restoring issue #64's exact bug. Dangling remnants are real and
+  # worth naming, so they're collected separately (dangling_list) and
+  # reported as one WARN instead of feeding this check.
+  bare_wired=0
   for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
     dst="$claude_home/bin/$name.sh"
-    if [[ -e "$dst" || -L "$dst" ]]; then
-      bare_present=1
+    if [[ -e "$dst" ]]; then
+      bare_wired=1
       break
     fi
   done
-  if (( ! bare_present )) && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
+  if (( ! bare_wired )) && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
     if jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
            --arg st "$st_marker" --arg up "$up_marker" '
          ( (.hooks.SessionStart // [])     | any(.. | .command? // "" | contains($ss)) ) or
@@ -1105,11 +1110,23 @@ doctor() {
          ( (.hooks.Stop // [])             | any(.. | .command? // "" | contains($st)) ) or
          ( (.hooks.UserPromptSubmit // []) | any(.. | .command? // "" | contains($up)) )
        ' "$settings" >/dev/null 2>&1; then
-      bare_present=1
+      bare_wired=1
     fi
   fi
+
+  # Collect any dangling-only leftovers regardless of bare_wired: a symlink
+  # whose target is gone is real breakage worth naming even on a healthy
+  # plugin-only machine, just not evidence of a wired bare-scripts install.
+  dangling_list=""
+  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+    dst="$claude_home/bin/$name.sh"
+    if [[ -L "$dst" && ! -e "$dst" ]]; then
+      dangling_list="$dangling_list $dst"
+    fi
+  done
+
   plugin_only=0
-  if [[ -n "$plugin_dir" ]] && (( ! bare_present )); then
+  if [[ -n "$plugin_dir" ]] && (( ! bare_wired )); then
     plugin_only=1
   fi
 
@@ -1117,6 +1134,12 @@ doctor() {
     echo "doctor: no bare-scripts install found under $claude_home/bin, skipping"
     echo "        the per-script hook checks (this installer's own scripts were"
     echo "        never installed here). See the plugin section below."
+    if [[ -n "$dangling_list" ]]; then
+      echo "  WARN    stale bare-scripts artifact(s) found, but no bare-scripts"
+      echo "          install is actually wired:$dangling_list"
+      echo "          Dangling symlink(s) left over from a removed install; they"
+      echo "          don't affect the plugin. Safe to remove: rm$dangling_list"
+    fi
   else
     echo "doctor: checking installed handoff hooks under $claude_home/bin"
     for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
@@ -1265,11 +1288,18 @@ doctor() {
     # version dir by mtime, same "ls -td | head -1" idiom the README's own
     # manual statusLine snippet uses for the same reason (a cache can hold
     # more than one version, see docs/reference.md's stale-cache note).
+    # `|| true` on both substitutions below (same idiom as plugin_dir above):
+    # when the glob matches nothing (no version subdirectory at all), `ls`
+    # itself exits nonzero even with output suppressed by 2>/dev/null, and
+    # under set -e that failure inside a bare assignment aborts doctor
+    # entirely, silently, before the "no version subdirectory" BROKEN line a
+    # few lines down ever gets a chance to print. `|| true` lets that BROKEN
+    # line do its job instead of the whole command dying first.
     # shellcheck disable=SC2012  # ls -t is deliberate: mtime ordering, and BSD find has no -printf (same idiom as bin/handoff_recover_tail.sh's ls -t)
-    vdir="$(ls -td "$plugin_dir"/*/ 2>/dev/null | head -1)"
+    vdir="$(ls -td "$plugin_dir"/*/ 2>/dev/null | head -1 || true)"
     vdir="${vdir%/}"
     # shellcheck disable=SC2012  # plain dir count, not name-sensitive: any non-empty ls -d line counts as one version regardless of its characters
-    vcount="$(ls -d "$plugin_dir"/*/ 2>/dev/null | wc -l | tr -d ' ')"
+    vcount="$(ls -d "$plugin_dir"/*/ 2>/dev/null | wc -l | tr -d ' ' || true)"
     if [[ -z "$vdir" || ! -d "$vdir" ]]; then
       echo "  BROKEN  $plugin_dir has no version subdirectory, the plugin cache looks empty or corrupted"
       broken=$((broken + 1))
@@ -1289,13 +1319,50 @@ doctor() {
         echo "  BROKEN  $hooks_json is not valid JSON, every plugin hook is silently disabled"
         broken=$((broken + 1))
       else
-        events_str="$(jq -r '.hooks | keys | sort | join(",")' "$hooks_json" 2>/dev/null)"
+        # `.hooks // {}` guards a valid-but-hookless hooks.json (`{}` parses
+        # fine but has no "hooks" key, so bare `.hooks` resolves to null, and
+        # `keys` on null is a jq runtime error, exit 5, which used to abort
+        # doctor entirely under set -e before this BROKEN branch ever ran).
+        # `|| true` on the substitution catches that same failure mode for
+        # any other malformed shape too, leaving events_str empty so the
+        # subset check below reports it as BROKEN (missing all six) instead
+        # of taking doctor down with it.
+        events_str="$(jq -r '.hooks // {} | keys | sort | join(",")' "$hooks_json" 2>/dev/null || true)"
         expected_events="PostCompact,PreCompact,SessionEnd,SessionStart,Stop,UserPromptSubmit"
-        if [[ "$events_str" != "$expected_events" ]]; then
-          echo "  BROKEN  $hooks_json is missing hook event(s): has [$events_str], expected [$expected_events]"
+        # Subset check, not exact equality: hooks.json only counts as broken
+        # if it's missing one of the six events this tool wires. Exact
+        # equality used to flag a hooks.json with an EXTRA event (a future
+        # Claude Code hook, or a fork's own addition) as "missing" events it
+        # never lost, just because the sorted list no longer matched
+        # verbatim.
+        missing_events=""
+        for ev in PostCompact PreCompact SessionEnd SessionStart Stop UserPromptSubmit; do
+          case ",$events_str," in
+            *",$ev,"*) ;;
+            *) missing_events="$missing_events $ev" ;;
+          esac
+        done
+        if [[ -n "$missing_events" ]]; then
+          echo "  BROKEN  $hooks_json is missing hook event(s):$missing_events (has [$events_str], need all of [$expected_events])"
           broken=$((broken + 1))
         else
           echo "  ok      $hooks_json has all six hook events"
+          extra_events=""
+          rest="$events_str"
+          while [[ -n "$rest" ]]; do
+            ev="${rest%%,*}"
+            case "$rest" in
+              *,*) rest="${rest#*,}" ;;
+              *) rest="" ;;
+            esac
+            case " $ev " in
+              *" PostCompact "*|*" PreCompact "*|*" SessionEnd "*|*" SessionStart "*|*" Stop "*|*" UserPromptSubmit "*) ;;
+              *) [[ -n "$ev" ]] && extra_events="$extra_events $ev" ;;
+            esac
+          done
+          if [[ -n "$extra_events" ]]; then
+            echo "  note    $hooks_json also declares extra hook event(s), harmless:$extra_events"
+          fi
         fi
       fi
       missing_scripts=""
@@ -1319,7 +1386,7 @@ doctor() {
   # script_hooks_present is deliberately the narrow, SessionStart-marker-only
   # signal (unchanged from before #64/#70): it decides WARN vs. info for
   # the coexistence note specifically, not whether the per-script loop above
-  # ran (that's plugin_only/bare_present, a broader check, see above).
+  # ran (that's plugin_only/bare_wired, a broader check, see above).
   if [[ -n "$plugin_dir" ]]; then
     script_hooks_present=0
     if command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
@@ -1335,8 +1402,15 @@ doctor() {
       echo "          one mode — either '/plugin uninstall claude-code-handoff' or"
       echo "          './install.sh --uninstall'."
     else
-      echo "  info    plugin install detected ($plugin_dir) — this installer's doctor"
-      echo "          does not manage plugin installs; nothing to do here."
+      # F5: "nothing to do here" used to follow this, which contradicted the
+      # plugin cache checks that just ran a few lines up. Reworded to say
+      # what's actually true: doctor reads the plugin's files to verify them,
+      # it just never installs, updates, or removes them (that stays
+      # Claude Code's own /plugin command).
+      echo "  info    plugin install detected ($plugin_dir); this installer's doctor"
+      echo "          does not manage plugin installs (install/update/removal is"
+      echo "          Claude Code's own /plugin command); the checks above are"
+      echo "          read-only verification of the plugin's cache, not management."
     fi
     echo
   fi
