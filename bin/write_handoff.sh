@@ -903,7 +903,12 @@ if (( overwrite_guard_fired )); then
     echo "  HANDOFF_OVERWRITE_GUARD=warn: proceeding anyway." >&2
   elif (( TAKEOVER )); then
     echo "  --takeover: proceeding anyway." >&2
-    if [[ "$HISTORY_KEEP" -gt 0 ]]; then
+    # rotate_existing_handoff DELETES an outgoing unedited placeholder rather
+    # than archiving it (it carries no curated prose to preserve) — the
+    # "will be archived" wording below must not claim otherwise for that case.
+    if handoff_is_unedited_placeholder "$handoff_path"; then
+      echo "  the fresher $handoff_relpath is an uncurated placeholder (no curated prose) and will be DISCARDED, not archived." >&2
+    elif [[ "$HISTORY_KEEP" -gt 0 ]]; then
       to_mtime="$(stat -c %Y "$handoff_path" 2>/dev/null || stat -f %m "$handoff_path" 2>/dev/null || true)"
       to_stamp=""
       if [[ "$to_mtime" =~ ^[0-9]+$ ]]; then

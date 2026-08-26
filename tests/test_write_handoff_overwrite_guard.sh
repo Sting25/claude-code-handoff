@@ -111,6 +111,21 @@ check "5: --takeover -> fresher doc archived to history" yes \
   "$(grep -rq 'MARKER5' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- 5b: --takeover over a PLACEHOLDER fresher doc -> discarded, not
+#         archived (rotate_existing_handoff deletes an unedited placeholder
+#         rather than archiving it — the stderr note must say so, not claim
+#         an archive path that will never exist) -------------------------
+repo="$(mk_repo_gitignored)"
+plant_doc "$repo" "$(writer_marker sidB 3000)" no
+plant_origin "$repo" sidA 500
+rc=0
+err="$( cd "$repo" && bash "$WH" --session-id sidA --takeover 2>&1 >/dev/null )"; rc=$?
+check "5b: --takeover over placeholder -> exit 0" 0 "$rc"
+check "5b: --takeover over placeholder -> 'discarded' note" yes "$(has "$err" "will be DISCARDED, not archived")"
+check "5b: --takeover over placeholder -> no bogus archive-path claim" no "$(has "$err" "will be archived")"
+check "5b: --takeover over placeholder -> nothing actually archived" 0 "$(hist_count "$repo")"
+rm -rf "$repo"
+
 # --- 6: --restamp on a cross-session doc: never fires, still verifies ------
 repo="$(mk_repo_gitignored)"
 ( cd "$repo" && bash "$WH" --session-id sidX >/dev/null 2>&1 )   # real, signed write
