@@ -244,6 +244,21 @@ uninstall_symlinks() {
 # The content is shape-checked, never printed (it is secret material).
 remove_secret_if_ours() {
   local secret="$claude_home/handoff_secret" body
+  # --keep-secret (issue #65): skip the deletion entirely and say so. The
+  # secret is per-machine identity, not per-install-mode state, so a user
+  # switching from bare-scripts to the plugin (the README's own migration
+  # path, via the dual-mode warning) can carry it forward and keep every
+  # already-signed handoff_current.md verifying instead of it silently
+  # downgrading to reference data. Checked before every other guard below:
+  # keeping the file needs none of the shape/ownership proof that deleting
+  # it does.
+  if (( keep_secret )); then
+    echo "  skip    $secret (--keep-secret; preserving the per-machine HMAC secret)"
+    echo "          Existing signed handoffs keep verifying. Both install modes read"
+    echo "          this same default path, so it needs no copying: it's already"
+    echo "          where the plugin install will find it."
+    return 0
+  fi
   if [[ -n "${HANDOFF_SECRET_FILE:-}" ]]; then
     echo "  skip    handoff secret (HANDOFF_SECRET_FILE override set; leaving '$HANDOFF_SECRET_FILE' alone)"
     return 0

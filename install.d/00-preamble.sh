@@ -43,6 +43,7 @@ Usage:
   ./install.sh --model 'opus[1m]'  # also pin "model" in settings.json (env: HANDOFF_MODEL)
   ./install.sh --doctor     # report any dangling/missing installed hooks
   ./install.sh --uninstall  # remove symlinks + strip patched entries
+  ./install.sh --uninstall --keep-secret  # same, but keep the per-machine HMAC secret
   ./install.sh --help
 USAGE
 }
@@ -73,6 +74,19 @@ model_pin=""
 # volatile one (see is_volatile_path below); --copy / --link force the choice,
 # and HANDOFF_FORCE_SYMLINK=1 is an escape hatch for the volatile auto-copy.
 link_mode="auto"
+
+# --uninstall --keep-secret (issue #65): preserve the per-machine HMAC secret
+# instead of deleting it. Only consulted by remove_secret_if_ours() in
+# install mode "uninstall" (harmless, and unused, with any other mode). The
+# secret is per-machine identity, not per-install-mode state: a user moving
+# from bare-scripts to the plugin (the README's own recommended migration,
+# via the dual-mode warning) runs --uninstall first, and without this flag
+# that silently invalidates every already-signed handoff_current.md: the
+# HANDOFF_BIND_BEGIN/END rules block stops verifying and downgrades to
+# reference data with no error, no prompt, nothing in the diff. Default stays
+# "delete" (unchanged, opt-in only) because the secret is also genuinely
+# uninstall-scoped key material for someone leaving the tool entirely.
+keep_secret=0
 
 # Validate $claude_home before creating or patching anything under it: an empty,
 # root, or relative value would scatter symlinks and a patched settings.json
@@ -144,10 +158,11 @@ cleanup() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --uninstall) mode=uninstall ;;
-    --doctor)    mode=doctor ;;
-    --copy)      link_mode=copy ;;
-    --link)      link_mode='link' ;;
+    --uninstall)   mode=uninstall ;;
+    --doctor)      mode=doctor ;;
+    --copy)        link_mode=copy ;;
+    --link)        link_mode='link' ;;
+    --keep-secret) keep_secret=1 ;;
     --model)
       if [[ $# -lt 2 || -z "$2" ]]; then
         echo "ERROR: --model requires a value (e.g. --model 'opus[1m]')" >&2

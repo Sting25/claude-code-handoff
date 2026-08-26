@@ -733,6 +733,21 @@ and only when the content is exactly the 64-hex digest this tool
 generates. A file of yours that happens to sit at that name, or a custom
 `HANDOFF_SECRET_FILE` location, is reported and left alone.
 
+Pass `--keep-secret` to skip that deletion entirely:
+
+```bash
+./install.sh --uninstall --keep-secret
+```
+
+Use this when you're leaving bare-scripts mode to switch to the plugin
+install (see the README's [Dual-mode
+warning](../README.md#dual-mode-warning)), not when you're removing the
+tool for good. The secret is per-machine identity, not per-install-mode
+state, and both modes read it from the same default path, so any
+already-signed `handoff_current.md` (and anything in
+`handoff_history/`) keeps verifying as binding rules across the
+switch instead of silently downgrading to reference data (issue #65).
+
 Everything else in your `settings.json` — your own hooks (including ones
 co-located in the same event), permissions, `statusLine`, `env`, theme —
 is preserved; uninstall only removes entries it can prove are its own.

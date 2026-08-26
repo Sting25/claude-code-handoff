@@ -28,6 +28,10 @@ uninstall_present="no"
 [[ "$out" == *"--uninstall"* ]] && uninstall_present="yes"
 check "--uninstall in output" yes "$uninstall_present"
 
+keep_secret_present="no"
+[[ "$out" == *"--keep-secret"* ]] && keep_secret_present="yes"
+check "--keep-secret in output" yes "$keep_secret_present"
+
 help_present="no"
 [[ "$out" == *"--help"* ]] && help_present="yes"
 check "--help in output" yes "$help_present"
