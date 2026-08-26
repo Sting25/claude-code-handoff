@@ -219,19 +219,61 @@ fi
 # here. Cheap (three path tests), and silent unless something is actually
 # broken. Runs before the no-handoff exit below so a fresh repo still warns.
 # (issue #21)
+# Mode-aware (issue #71): the check above was written for a bare-scripts
+# install, where these siblings are SYMLINKS back to a persistent clone and
+# "Re-run install.sh from your persistent clone" is correct remediation. In a
+# plugin install self_dir is the plugin's OWN cached bin/ — the siblings are
+# regular files, never symlinks — so the dangling-symlink branch can't fire
+# there at all (this check is inert in plugin mode) and, worse, its
+# remediation is the dual-mode trap (#64): a plugin user has no persistent
+# clone to re-run install.sh from. Detect the shape cheaply from self_dir's
+# own path (matches install.sh's plugin-cache layout,
+# .../plugins/cache/<marketplace>/claude-code-handoff/<version>/bin) rather
+# than adding a dependency, and give each shape its own remediation. Also
+# extended (cheap, jq-free, same three-path-test budget) to catch the
+# plugin-mode failure this check previously could not see at all: a sibling
+# simply MISSING (not a dangling link — a corrupted/partial cache
+# extraction), which is exactly the shape a plugin install fails in.
 self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || self_dir=""
 if [ -n "$self_dir" ]; then
-  broken=""
+  broken=""   # dangling symlink (bare-scripts / clone-symlinked install)
+  missing=""  # plain missing file (plugin cache install: no symlinks here)
   for sib in write_handoff.sh handoff_turn_append.sh handoff_ctx_check.sh; do
     if [ -L "$self_dir/$sib" ] && [ ! -e "$self_dir/$sib" ]; then
       broken="$broken $sib"
+    elif [ ! -L "$self_dir/$sib" ] && [ ! -e "$self_dir/$sib" ]; then
+      missing="$missing $sib"
     fi
   done
+  plugin_remedy=0
+  case "$self_dir" in
+    */plugins/cache/*) plugin_remedy=1 ;;
+  esac
   if [ -n "$broken" ]; then
     echo "⚠️  handoff: dangling hook link(s):$broken"
     echo "    Those hooks are silently disabled (handoffs may not be written)."
-    echo "    Re-run install.sh from your persistent clone, or diagnose with:"
-    echo "    bash <clone>/install.sh --doctor"
+    if [ "$plugin_remedy" = "1" ]; then
+      echo "    This looks like a plugin install: reinstall it (/plugin uninstall"
+      echo "    claude-code-handoff, then /plugin install again), or diagnose from"
+      echo "    a clone with: bash <clone>/install.sh --doctor"
+    else
+      echo "    Re-run install.sh from your persistent clone, or diagnose with:"
+      echo "    bash <clone>/install.sh --doctor"
+    fi
+    echo
+  fi
+  if [ -n "$missing" ]; then
+    echo "⚠️  handoff: missing hook script(s):$missing"
+    echo "    Those hooks are silently disabled (handoffs may not be written)."
+    if [ "$plugin_remedy" = "1" ]; then
+      echo "    The plugin's cached copy looks corrupted or partially extracted."
+      echo "    Reinstall it (/plugin uninstall claude-code-handoff, then"
+      echo "    /plugin install again), or diagnose from a clone with:"
+      echo "    bash <clone>/install.sh --doctor"
+    else
+      echo "    Re-run install.sh from your persistent clone, or diagnose with:"
+      echo "    bash <clone>/install.sh --doctor"
+    fi
     echo
   fi
 fi
@@ -262,6 +304,7 @@ fi
 # in the directory". handoff_backups/ also holds dot-prefixed bookkeeping
 # sidecars (.ctx_<sid>, .ctx_sl_<sid>, .ctx_tokens_<sid>, .ctx_model_<sid>,
 # .ctx_flagged_<sid>, .ctx_flagged_tok_<sid>, .ctx_nojq_<sid>,
+# .ctx_prompts_<sid>, .ctx_health_<sid>, .ss_health_<sid>,
 # .handoff_raw_<sid>.cursor/.lock, .fences_<sid>, .fences_tok_<sid>) that
 # handoff_ctx_check.sh and handoff_statusline.sh drop there on a project's
 # FIRST session — .ctx_sl_<sid> in particular is written by the statusline
@@ -297,6 +340,112 @@ if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ]; then
     echo "⚠️  handoff: no handoff to load at $current — but this project has prior handoff artifacts (.claude/handoff_history/ or .claude/handoff_backups/), so one may have been expected. Run /handoff-more or /handoff-recover to inspect what exists."
   fi
   exit 0
+fi
+
+# --- Stop-hook health, detector B (issue #71) --------------------------------
+# handoff_ctx_check.sh's companion detector (A) catches a same-session
+# Stop-hook failure while the session can still act on it, but it depends on
+# UserPromptSubmit firing at all — in the #67 shape (BOTH per-turn hooks
+# dead), it never runs even once. SessionStart is the one place confirmed to
+# still fire in that shape (#67), so this looks BACKWARDS instead: did the
+# STOP HOOK leave any of ITS OWN evidence for the most recent session
+# represented in handoff_backups/?
+#
+# "Its own evidence" means .ctx_tokens_<sid>, .ctx_model_<sid>, the bare
+# .ctx_<sid> byte ledger, or a handoff_raw_<sid>.md dump — all written only by
+# handoff_turn_append.sh (the Stop hook). Everything else in that directory
+# (.ctx_sl_, .ctx_nojq_, .ctx_flagged*, .fences*, .ctx_prompts_, .ctx_health_)
+# is written by handoff_ctx_check.sh or handoff_statusline.sh WITHOUT needing
+# the Stop hook, so it proves a session happened but says nothing about the
+# Stop hook specifically.
+#
+# "Most recent session" is identified by mtime rather than by parsing this
+# hook's OWN payload for it (that names the NEW session, not the previous
+# one): take the newest-mtime file this family of hooks writes, EXCLUDING any
+# candidate that belongs to the CURRENT (new) session, recover its session id
+# from its filename, then check for Stop-hook evidence under THAT id — not "is
+# the newest file itself Stop-hook evidence", because within one healthy
+# session both kinds of file are written throughout, and which one happens to
+# land last by mtime is a coin flip, not a signal. Excluding the current
+# session's own candidates matters because this hook's OWN prior writes (e.g.
+# a statusLine render racing SessionStart, or this very check's own
+# .ss_health_ / .ctx_prompts_ / .ctx_health_ sidecars from an earlier fire in
+# this same session on resume/clear/compact) can already be the newest files
+# in the directory — without the exclusion the newest-mtime pick lands on the
+# CURRENT session, which (being brand new) naturally has no Stop-hook evidence
+# yet, and the check would warn about a perfectly healthy previous session.
+# Silent when there is nothing to look at (a fresh project, an install that
+# predates the backups feature, or every candidate belongs to the current
+# session) — same don't-guess-without-evidence bias as every check in this
+# family. This block only runs once $current is known to exist (the branch
+# above already exited otherwise), so it never fires on a project's first
+# session. Stays jq-free: session_id comes from the payload via the same sed
+# extraction as hook_source/hook_cwd above.
+if [ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]; then
+  hb="$repo/.claude/handoff_backups"
+  if [ -d "$hb" ] && [ ! -L "$hb" ]; then
+    # Recover a session id from one of this family's filenames: longest/most-
+    # specific prefix first so e.g. .ctx_flagged_tok_ is not mis-stripped by
+    # the bare .ctx_flagged_ or .ctx_ patterns.
+    handoff_ss_sid_of() {  # <basename> -> session id on stdout, or empty
+      local b="$1" s=""
+      case "$b" in
+        handoff_raw_*.md)    s="${b#handoff_raw_}"; s="${s%.md}" ;;
+        .ctx_flagged_tok_*)  s="${b#.ctx_flagged_tok_}" ;;
+        .ctx_flagged_*)      s="${b#.ctx_flagged_}" ;;
+        .ctx_tokens_*)       s="${b#.ctx_tokens_}" ;;
+        .ctx_model_*)        s="${b#.ctx_model_}" ;;
+        .ctx_sl_*)            s="${b#.ctx_sl_}" ;;
+        .ctx_nojq_*)          s="${b#.ctx_nojq_}" ;;
+        .ctx_prompts_*)       s="${b#.ctx_prompts_}" ;;
+        .ctx_health_*)        s="${b#.ctx_health_}" ;;
+        .fences_tok_*)        s="${b#.fences_tok_}" ;;
+        .fences_*)             s="${b#.fences_}" ;;
+        .ctx_*)                 s="${b#.ctx_}" ;;   # bare byte ledger, tried last
+      esac
+      case "$s" in
+        [A-Za-z0-9_-]*) printf '%s\n' "$s" ;;
+      esac
+    }
+    ss_sid="$(printf '%s' "$payload" \
+      | LC_ALL=C sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+      | head -n 1 || true)"
+    case "$ss_sid" in
+      [A-Za-z0-9_-]*) : ;;
+      *) ss_sid="unknown" ;;
+    esac
+    # LC_ALL=C: same mtime-tie collation reasoning as the prune loop in
+    # handoff_turn_append.sh. shellcheck: ls over find here is deliberate,
+    # matching that same precedent (BSD find has no -printf for mtime sort).
+    # shellcheck disable=SC2012
+    prev_sid=""
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      [ -f "$cand" ] || continue
+      cand_sid="$(handoff_ss_sid_of "$(basename "$cand")")"
+      [ -n "$cand_sid" ] || continue
+      [ "$cand_sid" = "$ss_sid" ] && continue   # skip the CURRENT session
+      prev_sid="$cand_sid"
+      break
+    done < <(LC_ALL=C ls -t "$hb"/.ctx_* "$hb"/.fences_* "$hb"/handoff_raw_*.md 2>/dev/null || true)
+    if [ -n "$prev_sid" ] \
+       && [ ! -f "$hb/.ctx_tokens_${prev_sid}" ] \
+       && [ ! -f "$hb/.ctx_model_${prev_sid}" ] \
+       && [ ! -f "$hb/.ctx_${prev_sid}" ] \
+       && [ ! -f "$hb/handoff_raw_${prev_sid}.md" ]; then
+      # Throttle once per the CURRENT (new) session — SessionStart can fire
+      # more than once per session (resume/clear/compact), and this warning
+      # is retrospective, about a session that has already ended: repeating
+      # it on every re-fire would nag about something that can't change
+      # mid-session.
+      ss_flag="$hb/.ss_health_${ss_sid}"
+      if [ ! -f "$ss_flag" ] && [ ! -L "$ss_flag" ]; then
+        echo "⚠️  handoff: the Stop hook does not appear to have run last session — no .ctx_tokens_/.ctx_model_/.ctx_ sidecar or handoff_raw_ dump was recorded for it in .claude/handoff_backups/. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
+        echo
+        : > "$ss_flag" 2>/dev/null || true
+      fi
+    fi
+  fi
 fi
 
 # Root-consistency check against the doc's own resolution record (written by

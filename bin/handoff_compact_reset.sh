@@ -30,7 +30,17 @@
 #                            statusline will overwrite it within a second
 #                            anyway).
 # KEPT: .ctx_model_<sid> — the model didn't change across compaction, and
-# keeping it preserves window auto-detection until the next Stop fire.
+# keeping it preserves window auto-detection until the next Stop fire. This
+# KEEP is also load-bearing for Stop-hook health detector A
+# (handoff_ctx_check.sh, issue #71): that detector warns only when BOTH
+# .ctx_<sid> AND .ctx_model_<sid> are absent, specifically BECAUSE this script
+# deletes .ctx_<sid> on every PostCompact fire while keeping .ctx_model_<sid>.
+# A detector gated on .ctx_<sid> alone would false-positive on a perfectly
+# healthy session immediately after an auto-compaction: the byte file is gone
+# (deleted above), the carried-over prompt count from before the compaction
+# may already be past threshold, and nothing would distinguish that from the
+# Stop hook actually being dead. .ctx_model_<sid> surviving here is what makes
+# it durable evidence the Stop hook has run this session at all.
 # KEPT: .fences_<sid> and .fences_tok_<sid> — the rules re-injection cooldown
 # (handoff_ctx_check.sh writes these, one per ledger). Deliberate, and stated
 # here because this header's job is to account for EVERY sidecar and it
@@ -39,6 +49,16 @@
 # compaction, so the delta comparison still advances correctly;
 # handoff_session_start.sh also re-injects on source=compact, which would
 # make a reset here a double injection.
+# KEPT: .ctx_prompts_<sid> (issue #71, Stop-hook health detector A) — the
+# per-session UserPromptSubmit fire count. Compaction does not reset which
+# prompt number the session is on, so clearing it would let a session that
+# already proved the Stop hook dead (crossed HANDOFF_HEALTH_PROMPTS) start
+# re-counting from zero and silently re-arm a "maybe it's just early" state
+# that was already disproven.
+# KEPT: .ctx_health_<sid> — the once-per-session throttle for that same
+# warning. Same reasoning: compaction is mid-session, not a new session: if
+# the warning already fired, it must not fire again just because the
+# transcript was compacted.
 #
 # Degradation: PostCompact only exists on CC >= 2.1.76 (older builds simply
 # never fire this). jq missing -> exit 0; the sidecars then age out via the
