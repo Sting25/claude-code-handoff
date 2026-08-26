@@ -118,7 +118,16 @@ history_dir="$repo/.claude/handoff_history"
 # signal available.
 hb_sweep="$repo/.claude/handoff_backups"
 if [ -d "$hb_sweep" ] && [ ! -L "$hb_sweep" ] && [ ! -L "$repo/.claude" ]; then
-  while IFS= read -r orphan; do
+  # NUL-delimited: a crafted filename carrying an embedded newline (e.g.
+  # ".ctx_health_AAA\nX") would otherwise split across two lines of a
+  # newline-delimited read, letting the second "line" masquerade as a
+  # DIFFERENT, unrelated candidate (a real ".ctx_health_AAA") and get
+  # deleted by proxy. `-print0` / `read -rd ''` treats the whole crafted
+  # name as one opaque field, so it is judged (and, since it fails the
+  # id charset check below, rejected) only on its own actual bytes.
+  # `read -d ''` is available in bash 3.2 (macOS's stock bash, part of the
+  # CI matrix), so this stays portable.
+  while IFS= read -rd '' orphan; do
     [ -n "$orphan" ] || continue
     [ -f "$orphan" ] || continue
     [ ! -L "$orphan" ] || continue
@@ -130,16 +139,28 @@ if [ -d "$hb_sweep" ] && [ ! -L "$hb_sweep" ] && [ ! -L "$repo/.claude" ]; then
       .ss_health_*)   orphan_id="${orphan_base#.ss_health_}" ;;
       *) continue ;;
     esac
-    case "$orphan_id" in
-      [A-Za-z0-9_-]*) : ;;
-      *) continue ;;
-    esac
+    # Full-string charset proof, matching handoff_statusline.sh's own sid
+    # guard (`^[A-Za-z0-9_-]+$`). A `case ... in [A-Za-z0-9_-]*)` glob only
+    # anchors the FIRST character (the rest is consumed by the trailing
+    # `*`), so e.g. "a b!" passed it; the bash regex form anchors both ends.
+    [[ "$orphan_id" =~ ^[A-Za-z0-9_-]+$ ]] || continue
     case "$orphan_base" in
       .ctx_prompts_*)
         # Content proof: a single decimal counter (how ctx-check writes it),
-        # nothing else. Newlines stripped before the charset test so the
-        # normal trailing "\n" from that write doesn't fail it.
-        orphan_content="$(LC_ALL=C tr -d '\n' < "$orphan" 2>/dev/null)"
+        # nothing else, at most one trailing newline. `cat` (not `tr -d
+        # '\n'`) so embedded newlines from multi-line content SURVIVE into
+        # orphan_content and are rejected below rather than being stripped
+        # into a false single "line" of nothing but digits (e.g. "1\n2\n3"
+        # must not read as the decimal "123"). `|| true`: under
+        # `set -e`, an unreadable file (permission-denied litter, e.g. from
+        # a root-owned process) would otherwise make this whole hook exit
+        # nonzero and never load the handoff for any later session start;
+        # the empty result on a read failure falls through to the safe
+        # "not our shape, leave it alone" branch below instead.
+        orphan_content="$(cat "$orphan" 2>/dev/null || true)"
+        case "$orphan_content" in
+          *$'\n'*) continue ;;
+        esac
         case "$orphan_content" in
           ''|*[!0-9]*) continue ;;
         esac
@@ -152,7 +173,7 @@ if [ -d "$hb_sweep" ] && [ ! -L "$hb_sweep" ] && [ ! -L "$repo/.claude" ]; then
     rm -f -- "$orphan"
   done < <(find "$hb_sweep" -maxdepth 1 \
     \( -name '.ctx_nojq_*' -o -name '.ctx_prompts_*' -o -name '.ctx_health_*' -o -name '.ss_health_*' \) \
-    -type f -mtime +7 2>/dev/null || true)
+    -type f -mtime +7 -print0 2>/dev/null || true)
 fi
 
 # Symlink read guard — the read-side twin of write_handoff.sh's write guard.

@@ -122,4 +122,73 @@ check "no current: still exit 0"          0  "$rc"
 check "no current: stale marker reaped anyway" no "$([[ -e "$bd/.ctx_nojq_NOCUR" ]] && echo yes || echo no)"
 rm -rf "$proj"
 
+# --- REGRESSION: unreadable .ctx_prompts_ file must not crash the hook -----
+#     A root-owned (or otherwise permission-denied) leftover under
+#     handoff_backups/ used to make the content-shape read fail, and under
+#     `set -euo pipefail` an unchecked failing command substitution kills the
+#     whole hook: handoff_current.md never loads for ANY later session start,
+#     not just a skipped sweep. `chmod 000` has no effect on the file's own
+#     owner when that owner is root, so this needs a real non-root reader to
+#     demonstrate (same constraint the suite already documents for
+#     test_fences_reinject.sh's "flag not created when unwritable" case).
+if [ "$(id -u)" = "0" ]; then
+  skip "defect: unreadable .ctx_prompts_ crash guard (root ignores chmod)"
+else
+  proj="$(mk_project)"; bd="$proj/.claude/handoff_backups"
+  must printf '3\n' > "$bd/.ctx_prompts_UNREAD"
+  must chmod 000 "$bd/.ctx_prompts_UNREAD"
+  must touch -t 202001010000 "$bd/.ctx_prompts_UNREAD"
+  run_ss "$proj"; rc=$?
+  check "defect1: unreadable file -> exit 0, no crash" 0 "$rc"
+  chmod 600 "$bd/.ctx_prompts_UNREAD" 2>/dev/null || true
+  rm -rf "$proj"
+fi
+
+# --- REGRESSION: embedded-newline filename must not delete-by-proxy --------
+#     find's output was consumed newline-by-newline, so a crafted, aged
+#     ".ctx_health_AAA\nX" split across two "lines" of the read loop, and the
+#     first line, ".ctx_health_AAA", collided with (and deleted) a genuinely
+#     FRESH, unrelated ".ctx_health_AAA" that should have survived on age
+#     alone. NUL-delimited (`-print0` / `read -rd ''`) treats the whole
+#     crafted name as one opaque field instead.
+proj="$(mk_project)"; bd="$proj/.claude/handoff_backups"
+: > "$bd/.ctx_health_AAA"                 # fresh sibling: must survive on age alone
+must printf '' > "$bd/.ctx_health_AAA
+X"                                        # aged, crafted name with an embedded newline
+must touch -t 202001010000 "$bd/.ctx_health_AAA
+X"
+run_ss "$proj"
+check "defect2: fresh sibling survives despite crafted aged namesake" \
+  yes "$([[ -e "$bd/.ctx_health_AAA" ]] && echo yes || echo no)"
+rm -rf "$proj"
+
+# --- REGRESSION: charset proof must anchor the WHOLE id, not just char 1 ---
+#     `case "$id" in [A-Za-z0-9_-]*)` only anchors the FIRST character (the
+#     rest is consumed by the trailing `*`), so an id like "a b!" (space and
+#     bang are outside the allowed charset) passed it. The full-string bash
+#     regex form (matching handoff_statusline.sh's own sid guard) anchors
+#     both ends.
+proj="$(mk_project)"; bd="$proj/.claude/handoff_backups"
+must printf '' > "$bd/.ctx_health_a b!"
+must touch -t 202001010000 "$bd/.ctx_health_a b!"
+run_ss "$proj"
+check "defect3: id with disallowed chars survives" \
+  yes "$([[ -e "$bd/.ctx_health_a b!" ]] && echo yes || echo no)"
+rm -rf "$proj"
+
+# --- REGRESSION: .ctx_prompts_ content proof must reject multi-line content -
+#     `tr -d '\n'` stripped ALL newlines before the digits-only test, so
+#     three-line content like "1\n2\n3" (no trailing newline) collapsed into
+#     the single token "123" and passed as though it were one legitimate
+#     decimal counter. The fix reads the raw content and rejects anything
+#     containing an embedded newline before ever applying the digits-only
+#     check.
+proj="$(mk_project)"; bd="$proj/.claude/handoff_backups"
+must printf '1\n2\n3' > "$bd/.ctx_prompts_MULTI"
+must touch -t 202001010000 "$bd/.ctx_prompts_MULTI"
+run_ss "$proj"
+check "defect4: multi-line numeric content survives" \
+  yes "$([[ -e "$bd/.ctx_prompts_MULTI" ]] && echo yes || echo no)"
+rm -rf "$proj"
+
 finish
