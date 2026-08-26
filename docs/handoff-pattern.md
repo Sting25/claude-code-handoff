@@ -77,7 +77,7 @@ The tool loads the handoff into context; verifying it is the new session's job.
    In the shipped tool the fences layer (the `## Rules` block and the pin)
    loads as *binding* rules — not just reference data — when the handoff's
    provenance verifies (written locally and signed, not clone-delivered);
-   see the main README's "Trusted rules" section.
+   see [docs/reference.md](reference.md#trusted-rules-when-the-fences-actually-bind).
 
 ---
 

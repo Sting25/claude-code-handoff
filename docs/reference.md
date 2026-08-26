@@ -161,6 +161,26 @@ prefer). Without `jq` the script prints a static
 Code versions that don't send `context_window` in the statusLine
 payload, the line degrades to model + handoff state.
 
+**Wiring differs by install mode.** `statusLine` is a single slot in
+`~/.claude/settings.json`, only one command can occupy it, so how it
+gets wired depends on how you installed:
+
+- **Bare-scripts install** wires it for you via `./install.sh`, but
+  only if you don't already have a statusLine (an existing one is
+  never overwritten; the installer prints the manual step instead).
+- **Plugin install** cannot wire it at all: Claude Code has no
+  per-plugin mechanism for `statusLine`, so it is a manual, optional
+  paste into `~/.claude/settings.json`:
+
+  ```json
+  "statusLine": { "type": "command", "command": "bash \"$(ls -td \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"/plugins/cache/*/claude-code-handoff/*/bin/handoff_statusline.sh 2>/dev/null | head -1)\" 2>/dev/null" }
+  ```
+
+  `ls -td` picks the newest cached plugin version by directory mtime,
+  not by version number, so it can pick the wrong script if an older
+  version's cache directory was touched more recently than the
+  current one.
+
 ## Compaction safety net
 
 Compaction (auto or manual `/compact`) destroys conversational
@@ -261,6 +281,17 @@ no pinned section; repos that don't use it are unaffected.
 
 ## Trusted rules: when the fences actually bind
 
+**Why the cryptography.** Prompt injection can't be fully prevented:
+a session that reads a poisoned README or web page can be manipulated
+into acting on hostile text. What the signing defends against is that
+compromise *persisting* past the session that got poisoned: the
+handoff would be the natural place for a manipulated session to plant
+standing orders for every session after it, so nothing gets promoted
+to binding without a seal only this machine's writer can produce. The
+failure mode is always a *downgrade*, never a false positive:
+tampered or unverifiable rules still load, just as visibly untrusted
+reference notes instead of binding law.
+
 The handoff carries two content kinds with opposite trust needs. The
 narrative ("where we left off") is reference **data** — in a cloned
 repo, `.claude/handoff_current.md` can be attacker-committed, so the
@@ -347,7 +378,8 @@ excluded from the skeleton, so writing rules there is exactly what binds
 in the next session. What's defended is everything *outside* the
 sanctioned zones — the document can't grow a *new* rules region, move an
 existing one, or hoist one above the narrative, without the restamp
-noticing and declining to vouch for it.
+noticing and declining to vouch for it. Because that zone does bind
+automatically, review those rules whenever they change.
 
 ## System-log nudge
 
@@ -481,6 +513,41 @@ doesn't read.
 default `<!-- HANDOFF_HMAC: `. Changing it invalidates every existing
 signature, since verification strips and rebuilds the trailer using this
 exact string. Present for testing; there is no reason to set it.
+
+### Test/debug overrides
+
+```bash
+# Override where handoff_recover_tail.sh (and ONLY that script) looks for the
+# per-session cursor file used by /handoff-recover. Default:
+# <repo>/.claude/handoff_backups. This does NOT relocate the backup directory
+# project-wide: the Stop hook, ctx-check, compact-reset, and statusline hooks
+# each resolve <repo>/.claude/handoff_backups independently and ignore this
+# var, so setting it to anything but the real write location desyncs
+# recover_tail from its own cursor file (it warns on stderr if it detects
+# this). Meant for tests that stage a throwaway cursor file, not for
+# relocating handoffs.
+export HANDOFF_BACKUP_DIR=/custom/path
+
+# Override the projects root searched by /handoff-recover to find the
+# current session's transcript. Default: $HOME/.claude/projects.
+export HANDOFF_PROJECTS_DIR=/custom/projects/path
+
+# Use this exact JSONL path as the transcript, skipping the projects-dir
+# search. Useful for testing or when the transcript lives outside the
+# normal Claude Code structure.
+export HANDOFF_RECOVER_TRANSCRIPT=/path/to/transcript.jsonl
+
+# How old a lock must be before it is presumed ORPHANED and forcibly
+# reclaimed. Not a timeout: nothing waits this long, and lowering it does
+# not make anything give up faster — it makes locks get STOLEN from
+# holders that are slow but alive, which interleaves dump content and
+# clobbers the cursor. Read by the Stop hook's per-turn dump lock AND by
+# write_handoff.sh's whole-run and .gitignore locks. Default: 300, chosen
+# to sit comfortably above Claude Code's 60s hook timeout. Raise it if you
+# see dumps interleaving on a very slow machine; there is no reason to
+# lower it. Must be a plain integer — anything else falls back to 300.
+export HANDOFF_LOCK_STALE_SECS=600
+```
 
 ### Environment variables and the trust boundary
 
