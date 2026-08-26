@@ -3,13 +3,13 @@
 > Status: PROPOSED design note, written 2026-08-10 during the v0.13.0 release
 > stabilization. Implementation is v0.14.0 work — do NOT land any of this on
 > `release/v0.13.0`. `bin/write_handoff.sh` is explicitly EXCLUDED from any
-> split by user decision (see `.scaffold.toml`).
+> split by user decision.
 
 Two load-bearing findings shaped this plan:
 
-- **`.scaffold.toml` already anticipates this work.** It carries a committed
-  override (`[size] "install.sh" = 1400`, dated 2026-08-10) — this doc
-  formalizes the plan that override references.
+- **A size-cap exemption for `install.sh` (1400 lines, recorded 2026-08-10)
+  already anticipated this work**; this doc formalizes the plan that
+  exemption referenced.
 - **`install.sh` is not actually a bare curl-pipe artifact today.** It
   resolves `repo_root` from its own path and `link`/`cp`s sibling `bin/*.sh`
   and `skills/*` from that tree (lines 41, 384–396) — it only works run from
@@ -74,9 +74,8 @@ path), built by contributors and re-verified in CI.**
   path, so it still lints the real, final script. Linting `install.d/*.sh`
   fragments directly would false-positive on names defined in earlier
   modules and adds no coverage the drift gate + whole-file shellcheck lack.
-- **`guardrails` (`check-size`):** update the `.scaffold.toml` `install.sh`
-  override reason to "generated build artifact; source lives in
-  `install.d/*.sh`, each ≤500 (default cap)". The human-edited source becomes
+- **Size guardrails:** treat `install.sh` as a generated build artifact whose
+  source lives in `install.d/*.sh`, each ≤500 lines. The human-edited source becomes
   compliant by construction; the generated concatenation is exempt the same
   way a minified bundle would be.
 - **`tests-linux`/`tests-macos`:** unaffected.
@@ -116,7 +115,7 @@ generated file is what executes.
    `tools/build-install.sh`; verify rebuild reproduces today's `install.sh`
    (banner aside). Not yet wired into CI.
 2. Replace committed `install.sh` with the generated output (banner +
-   `SOURCE-SHA256`); update the `.scaffold.toml` override reason.
+   `SOURCE-SHA256`).
 3. Add the CI drift-gate job; confirm existing jobs pass unchanged.
 4. Add `tests/test_install_build_drift.sh` + the local pre-commit mirror.
 5. Docs: `CHANGELOG.md` v0.14.0 entry, `docs/reference.md` tree listing

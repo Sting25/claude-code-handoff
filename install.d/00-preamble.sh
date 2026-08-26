@@ -9,7 +9,7 @@ set -euo pipefail
 
 # Usage text for --help / -h. A heredoc (not a self-read of this file's
 # comments) so it works no matter how the script's bytes arrived: piped in
-# via `curl ... | bash -s -- --help`  # scaffold-allow: prose example, not an executed pipe
+# via `curl ... | bash -s -- --help`
 # — BASH_SOURCE[0] is "bash" (there is no real path to sed), so a self-read
 # prints nothing. A heredoc is parsed out of the script text itself and
 # needs no path or working stdin.
