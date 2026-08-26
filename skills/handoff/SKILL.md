@@ -81,9 +81,18 @@ nothing gets lost across the restart boundary.
    does not persist between separate Bash calls** — either run this in
    the same Bash call as the resolution snippet above (put both on one
    Bash invocation), or substitute the literal path the preflight
-   printed after `handoff-bin: ` for `$hb` below:
+   printed after `handoff-bin: ` for `$hb` below. Pass `--session-id`
+   when `CLAUDE_CODE_SESSION_ID` is set, so the cross-session overwrite
+   guard has an explicit id to work with rather than relying on the
+   script's own env fallback; when it's unset (older Claude Code, or
+   the skill invoked outside a session) the write still proceeds
+   exactly as before:
    ```bash
-   bash "$hb/write_handoff.sh"
+   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+     bash "$hb/write_handoff.sh" --session-id "$CLAUDE_CODE_SESSION_ID"
+   else
+     bash "$hb/write_handoff.sh"
+   fi
    ```
    If it prints MISSING, **stop here** — tell the user to clone
    https://github.com/Sting25/claude-code-handoff and run `./install.sh`
