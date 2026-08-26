@@ -84,6 +84,76 @@ current="$repo/.claude/handoff_current.md"
 current_relpath=".claude/handoff_current.md"
 history_dir="$repo/.claude/handoff_history"
 
+# --- Orphaned dead-Stop-hook marker sweep (issue #76) ------------------------
+# handoff_turn_append.sh's prune loop (the Stop hook) evicts .ctx_nojq_<id>,
+# .ctx_prompts_<id>, .ctx_health_<id>, and .ss_health_<id> as a side effect of
+# rotating handoff_raw_<id>.md dumps out of its keep-3 window. That works for
+# a healthy install, but these four markers exist SPECIFICALLY to record a
+# session whose Stop hook never ran at all (issue #68, #71): such a session
+# writes no dump, so its markers are never keyed for that eviction, and its
+# own Stop hook is (by definition, it is dead) never going to fire the prune
+# loop that would reap them either. They leak forever: one small, usually
+# zero-byte, file per broken session.
+#
+# SessionStart is the correct host, per the issue: this script is jq-free by
+# contract, and #67/#71's detector B below already establishes that
+# SessionStart is the one hook confirmed to still fire even when BOTH
+# per-turn hooks are dead. This mirrors handoff_statusline.sh's own janitor
+# for its .ctx_sl_<id> sidecar, which has the identical orphan shape (a
+# sidecar with no owning dump to key eviction to) and the identical fix: age
+# it out on a fixed horizon instead of chasing ownership through a dump that
+# will never exist. Placed ahead of every early exit below (the compact
+# fast-path, the jq check, the no-handoff exit) so it runs on every fire of
+# this hook, not just the ones that reach the later sections.
+#
+# ONLY DELETE FILES WE CAN PROVE ARE OURS, same discipline as the statusline
+# janitor and the turn_append prune: name shape (exactly one of the four
+# known prefixes, id in the session-id charset), content shape (all four are
+# always either empty, or, .ctx_prompts_ only, a single decimal counter), and
+# a REGULAR file, never a symlink. A user's own file that happens to collide
+# with one of these names but holds different content is left alone.
+#
+# 7-day horizon (matching the statusline janitor's own constant): there is no
+# dump to count these against, which is the whole bug, so age is the only
+# signal available.
+hb_sweep="$repo/.claude/handoff_backups"
+if [ -d "$hb_sweep" ] && [ ! -L "$hb_sweep" ] && [ ! -L "$repo/.claude" ]; then
+  while IFS= read -r orphan; do
+    [ -n "$orphan" ] || continue
+    [ -f "$orphan" ] && [ ! -L "$orphan" ] || continue
+    orphan_base="$(basename "$orphan")"
+    case "$orphan_base" in
+      .ctx_nojq_*)    orphan_id="${orphan_base#.ctx_nojq_}" ;;
+      .ctx_prompts_*) orphan_id="${orphan_base#.ctx_prompts_}" ;;
+      .ctx_health_*)  orphan_id="${orphan_base#.ctx_health_}" ;;
+      .ss_health_*)   orphan_id="${orphan_base#.ss_health_}" ;;
+      *) continue ;;
+    esac
+    case "$orphan_id" in
+      [A-Za-z0-9_-]*) : ;;
+      *) continue ;;
+    esac
+    case "$orphan_base" in
+      .ctx_prompts_*)
+        # Content proof: a single decimal counter (how ctx-check writes it),
+        # nothing else. Newlines stripped before the charset test so the
+        # normal trailing "\n" from that write doesn't fail it.
+        orphan_content="$(LC_ALL=C tr -d '\n' < "$orphan" 2>/dev/null)"
+        case "$orphan_content" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        ;;
+      *)
+        # Content proof for the other three: always written zero-byte.
+        [ -s "$orphan" ] && continue
+        ;;
+    esac
+    rm -f -- "$orphan"
+  done < <(find "$hb_sweep" -maxdepth 1 \
+    \( -name '.ctx_nojq_*' -o -name '.ctx_prompts_*' -o -name '.ctx_health_*' -o -name '.ss_health_*' \) \
+    -type f -mtime +7 2>/dev/null || true)
+fi
+
 # Symlink read guard — the read-side twin of write_handoff.sh's write guard.
 # Every read below (`[ -f ]`, sed, cat) FOLLOWS a symlink, and this file is
 # emitted verbatim into the next session's MODEL CONTEXT — so a malicious
