@@ -120,7 +120,8 @@ hb_sweep="$repo/.claude/handoff_backups"
 if [ -d "$hb_sweep" ] && [ ! -L "$hb_sweep" ] && [ ! -L "$repo/.claude" ]; then
   while IFS= read -r orphan; do
     [ -n "$orphan" ] || continue
-    [ -f "$orphan" ] && [ ! -L "$orphan" ] || continue
+    [ -f "$orphan" ] || continue
+    [ ! -L "$orphan" ] || continue
     orphan_base="$(basename "$orphan")"
     case "$orphan_base" in
       .ctx_nojq_*)    orphan_id="${orphan_base#.ctx_nojq_}" ;;
