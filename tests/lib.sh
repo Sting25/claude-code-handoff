@@ -75,6 +75,16 @@ if [[ -z "${HANDOFF_SECRET_FILE:-}" ]]; then
 fi
 export HANDOFF_SECRET_FILE
 
+# Env jail for the writer-identity resolution (issue #63): if this suite runs
+# INSIDE a real Claude Code session, CLAUDE_CODE_SESSION_ID is set in the real
+# environment and would otherwise leak into every write_handoff.sh fixture
+# invocation as the fallback writer id — silently changing which session id
+# each test's HANDOFF_WRITER marker carries and making the overwrite-guard
+# assertions nondeterministic (they need to control the id per-case via
+# --session-id or a jailed env override). Tests that want a specific fallback
+# id set it explicitly with `env CLAUDE_CODE_SESSION_ID=...`.
+unset CLAUDE_CODE_SESSION_ID
+
 _pass=0
 _fail=0
 
