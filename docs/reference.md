@@ -15,6 +15,7 @@ env-var list, see [skills/handoff/README.md](../skills/handoff/README.md).
 - [Where the handoff files live](#where-the-handoff-files-live)
 - [Pinned context](#pinned-context-carried-forward-every-handoff)
 - [Trusted rules: when the fences actually bind](#trusted-rules-when-the-fences-actually-bind)
+- [Cross-session overwrite guard](#cross-session-overwrite-guard)
 - [System-log nudge](#system-log-nudge)
 - [What the handoff actually looks like](#what-the-handoff-actually-looks-like)
 - [Advanced environment variables](#advanced-environment-variables)
@@ -427,6 +428,62 @@ existing one, or hoist one above the narrative, without the restamp
 noticing and declining to vouch for it. Because that zone does bind
 automatically, review those rules whenever they change.
 
+## Cross-session overwrite guard
+
+Resuming an OLDER session after a newer one already wrote a curated
+`handoff_current.md` used to be silent: nothing signaled that the
+running session wasn't the document's author, and running `/handoff`
+from it would rotate the fresher session's curation into history and
+replace it with Notes drawn from stale context.
+
+`write_handoff.sh` stamps a `HANDOFF_WRITER` marker (`sid=<session id>
+t=<write epoch>`) into every document it builds, right after the
+`HANDOFF_ROOT` comment — inside both the main and skeleton HMAC
+regions, so `--restamp` never disturbs it. On the next real write
+(never `--restamp`, never a `--if-curated` safety-net run — those stay
+silent-but-safe), the guard fires only when BOTH hold:
+
+- the current document's `HANDOFF_WRITER` session id differs from the
+  writing session's own id, AND
+- the document's stamped write time is LATER than this session's own
+  recorded start (a one-time, per-session-id marker the `SessionStart`
+  hook writes the first time it sees that id — never refreshed on a
+  `resume`/`compact` re-fire of the same session).
+
+Identity alone isn't the test: every legitimate handoff succession (B
+picks up after A ends) would otherwise trip it. The origin-time
+comparison is what tells a genuinely stale, resumed session apart from
+a normal succession.
+
+Session identity is resolved with precedence: the `--session-id` flag,
+then `.session_id` from the hook payload, then `CLAUDE_CODE_SESSION_ID`
+— first value matching `[A-Za-z0-9_-]+` wins. No id anywhere makes the
+whole feature inert: no marker gets stamped, and there is nothing for a
+later write to compare against.
+
+On a fire, the default (`HANDOFF_OVERWRITE_GUARD=block`) refuses the
+write with **exit 3**: nothing on stdout, and a loud stderr block
+naming both session ids, the document's write time, whether its
+signature verifies (verified means the recorded author is trustworthy
+provenance, not just a claim), and the two ways forward — start a
+fresh session (or resume the one that wrote it), or re-run with
+`--takeover` if this session should really take over. `--takeover`
+proceeds normally: the fresher document is still archived to history
+like any rotation, unless `HANDOFF_HISTORY_KEEP=0`, in which case a
+stderr note says it will NOT be archived — it is genuinely lost.
+`HANDOFF_OVERWRITE_GUARD=warn` prints the same notice but proceeds
+without `--takeover`; `=off` disables the guard entirely.
+
+The `/handoff` skill treats exit 3 as a stop signal: it surfaces the
+guard message to the user verbatim and does not retry with
+`--takeover` on its own initiative — that override is for a human to
+direct.
+
+Two known gaps, by design: the guard is inert for one session after
+install (the very first `SessionStart` fire has no prior marker to
+compare against), and `--takeover` with `HANDOFF_HISTORY_KEEP=0`
+genuinely loses the fresher document, as noted above.
+
 ## System-log nudge
 
 If your repo keeps a `SYSTEM_LOG.md` (an append-only record of
@@ -559,6 +616,12 @@ doesn't read.
 default `<!-- HANDOFF_HMAC: `. Changing it invalidates every existing
 signature, since verification strips and rebuilds the trailer using this
 exact string. Present for testing; there is no reason to set it.
+
+**`HANDOFF_OVERWRITE_GUARD`** — `block` (default), `warn`, or `off`.
+Controls the [cross-session overwrite
+guard](#cross-session-overwrite-guard): `block` refuses a stale
+cross-session write with exit 3 unless `--takeover` is given; `warn`
+prints the same notice but always proceeds; `off` disables the guard.
 
 ### Test/debug overrides
 

@@ -17,6 +17,7 @@ digest you never read.
 - **Nudges you when context is filling** (~40% used), while Claude is still sharp enough to write a good summary — so you hand off confidently instead of riding a bloated session, which also means less context re-processing and fewer wasted tokens.
 - **Signs each handoff with a per-machine key**, so a cloned repo can't inject fake standing rules.
 - **Keeps a history of past handoffs** (last 5 by default) that you can pull back into context on demand.
+- **Guards against a stale resumed session clobbering a fresher one's handoff** — refuses (exit 3) rather than silently rotating a newer session's curated work under an older one's; see [Cross-session overwrite guard](docs/reference.md#cross-session-overwrite-guard).
 - **Works in git and non-git projects**, in both the Claude Code CLI and the desktop app.
 
 ## Installation

@@ -103,6 +103,16 @@ nothing gets lost across the restart boundary.
    Resolving `$hb` and checking it (the shape `/handoff-more` and
    `/handoff-recover` use) tests installation and nothing else.
 
+   **Exit 3 — cross-session overwrite guard.** If the command exits 3
+   instead of printing a path, `write_handoff.sh` refused because the
+   current `handoff_current.md` was written by a different, LATER
+   session than this one — this session is the stale one, and rotating
+   the doc now would bury that fresher session's curation. Surface the
+   printed guard message to the user **verbatim** and **stop** — do not
+   curate Notes, do not retry with `--takeover` on your own initiative.
+   `--takeover` is a deliberate, human-directed override; only re-run
+   with it if the user explicitly confirms this session should take over.
+
 2. Read the file you just wrote. Then Edit it to **replace the
    placeholder block** under `## Notes from this session` with curated
    prose. The placeholder block is the sentinel comment
