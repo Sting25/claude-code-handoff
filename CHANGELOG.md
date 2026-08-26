@@ -12,6 +12,8 @@ are appended).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-26
+
 Plugin-mode context watching. No hook-command or permission-entry
 changes — nothing to re-patch in `~/.claude/settings.json`; plugin
 installs pick this up on update, bare-scripts installs on `git pull`
