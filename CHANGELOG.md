@@ -12,6 +12,74 @@ are appended).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-26
+
+Cross-session overwrite guard for the fresher-session race, a
+mode-aware handoff header, an uninstall flag that preserves the HMAC
+secret across a bare-scripts-to-plugin migration, and a wider orphaned
+sidecar sweep. No hook-command or permission-entry changes: nothing to
+re-patch in `~/.claude/settings.json`.
+
+### Fixed
+- **The generated handoff header hardcoded bare-scripts paths
+  regardless of install mode (#66).** Every `handoff_current.md`
+  described itself as `~/.claude/bin/write_handoff.sh` with hooks in
+  `~/.claude/settings.json`, even when written by a plugin install
+  (writer under the plugin cache, hooks from the plugin's own
+  `hooks/hooks.json`) or a bare git clone run directly, matching
+  neither convention. The header sits inside the HMAC-signed
+  preamble, so the mode string has to be decided at build time,
+  before signing, never patched in afterward. `write_handoff.sh` now
+  resolves the install shape right after `self_dir` is computed and
+  picks the matching wording (plugin, bare-scripts, or the resolved
+  directory literally for anything else); the interpolated path is
+  sanitized so it can never forge a bind region. Existing signed
+  handoffs, including the old bare-scripts wording, still verify and
+  restamp unchanged: only the trailing skeleton/HMAC lines move.
+
+### Added
+- **Cross-session overwrite guard for `write_handoff.sh` (#63,
+  supersedes #84).** A curated write now refuses (exit 3 by default)
+  when the on-disk `handoff_current.md` was authored by a different,
+  later session than the one running now, instead of silently
+  rotating that fresher session's curation into history. The firing
+  predicate requires both a differing session identity and a stamped
+  write time later than this session's own recorded start, tracked
+  by a create-once `.session_started_<sid>` sidecar so a
+  `resume`/`compact` re-fire of the same session never refreshes it.
+  New `--session-id` and `--takeover` flags, plus
+  `HANDOFF_OVERWRITE_GUARD=block|warn|off` (default `block`); a
+  signed `HANDOFF_WRITER` marker in the preamble records which
+  session wrote a given handoff. `skills/handoff/SKILL.md` treats
+  exit 3 as a stop signal and never retries `--takeover` on its own.
+- **`install.sh --uninstall --keep-secret`, preserving the
+  per-machine HMAC secret (#65).** Uninstalling to migrate from
+  bare-scripts to plugin mode ran `remove_secret_if_ours()`, which
+  unconditionally deleted `~/.claude/handoff_secret`, the identity
+  both install modes read from the same default path. That silently
+  invalidated every already-signed `handoff_current.md` and
+  `handoff_history/` entry: the bind region stopped verifying and
+  loaded as reference data instead of binding rules, with nothing to
+  notice by. `--keep-secret` is opt-in; default `--uninstall`
+  behavior (delete) is unchanged.
+- **`session_start` now sweeps orphaned sidecar markers aged past 7
+  days (#76).** `.ctx_nojq_`, `.ctx_prompts_`, `.ctx_health_`, and
+  `.ss_health_` were only reaped as a side effect of rotating a
+  `handoff_raw_<id>.md` dump out of its keep-3 window, so a session
+  whose Stop hook never ran at all (the #68/#71 failure shapes)
+  wrote no such dump and leaked those markers indefinitely. The
+  sweep now runs in `handoff_session_start.sh`, the one hook
+  confirmed to still fire even when both per-turn hooks are dead,
+  ahead of every early exit including the compact fast path. It is
+  newline-safe and symlink-safe (a file is reaped only when it is a
+  regular file whose name and content both match the known shape),
+  and it never touches the running session's own origin marker:
+  `.session_started_<sid>` joined the sweep in the overwrite-guard
+  PR (#85) with an extra proof that it never reaps the currently
+  firing hook's own session id, since doing so would silently move
+  the guard's origin forward and reopen the stale-overwrite hole
+  #63 closes.
+
 ## [0.15.0] - 2026-08-26
 
 Plugin-mode context watching. No hook-command or permission-entry
