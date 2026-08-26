@@ -116,6 +116,98 @@ if [ -n "$sess_id" ] && [ ! -L "$repo/.claude" ] && [ ! -L "$backup_dir" ]; then
   fi
 fi
 
+# --- Orphaned dead-Stop-hook marker sweep (issue #76) ------------------------
+# handoff_turn_append.sh's prune loop (the Stop hook) evicts .ctx_nojq_<id>,
+# .ctx_prompts_<id>, .ctx_health_<id>, and .ss_health_<id> as a side effect of
+# rotating handoff_raw_<id>.md dumps out of its keep-3 window. That works for
+# a healthy install, but these four markers exist SPECIFICALLY to record a
+# session whose Stop hook never ran at all (issue #68, #71): such a session
+# writes no dump, so its markers are never keyed for that eviction, and its
+# own Stop hook is (by definition, it is dead) never going to fire the prune
+# loop that would reap them either. They leak forever: one small, usually
+# zero-byte, file per broken session.
+#
+# SessionStart is the correct host, per the issue: this script is jq-free by
+# contract, and #67/#71's detector B below already establishes that
+# SessionStart is the one hook confirmed to still fire even when BOTH
+# per-turn hooks are dead. This mirrors handoff_statusline.sh's own janitor
+# for its .ctx_sl_<id> sidecar, which has the identical orphan shape (a
+# sidecar with no owning dump to key eviction to) and the identical fix: age
+# it out on a fixed horizon instead of chasing ownership through a dump that
+# will never exist. Placed ahead of every early exit below (the compact
+# fast-path, the jq check, the no-handoff exit) so it runs on every fire of
+# this hook, not just the ones that reach the later sections.
+#
+# ONLY DELETE FILES WE CAN PROVE ARE OURS, same discipline as the statusline
+# janitor and the turn_append prune: name shape (exactly one of the four
+# known prefixes, id in the session-id charset), content shape (all four are
+# always either empty, or, .ctx_prompts_ only, a single decimal counter), and
+# a REGULAR file, never a symlink. A user's own file that happens to collide
+# with one of these names but holds different content is left alone.
+#
+# 7-day horizon (matching the statusline janitor's own constant): there is no
+# dump to count these against, which is the whole bug, so age is the only
+# signal available.
+hb_sweep="$repo/.claude/handoff_backups"
+if [ -d "$hb_sweep" ] && [ ! -L "$hb_sweep" ] && [ ! -L "$repo/.claude" ]; then
+  # NUL-delimited: a crafted filename carrying an embedded newline (e.g.
+  # ".ctx_health_AAA\nX") would otherwise split across two lines of a
+  # newline-delimited read, letting the second "line" masquerade as a
+  # DIFFERENT, unrelated candidate (a real ".ctx_health_AAA") and get
+  # deleted by proxy. `-print0` / `read -rd ''` treats the whole crafted
+  # name as one opaque field, so it is judged (and, since it fails the
+  # id charset check below, rejected) only on its own actual bytes.
+  # `read -d ''` is available in bash 3.2 (macOS's stock bash, part of the
+  # CI matrix), so this stays portable.
+  while IFS= read -rd '' orphan; do
+    [ -n "$orphan" ] || continue
+    [ -f "$orphan" ] || continue
+    [ ! -L "$orphan" ] || continue
+    orphan_base="$(basename "$orphan")"
+    case "$orphan_base" in
+      .ctx_nojq_*)    orphan_id="${orphan_base#.ctx_nojq_}" ;;
+      .ctx_prompts_*) orphan_id="${orphan_base#.ctx_prompts_}" ;;
+      .ctx_health_*)  orphan_id="${orphan_base#.ctx_health_}" ;;
+      .ss_health_*)   orphan_id="${orphan_base#.ss_health_}" ;;
+      *) continue ;;
+    esac
+    # Full-string charset proof, matching handoff_statusline.sh's own sid
+    # guard (`^[A-Za-z0-9_-]+$`). A `case ... in [A-Za-z0-9_-]*)` glob only
+    # anchors the FIRST character (the rest is consumed by the trailing
+    # `*`), so e.g. "a b!" passed it; the bash regex form anchors both ends.
+    [[ "$orphan_id" =~ ^[A-Za-z0-9_-]+$ ]] || continue
+    case "$orphan_base" in
+      .ctx_prompts_*)
+        # Content proof: a single decimal counter (how ctx-check writes it),
+        # nothing else, at most one trailing newline. `cat` (not `tr -d
+        # '\n'`) so embedded newlines from multi-line content SURVIVE into
+        # orphan_content and are rejected below rather than being stripped
+        # into a false single "line" of nothing but digits (e.g. "1\n2\n3"
+        # must not read as the decimal "123"). `|| true`: under
+        # `set -e`, an unreadable file (permission-denied litter, e.g. from
+        # a root-owned process) would otherwise make this whole hook exit
+        # nonzero and never load the handoff for any later session start;
+        # the empty result on a read failure falls through to the safe
+        # "not our shape, leave it alone" branch below instead.
+        orphan_content="$(cat "$orphan" 2>/dev/null || true)"
+        case "$orphan_content" in
+          *$'\n'*) continue ;;
+        esac
+        case "$orphan_content" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        ;;
+      *)
+        # Content proof for the other three: always written zero-byte.
+        [ -s "$orphan" ] && continue
+        ;;
+    esac
+    rm -f -- "$orphan"
+  done < <(find "$hb_sweep" -maxdepth 1 \
+    \( -name '.ctx_nojq_*' -o -name '.ctx_prompts_*' -o -name '.ctx_health_*' -o -name '.ss_health_*' \) \
+    -type f -mtime +7 -print0 2>/dev/null || true)
+fi
+
 # Symlink read guard — the read-side twin of write_handoff.sh's write guard.
 # Every read below (`[ -f ]`, sed, cat) FOLLOWS a symlink, and this file is
 # emitted verbatim into the next session's MODEL CONTEXT — so a malicious
