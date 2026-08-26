@@ -39,6 +39,16 @@
 # compaction, so the delta comparison still advances correctly;
 # handoff_session_start.sh also re-injects on source=compact, which would
 # make a reset here a double injection.
+# KEPT: .ctx_prompts_<sid> (issue #71, Stop-hook health detector A) — the
+# per-session UserPromptSubmit fire count. Compaction does not reset which
+# prompt number the session is on, so clearing it would let a session that
+# already proved the Stop hook dead (crossed HANDOFF_HEALTH_PROMPTS) start
+# re-counting from zero and silently re-arm a "maybe it's just early" state
+# that was already disproven.
+# KEPT: .ctx_health_<sid> — the once-per-session throttle for that same
+# warning. Same reasoning: compaction is mid-session, not a new session: if
+# the warning already fired, it must not fire again just because the
+# transcript was compacted.
 #
 # Degradation: PostCompact only exists on CC >= 2.1.76 (older builds simply
 # never fire this). jq missing -> exit 0; the sidecars then age out via the

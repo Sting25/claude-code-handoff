@@ -86,6 +86,42 @@ installs pick this up on update, bare-scripts installs on `git pull`
   Stop-hook data to cross-check against there is nothing else to catch
   it. `0` disables the token ledger, restoring the previous behavior
   exactly.
+- **Warn mid-session when the Stop hook isn't running, instead of
+  discovering it at `/handoff` time (#71).** Previously nothing said
+  so: the session ran to completion believing it had a per-turn
+  backup, and the first thing that noticed was `/handoff` itself,
+  falling back to a one-shot raw dump — the worst possible moment,
+  since that fallback exists precisely for when context is already
+  saturated. Two detectors, because the interesting failure kills
+  both per-turn hooks at once:
+  - **Detector A** (`handoff_ctx_check.sh`, same session): a
+    per-session prompt counter (`.ctx_prompts_<session_id>`) that,
+    once it passes `HANDOFF_HEALTH_PROMPTS` fires (default 3) with
+    `.ctx_<session_id>` still absent, warns once that the Stop hook
+    appears dead. Sits above the token-ledger selection it shares a
+    fire with (#69) without disturbing it: when the ledger's nudge
+    also fires, the health warning prints first.
+  - **Detector B** (`handoff_session_start.sh`, retrospective): if
+    the most recent previous session represented in
+    `.claude/handoff_backups/` has no Stop-hook-written evidence
+    (`.ctx_tokens_`/`.ctx_model_`/`.ctx_`/`handoff_raw_`), warns that
+    the Stop hook wasn't working last session either. This is the
+    only detector that catches both per-turn hooks dying together
+    (#67) — `UserPromptSubmit` never runs at all in that shape, but
+    SessionStart still does. Stays `jq`-free by contract, silent on a
+    project's first session.
+  Both name likely causes in order (`jq` missing, hooks not
+  registered/dispatching, a symlinked `.claude`/`handoff_backups`, an
+  unreadable `transcript_path`), point at `--doctor`, warn once per
+  session, and are silenced together by `HANDOFF_NO_HEALTH_WARN=1`.
+- The dangling-sibling self-check in `handoff_session_start.sh` (#21)
+  was inert in plugin mode (a plugin's cached `bin/` holds regular
+  files, not symlinks) and its remediation told a plugin user to
+  "re-run `install.sh` from your persistent clone" — the dual-mode
+  trap (#64) for someone with no clone at all. It's now mode-aware
+  (plugin vs. bare-scripts remediation) and additionally catches a
+  sibling script that's simply missing, the shape a corrupted plugin
+  cache extraction actually fails in.
 
 ## [0.14.1] — 2026-08-11
 

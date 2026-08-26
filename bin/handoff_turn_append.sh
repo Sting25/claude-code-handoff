@@ -655,6 +655,9 @@ while IFS= read -r old; do
   rm -f  -- "$backup_dir/.fences_${id}"        # rules re-injection cooldown state (issue #42)
   rm -f  -- "$backup_dir/.fences_tok_${id}"    # token-ledger rules re-injection cooldown (issue #69)
   rm -f  -- "$backup_dir/.ctx_nojq_${id}"      # jq-missing once-per-session warning marker (issue #68)
+  rm -f  -- "$backup_dir/.ctx_prompts_${id}"   # Stop-hook health prompt counter (issue #71)
+  rm -f  -- "$backup_dir/.ctx_health_${id}"    # Stop-hook health once-per-session warning marker (issue #71)
+  rm -f  -- "$backup_dir/.ss_health_${id}"     # handoff_session_start.sh's retrospective Stop-hook health marker (issue #71)
 done < <(list_our_dumps | tail -n +4)
 
 exit 0

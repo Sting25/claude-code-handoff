@@ -28,6 +28,18 @@
 #   .ctx_nojq_<session_id>        — once-per-session jq-missing warning marker
 #                                    (issue #68), shared with
 #                                    handoff_turn_append.sh.
+#   .ctx_prompts_<session_id>     — per-session UserPromptSubmit fire counter
+#                                    (issue #71, Stop-hook health detector A).
+#                                    Incremented on every fire that reaches it;
+#                                    once it passes HANDOFF_HEALTH_PROMPTS
+#                                    fires with .ctx_<session_id> still absent,
+#                                    the Stop hook is provably not running.
+#                                    Survives compaction untouched (see
+#                                    handoff_compact_reset.sh: prompt count is
+#                                    not invalidated by a compaction event).
+#   .ctx_health_<session_id>      — once-per-session marker for the warning
+#                                    above, same flag-file throttle idiom as
+#                                    .ctx_flagged_/.ctx_nojq_.
 # This script runs on the next user prompt and, if usage has crossed a
 # configurable threshold, emits a <system-reminder> instructing the assistant
 # to passively flag a /handoff moment.
@@ -107,6 +119,23 @@
 #                               cache entirely, restoring the pre-statusline
 #                               detection chain exactly. Debugging / regression
 #                               escape hatch; default unset (cache honored).
+#   HANDOFF_HEALTH_PROMPTS      Stop-hook health detector A (issue #71):
+#                               number of UserPromptSubmit fires, with
+#                               .ctx_<session_id> still absent, before this
+#                               hook warns that the Stop hook appears dead
+#                               (default: 3). A Stop hook should write that
+#                               file on every turn, so surviving this many
+#                               prompts with no such file is strong evidence
+#                               it never ran this session, rather than just
+#                               "no Stop has fired yet" (the first-prompt
+#                               case). Warns once per session; see
+#                               HANDOFF_NO_HEALTH_WARN to disable outright.
+#   HANDOFF_NO_HEALTH_WARN      set to 1 to disable BOTH Stop-hook health
+#                               detectors (this hook's detector A above, and
+#                               handoff_session_start.sh's retrospective
+#                               detector B) — for a project that deliberately
+#                               runs without a per-turn safety net. Default
+#                               unset (detectors active).
 #
 # Token count comes from the latest assistant turn's `usage` — the same
 # number Claude Code's /context shows. When that file is absent (first
@@ -267,6 +296,54 @@ tokens_file="$backup_dir/.ctx_tokens_${session_id}"
 model_file="$backup_dir/.ctx_model_${session_id}"
 flag_file="$backup_dir/.ctx_flagged_${session_id}"
 sl_file="$backup_dir/.ctx_sl_${session_id}"
+
+# --- Stop-hook health, detector A (issue #71) --------------------------------
+# The Stop hook writes size_file ($backup_dir/.ctx_<session_id>) on every turn.
+# Its absence is normally just "no Stop has fired yet" (the first prompt of a
+# fresh session) — the pre-existing "nothing recorded" gate a few sections down
+# treats it that way and exits quiet. But if size_file is STILL absent after
+# several prompts have gone by, that read stops being ambiguous: a working
+# Stop hook would have written it long ago. Track how many prompts this
+# session has seen (.ctx_prompts_<session_id>, incremented below on every fire
+# that reaches this point) and warn ONCE if the threshold is crossed with
+# size_file still missing.
+#
+# Placement: this MUST sit above the ledger-selection block below (which is
+# what exits early on "nothing recorded yet" — the exact condition being
+# detected here), and it must NOT exit, reorder, or otherwise disturb that
+# block: when the statusline cache lets the token ledger take over (Stop hook
+# dead, statusLine wired), the nudge below still legitimately fires, and the
+# health warning is equally legitimate (the per-turn backup really is dead) —
+# both may share one fire. Emitting the health warning first, before the
+# ledger logic runs, keeps that order deterministic rather than incidental.
+if [[ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]]; then
+  prompts_file="$backup_dir/.ctx_prompts_${session_id}"
+  health_flag="$backup_dir/.ctx_health_${session_id}"
+  HEALTH_PROMPTS="${HANDOFF_HEALTH_PROMPTS:-3}"
+  [[ "$HEALTH_PROMPTS" =~ ^[0-9]+$ ]] || HEALTH_PROMPTS=3
+  if [[ ! -L "$prompts_file" ]]; then
+    prompt_count=0
+    if [[ -f "$prompts_file" ]]; then
+      prompt_count="$(cat "$prompts_file" 2>/dev/null || echo 0)"
+      [[ "$prompt_count" =~ ^[0-9]+$ ]] || prompt_count=0
+    fi
+    prompt_count=$((prompt_count + 1))
+    # tmp+mv, matching the fences-flag write further down: never leave a
+    # half-written counter for the next fire to misread.
+    if health_tmp="$(mktemp "$backup_dir/.ctx_prompts.XXXXXX" 2>/dev/null)"; then
+      { printf '%s\n' "$prompt_count" > "$health_tmp" \
+          && mv -f "$health_tmp" "$prompts_file"; } 2>/dev/null \
+        || rm -f "$health_tmp" 2>/dev/null || true
+    fi
+    if (( prompt_count >= HEALTH_PROMPTS )) && [[ ! -f "$size_file" ]] \
+       && [[ ! -f "$health_flag" ]] && [[ ! -L "$health_flag" ]]; then
+      echo "⚠️  handoff: the Stop hook does not appear to be running this session — no per-turn backup has been recorded after ${prompt_count} prompts. /handoff will have no incremental dump to fall back on if invoked under context pressure. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
+      if mkdir -p "$backup_dir" 2>/dev/null; then
+        : > "$health_flag" 2>/dev/null || true
+      fi
+    fi
+  fi
+fi
 
 # --- Statusline cache (written by handoff_statusline.sh when the statusLine
 #     is wired). Pure-bash key=value parse — no jq dependency added to the
