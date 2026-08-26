@@ -59,6 +59,12 @@
 # warning. Same reasoning: compaction is mid-session, not a new session: if
 # the warning already fired, it must not fire again just because the
 # transcript was compacted.
+# KEPT (never touched by this script at all): .session_started_<sid> (issue
+# #63) — the cross-session overwrite guard's origin marker, written ONCE by
+# handoff_session_start.sh. PostCompact re-fires SessionStart with the SAME
+# session id; the guard depends on that origin timestamp never moving, so
+# resetting it here on every compaction would make an old session look
+# freshly started relative to its own earlier handoff writes.
 #
 # Degradation: PostCompact only exists on CC >= 2.1.76 (older builds simply
 # never fire this). jq missing -> exit 0; the sidecars then age out via the

@@ -32,33 +32,60 @@ mk_project() {  # echoes a fresh project dir with a .claude/handoff_backups/
 
 echo "handoff_session_start.sh — orphaned dead-Stop-hook marker sweep (#76)"
 
-# --- Orphaned markers >7d old, all four kinds, all provably ours -> reaped --
+# --- Orphaned markers >7d old, all five kinds, all provably ours -> reaped --
 proj="$(mk_project)"; bd="$proj/.claude/handoff_backups"
 : > "$bd/.ctx_nojq_DEAD1"
 : > "$bd/.ctx_health_DEAD2"
 : > "$bd/.ss_health_DEAD3"
 must printf '3\n' > "$bd/.ctx_prompts_DEAD4"
+must printf '1700000000\n' > "$bd/.session_started_DEAD5"
 must touch -t 202001010000 \
-  "$bd/.ctx_nojq_DEAD1" "$bd/.ctx_health_DEAD2" "$bd/.ss_health_DEAD3" "$bd/.ctx_prompts_DEAD4"
+  "$bd/.ctx_nojq_DEAD1" "$bd/.ctx_health_DEAD2" "$bd/.ss_health_DEAD3" "$bd/.ctx_prompts_DEAD4" \
+  "$bd/.session_started_DEAD5"
 run_ss "$proj"; rc=$?
 check "sweep: exit 0"                    0  "$rc"
 check "sweep: stale .ctx_nojq_ reaped"   no "$([[ -e "$bd/.ctx_nojq_DEAD1"   ]] && echo yes || echo no)"
 check "sweep: stale .ctx_health_ reaped" no "$([[ -e "$bd/.ctx_health_DEAD2" ]] && echo yes || echo no)"
 check "sweep: stale .ss_health_ reaped"  no "$([[ -e "$bd/.ss_health_DEAD3" ]] && echo yes || echo no)"
 check "sweep: stale .ctx_prompts_ reaped" no "$([[ -e "$bd/.ctx_prompts_DEAD4" ]] && echo yes || echo no)"
+check "sweep: stale .session_started_ reaped (issue #63)" no \
+  "$([[ -e "$bd/.session_started_DEAD5" ]] && echo yes || echo no)"
 rm -rf "$proj"
 
-# --- Same four kinds, but fresh (not yet 7 days old) -> survive -------------
+# --- Same five kinds, but fresh (not yet 7 days old) -> survive -------------
 proj="$(mk_project)"; bd="$proj/.claude/handoff_backups"
 : > "$bd/.ctx_nojq_FRESH1"
 : > "$bd/.ctx_health_FRESH2"
 : > "$bd/.ss_health_FRESH3"
 must printf '1\n' > "$bd/.ctx_prompts_FRESH4"
+must printf '1700000000\n' > "$bd/.session_started_FRESH5"
 run_ss "$proj"
 check "fresh: .ctx_nojq_ survives"   yes "$([[ -e "$bd/.ctx_nojq_FRESH1"   ]] && echo yes || echo no)"
 check "fresh: .ctx_health_ survives" yes "$([[ -e "$bd/.ctx_health_FRESH2" ]] && echo yes || echo no)"
 check "fresh: .ss_health_ survives"  yes "$([[ -e "$bd/.ss_health_FRESH3" ]] && echo yes || echo no)"
 check "fresh: .ctx_prompts_ survives" yes "$([[ -e "$bd/.ctx_prompts_FRESH4" ]] && echo yes || echo no)"
+check "fresh: .session_started_ survives (issue #63)" yes \
+  "$([[ -e "$bd/.session_started_FRESH5" ]] && echo yes || echo no)"
+rm -rf "$proj"
+
+# --- Current-session exclusion (issue #63): an aged .session_started_<sid>
+#     matching the id of the SAME hook fire's own session must survive no
+#     matter how old — a session paused past the 7-day horizon and then
+#     resumed is still live, and reaping this would let the create-once
+#     write earlier in the script recreate it with today's epoch, silently
+#     moving the overwrite guard's origin forward. run_ss hardcodes
+#     `</dev/null` (no payload), so this fires the hook directly with a
+#     session_id payload instead, the way test_session_start.sh's
+#     fire_ss_sid does for the same script. ----------------------------
+proj="$(mk_project)"; bd="$proj/.claude/handoff_backups"
+sid="LIVEID63"
+must printf '1600000000\n' > "$bd/.session_started_${sid}"
+must touch -t 202001010000 "$bd/.session_started_${sid}"
+( cd "$proj" && env CLAUDE_PROJECT_DIR="$proj" bash "$SS" <<<"{\"session_id\":\"$sid\"}" >/dev/null 2>/dev/null )
+check "current-session exclusion: own aged marker survives" yes \
+  "$([[ -e "$bd/.session_started_${sid}" ]] && echo yes || echo no)"
+check "current-session exclusion: content untouched (not re-created)" \
+  "1600000000" "$(cat "$bd/.session_started_${sid}" 2>/dev/null)"
 rm -rf "$proj"
 
 # --- NEGATIVE CONTROLS, all aged >7d, all must SURVIVE the sweep ------------

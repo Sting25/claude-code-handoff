@@ -81,9 +81,18 @@ nothing gets lost across the restart boundary.
    does not persist between separate Bash calls** — either run this in
    the same Bash call as the resolution snippet above (put both on one
    Bash invocation), or substitute the literal path the preflight
-   printed after `handoff-bin: ` for `$hb` below:
+   printed after `handoff-bin: ` for `$hb` below. Pass `--session-id`
+   when `CLAUDE_CODE_SESSION_ID` is set, so the cross-session overwrite
+   guard has an explicit id to work with rather than relying on the
+   script's own env fallback; when it's unset (older Claude Code, or
+   the skill invoked outside a session) the write still proceeds
+   exactly as before:
    ```bash
-   bash "$hb/write_handoff.sh"
+   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+     bash "$hb/write_handoff.sh" --session-id "$CLAUDE_CODE_SESSION_ID"
+   else
+     bash "$hb/write_handoff.sh"
+   fi
    ```
    If it prints MISSING, **stop here** — tell the user to clone
    https://github.com/Sting25/claude-code-handoff and run `./install.sh`
@@ -102,6 +111,16 @@ nothing gets lost across the restart boundary.
    already-correct install while the actual cause goes unaddressed.
    Resolving `$hb` and checking it (the shape `/handoff-more` and
    `/handoff-recover` use) tests installation and nothing else.
+
+   **Exit 3 — cross-session overwrite guard.** If the command exits 3
+   instead of printing a path, `write_handoff.sh` refused because the
+   current `handoff_current.md` was written by a different, LATER
+   session than this one — this session is the stale one, and rotating
+   the doc now would bury that fresher session's curation. Surface the
+   printed guard message to the user **verbatim** and **stop** — do not
+   curate Notes, do not retry with `--takeover` on your own initiative.
+   `--takeover` is a deliberate, human-directed override; only re-run
+   with it if the user explicitly confirms this session should take over.
 
 2. Read the file you just wrote. Then Edit it to **replace the
    placeholder block** under `## Notes from this session` with curated

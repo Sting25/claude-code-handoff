@@ -182,4 +182,50 @@ check "real dump -> exit 0"       0   "$rc"
 check "real dump -> miss warning" yes "$(has "$out" "prior handoff artifacts")"
 rm -rf "$proj"
 
+
+# --- Overwrite-guard origin marker: create-once (issue #63) ------------------
+# write_handoff.sh's cross-session overwrite guard compares a stale writer's
+# ORIGIN (when this session id was first seen) against a handoff's write-time
+# stamp. Correctness depends entirely on that origin never moving once set:
+# resume/compact re-fire SessionStart with the SAME session id, and refreshing
+# the marker on those re-fires would make an old session look freshly started.
+# run_ss reads stdin from /dev/null (compact detection determinism), so it
+# can't carry a payload; this hook's session_id comes from stdin JSON only,
+# so fire it directly the way test_ctx_check_health.sh does for its sibling
+# hooks.
+fire_ss_sid() {  # <project_dir> <session_id>
+  ( cd "$1" && env CLAUDE_PROJECT_DIR="$1" bash "$SS" <<<"{\"session_id\":\"$2\"}" >/dev/null 2>/dev/null )
+}
+proj="$(mk_project)"
+sid="sidCreateOnce63"
+marker="$proj/.claude/handoff_backups/.session_started_${sid}"
+fire_ss_sid "$proj" "$sid"
+check "origin marker: created on first fire" yes "$([[ -f "$marker" ]] && echo yes || echo no)"
+check "origin marker: content is a plain epoch" yes "$([[ "$(cat "$marker" 2>/dev/null)" =~ ^[0-9]+$ ]] && echo yes || echo no)"
+# Overwrite with a distinctive sentinel + an old, distinguishable mtime so a
+# second fire that (wrongly) recreated the file would be caught on EITHER axis
+# — no sleep needed, no timing race.
+printf '111222333\n' > "$marker"
+touch -t 202001010000 "$marker"
+mtime1="$(stat -f %m "$marker" 2>/dev/null || stat -c %Y "$marker" 2>/dev/null)"
+fire_ss_sid "$proj" "$sid"
+check "origin marker: content unchanged on 2nd fire (same id)" "111222333" "$(cat "$marker" 2>/dev/null)"
+check "origin marker: mtime unchanged on 2nd fire (same id)" "$mtime1" \
+  "$(stat -f %m "$marker" 2>/dev/null || stat -c %Y "$marker" 2>/dev/null)"
+# A DIFFERENT session id still gets its own marker, independent of the first.
+# Reset the first marker's mtime off its year-2020 stamp before this fire —
+# a REAL 7+-day-old marker is exactly what the orphaned-marker sweep (issue
+# #76, a different session's fire reaping a stale sibling) is SUPPOSED to
+# reap, and that behavior is covered on its own in
+# tests/test_session_start_marker_sweep.sh. This assertion is about a
+# narrower thing: a DIFFERENT session id's fire must not touch a sibling
+# marker that is not (yet) sweep-eligible.
+touch "$marker"
+sid2="sidCreateOnce63b"
+marker2="$proj/.claude/handoff_backups/.session_started_${sid2}"
+fire_ss_sid "$proj" "$sid2"
+check "origin marker: a different session id gets its own marker" yes "$([[ -f "$marker2" ]] && echo yes || echo no)"
+check "origin marker: first session's marker untouched by the second's fire" "111222333" "$(cat "$marker" 2>/dev/null)"
+rm -rf "$proj"
+
 finish
