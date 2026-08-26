@@ -316,12 +316,34 @@ sl_file="$backup_dir/.ctx_sl_${session_id}"
 # health warning is equally legitimate (the per-turn backup really is dead) —
 # both may share one fire. Emitting the health warning first, before the
 # ledger logic runs, keeps that order deterministic rather than incidental.
+#
+# The warn condition checks BOTH size_file AND model_file absent, not size_file
+# alone. handoff_compact_reset.sh deletes .ctx_<sid> on every PostCompact fire
+# but deliberately KEEPS .ctx_model_<sid> (the model didn't change across
+# compaction). A healthy session that auto-compacts therefore has its very next
+# prompt see size_file absent with a high prompt_count carried over from before
+# the compaction — a false "Stop hook is dead" read on an install that is
+# working fine. model_file is Stop-hook-written and survives compaction, so its
+# presence is durable evidence the Stop hook has run this session at all; this
+# also matches detector B's evidence set in handoff_session_start.sh, which
+# treats .ctx_model_ as one of the files ONLY the Stop hook writes.
 if [[ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]]; then
   prompts_file="$backup_dir/.ctx_prompts_${session_id}"
   health_flag="$backup_dir/.ctx_health_${session_id}"
   HEALTH_PROMPTS="${HANDOFF_HEALTH_PROMPTS:-3}"
   [[ "$HEALTH_PROMPTS" =~ ^[0-9]+$ ]] || HEALTH_PROMPTS=3
+  # Clamp to a minimum of 2: at 0 or 1 the FIRST prompt of every session (Stop
+  # has not had a chance to fire yet, healthy or not) would already meet the
+  # threshold and warn on every fresh session.
+  (( HEALTH_PROMPTS < 2 )) && HEALTH_PROMPTS=2
   if [[ ! -L "$prompts_file" ]]; then
+    # Must exist before the mktemp write below. backup_dir's non-symlink-ness
+    # was already verified above (the `-L` guard a few lines up); on a project
+    # where the Stop hook has never run and no statusLine is wired,
+    # handoff_backups/ itself may not exist yet, and without this the mktemp
+    # below fails every single fire, the counter never persists, and this
+    # detector is inert in exactly the scenario it exists to catch.
+    mkdir -p "$backup_dir" 2>/dev/null || true
     prompt_count=0
     if [[ -f "$prompts_file" ]]; then
       prompt_count="$(cat "$prompts_file" 2>/dev/null || echo 0)"
@@ -336,6 +358,7 @@ if [[ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]]; then
         || rm -f "$health_tmp" 2>/dev/null || true
     fi
     if (( prompt_count >= HEALTH_PROMPTS )) && [[ ! -f "$size_file" ]] \
+       && [[ ! -f "$model_file" ]] \
        && [[ ! -f "$health_flag" ]] && [[ ! -L "$health_flag" ]]; then
       echo "⚠️  handoff: the Stop hook does not appear to be running this session — no per-turn backup has been recorded after ${prompt_count} prompts. /handoff will have no incremental dump to fall back on if invoked under context pressure. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
       if mkdir -p "$backup_dir" 2>/dev/null; then

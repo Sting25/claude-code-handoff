@@ -360,75 +360,89 @@ fi
 # Stop hook specifically.
 #
 # "Most recent session" is identified by mtime rather than by parsing this
-# hook's OWN payload (that names the NEW session, not the previous one, and
-# this script stays jq-free by contract): take the single newest-mtime file
-# this family of hooks writes, recover its session id from its filename, then
-# check for Stop-hook evidence under THAT id — not "is the newest file itself
-# Stop-hook evidence", because within one healthy session both kinds of file
-# are written throughout, and which one happens to land last by mtime is a
-# coin flip, not a signal. Silent when there is nothing to look at (a fresh
-# project, or an install that predates the backups feature) — same
-# don't-guess-without-evidence bias as every check in this family. This block
-# only runs once $current is known to exist (the branch above already exited
-# otherwise), so it never fires on a project's first session.
+# hook's OWN payload for it (that names the NEW session, not the previous
+# one): take the newest-mtime file this family of hooks writes, EXCLUDING any
+# candidate that belongs to the CURRENT (new) session, recover its session id
+# from its filename, then check for Stop-hook evidence under THAT id — not "is
+# the newest file itself Stop-hook evidence", because within one healthy
+# session both kinds of file are written throughout, and which one happens to
+# land last by mtime is a coin flip, not a signal. Excluding the current
+# session's own candidates matters because this hook's OWN prior writes (e.g.
+# a statusLine render racing SessionStart, or this very check's own
+# .ss_health_ / .ctx_prompts_ / .ctx_health_ sidecars from an earlier fire in
+# this same session on resume/clear/compact) can already be the newest files
+# in the directory — without the exclusion the newest-mtime pick lands on the
+# CURRENT session, which (being brand new) naturally has no Stop-hook evidence
+# yet, and the check would warn about a perfectly healthy previous session.
+# Silent when there is nothing to look at (a fresh project, an install that
+# predates the backups feature, or every candidate belongs to the current
+# session) — same don't-guess-without-evidence bias as every check in this
+# family. This block only runs once $current is known to exist (the branch
+# above already exited otherwise), so it never fires on a project's first
+# session. Stays jq-free: session_id comes from the payload via the same sed
+# extraction as hook_source/hook_cwd above.
 if [ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]; then
   hb="$repo/.claude/handoff_backups"
   if [ -d "$hb" ] && [ ! -L "$hb" ]; then
+    # Recover a session id from one of this family's filenames: longest/most-
+    # specific prefix first so e.g. .ctx_flagged_tok_ is not mis-stripped by
+    # the bare .ctx_flagged_ or .ctx_ patterns.
+    handoff_ss_sid_of() {  # <basename> -> session id on stdout, or empty
+      local b="$1" s=""
+      case "$b" in
+        handoff_raw_*.md)    s="${b#handoff_raw_}"; s="${s%.md}" ;;
+        .ctx_flagged_tok_*)  s="${b#.ctx_flagged_tok_}" ;;
+        .ctx_flagged_*)      s="${b#.ctx_flagged_}" ;;
+        .ctx_tokens_*)       s="${b#.ctx_tokens_}" ;;
+        .ctx_model_*)        s="${b#.ctx_model_}" ;;
+        .ctx_sl_*)            s="${b#.ctx_sl_}" ;;
+        .ctx_nojq_*)          s="${b#.ctx_nojq_}" ;;
+        .ctx_prompts_*)       s="${b#.ctx_prompts_}" ;;
+        .ctx_health_*)        s="${b#.ctx_health_}" ;;
+        .fences_tok_*)        s="${b#.fences_tok_}" ;;
+        .fences_*)             s="${b#.fences_}" ;;
+        .ctx_*)                 s="${b#.ctx_}" ;;   # bare byte ledger, tried last
+      esac
+      case "$s" in
+        [A-Za-z0-9_-]*) printf '%s\n' "$s" ;;
+      esac
+    }
+    ss_sid="$(printf '%s' "$payload" \
+      | LC_ALL=C sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+      | head -n 1 || true)"
+    case "$ss_sid" in
+      [A-Za-z0-9_-]*) : ;;
+      *) ss_sid="unknown" ;;
+    esac
     # LC_ALL=C: same mtime-tie collation reasoning as the prune loop in
     # handoff_turn_append.sh. shellcheck: ls over find here is deliberate,
     # matching that same precedent (BSD find has no -printf for mtime sort).
     # shellcheck disable=SC2012
-    newest="$(LC_ALL=C ls -t "$hb"/.ctx_* "$hb"/.fences_* "$hb"/handoff_raw_*.md 2>/dev/null | head -n 1 || true)"
-    if [ -n "$newest" ] && [ -f "$newest" ]; then
-      nbase="$(basename "$newest")"
-      # Recover the session id: longest/most-specific prefix first so e.g.
-      # .ctx_flagged_tok_ is not mis-stripped by the bare .ctx_flagged_ or
-      # .ctx_ patterns.
-      prev_sid=""
-      case "$nbase" in
-        handoff_raw_*.md)    prev_sid="${nbase#handoff_raw_}"; prev_sid="${prev_sid%.md}" ;;
-        .ctx_flagged_tok_*)  prev_sid="${nbase#.ctx_flagged_tok_}" ;;
-        .ctx_flagged_*)      prev_sid="${nbase#.ctx_flagged_}" ;;
-        .ctx_tokens_*)       prev_sid="${nbase#.ctx_tokens_}" ;;
-        .ctx_model_*)        prev_sid="${nbase#.ctx_model_}" ;;
-        .ctx_sl_*)            prev_sid="${nbase#.ctx_sl_}" ;;
-        .ctx_nojq_*)          prev_sid="${nbase#.ctx_nojq_}" ;;
-        .ctx_prompts_*)       prev_sid="${nbase#.ctx_prompts_}" ;;
-        .ctx_health_*)        prev_sid="${nbase#.ctx_health_}" ;;
-        .fences_tok_*)        prev_sid="${nbase#.fences_tok_}" ;;
-        .fences_*)             prev_sid="${nbase#.fences_}" ;;
-        .ctx_*)                 prev_sid="${nbase#.ctx_}" ;;   # bare byte ledger, tried last
-      esac
-      case "$prev_sid" in
-        [A-Za-z0-9_-]*) : ;;
-        *) prev_sid="" ;;
-      esac
-      if [ -n "$prev_sid" ] \
-         && [ ! -f "$hb/.ctx_tokens_${prev_sid}" ] \
-         && [ ! -f "$hb/.ctx_model_${prev_sid}" ] \
-         && [ ! -f "$hb/.ctx_${prev_sid}" ] \
-         && [ ! -f "$hb/handoff_raw_${prev_sid}.md" ]; then
-        # Throttle once per the CURRENT (new) session — SessionStart can fire
-        # more than once per session (resume/clear/compact), and this warning
-        # is retrospective, about a session that has already ended: repeating
-        # it on every re-fire would nag about something that can't change
-        # mid-session. session_id comes from the payload, same jq-free sed
-        # extraction as hook_source/hook_cwd above; an unparseable payload
-        # degrades to a fixed marker so the throttle still applies (same
-        # fallback idiom as the nojq_flag handling in the sibling hooks).
-        ss_sid="$(printf '%s' "$payload" \
-          | LC_ALL=C sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
-          | head -n 1 || true)"
-        case "$ss_sid" in
-          [A-Za-z0-9_-]*) : ;;
-          *) ss_sid="unknown" ;;
-        esac
-        ss_flag="$hb/.ss_health_${ss_sid}"
-        if [ ! -f "$ss_flag" ] && [ ! -L "$ss_flag" ]; then
-          echo "⚠️  handoff: the Stop hook does not appear to have run last session — no .ctx_tokens_/.ctx_model_/.ctx_ sidecar or handoff_raw_ dump was recorded for it in .claude/handoff_backups/. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
-          echo
-          : > "$ss_flag" 2>/dev/null || true
-        fi
+    prev_sid=""
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      [ -f "$cand" ] || continue
+      cand_sid="$(handoff_ss_sid_of "$(basename "$cand")")"
+      [ -n "$cand_sid" ] || continue
+      [ "$cand_sid" = "$ss_sid" ] && continue   # skip the CURRENT session
+      prev_sid="$cand_sid"
+      break
+    done < <(LC_ALL=C ls -t "$hb"/.ctx_* "$hb"/.fences_* "$hb"/handoff_raw_*.md 2>/dev/null || true)
+    if [ -n "$prev_sid" ] \
+       && [ ! -f "$hb/.ctx_tokens_${prev_sid}" ] \
+       && [ ! -f "$hb/.ctx_model_${prev_sid}" ] \
+       && [ ! -f "$hb/.ctx_${prev_sid}" ] \
+       && [ ! -f "$hb/handoff_raw_${prev_sid}.md" ]; then
+      # Throttle once per the CURRENT (new) session — SessionStart can fire
+      # more than once per session (resume/clear/compact), and this warning
+      # is retrospective, about a session that has already ended: repeating
+      # it on every re-fire would nag about something that can't change
+      # mid-session.
+      ss_flag="$hb/.ss_health_${ss_sid}"
+      if [ ! -f "$ss_flag" ] && [ ! -L "$ss_flag" ]; then
+        echo "⚠️  handoff: the Stop hook does not appear to have run last session — no .ctx_tokens_/.ctx_model_/.ctx_ sidecar or handoff_raw_ dump was recorded for it in .claude/handoff_backups/. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
+        echo
+        : > "$ss_flag" 2>/dev/null || true
       fi
     fi
   fi

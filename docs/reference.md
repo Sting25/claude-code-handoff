@@ -147,14 +147,23 @@ healthy, both throttled to once per session:
 
 - **Detector A** (`handoff_ctx_check.sh`, same session): counts
   `UserPromptSubmit` fires in `.ctx_prompts_<session_id>`. Once the
-  count passes `HANDOFF_HEALTH_PROMPTS` (default `3`) with
-  `.ctx_<session_id>` still absent — a working Stop hook would have
-  written it long before then — it warns once. It can share a fire
-  with the context nudge above (e.g. Stop hook dead, statusline
-  ledger still driving the nudge): the health warning prints first.
+  count passes `HANDOFF_HEALTH_PROMPTS` (default `3`, clamped to a
+  minimum of `2` — at `0` or `1` the very first prompt of every
+  session would already meet the threshold, before a working Stop
+  hook has had any chance to fire) with **both** `.ctx_<session_id>`
+  and `.ctx_model_<session_id>` still absent, it warns once. Checking
+  both, not just the byte ledger file, matters across compaction:
+  `handoff_compact_reset.sh` clears `.ctx_<session_id>` on every
+  `PostCompact` fire but deliberately keeps `.ctx_model_<session_id>`,
+  so a healthy session that auto-compacts would otherwise see the
+  byte file absent on its very next prompt and warn on a working
+  install. It can share a fire with the context nudge above (e.g.
+  Stop hook dead, statusline ledger still driving the nudge): the
+  health warning prints first.
 - **Detector B** (`handoff_session_start.sh`, retrospective): looks
   at the most recent previous session represented in
-  `.claude/handoff_backups/`; if it has no Stop-hook-written evidence
+  `.claude/handoff_backups/`, excluding the current (new) session's
+  own files; if it has no Stop-hook-written evidence
   (`.ctx_tokens_`/`.ctx_model_`/`.ctx_`/`handoff_raw_`), warns that
   the Stop hook wasn't working last session either. This is the one
   that catches both per-turn hooks dying together — detector A needs

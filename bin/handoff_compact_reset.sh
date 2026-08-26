@@ -30,7 +30,17 @@
 #                            statusline will overwrite it within a second
 #                            anyway).
 # KEPT: .ctx_model_<sid> — the model didn't change across compaction, and
-# keeping it preserves window auto-detection until the next Stop fire.
+# keeping it preserves window auto-detection until the next Stop fire. This
+# KEEP is also load-bearing for Stop-hook health detector A
+# (handoff_ctx_check.sh, issue #71): that detector warns only when BOTH
+# .ctx_<sid> AND .ctx_model_<sid> are absent, specifically BECAUSE this script
+# deletes .ctx_<sid> on every PostCompact fire while keeping .ctx_model_<sid>.
+# A detector gated on .ctx_<sid> alone would false-positive on a perfectly
+# healthy session immediately after an auto-compaction: the byte file is gone
+# (deleted above), the carried-over prompt count from before the compaction
+# may already be past threshold, and nothing would distinguish that from the
+# Stop hook actually being dead. .ctx_model_<sid> surviving here is what makes
+# it durable evidence the Stop hook has run this session at all.
 # KEPT: .fences_<sid> and .fences_tok_<sid> — the rules re-injection cooldown
 # (handoff_ctx_check.sh writes these, one per ledger). Deliberate, and stated
 # here because this header's job is to account for EVERY sidecar and it

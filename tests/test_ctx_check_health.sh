@@ -33,6 +33,17 @@ fire_a() {  # <repo> <sid> [ENV=VAL ...]
   ( cd "$repo" && env "$@" bash "$CC" <<<"{\"session_id\":\"$sid\"}" 2>/dev/null )
 }
 
+# F1 regression: handoff_backups/ does NOT pre-exist (the flagship scenario —
+# Stop hook never ran, no statusLine wired, so nothing has ever created the
+# dir). The counter write must create it, not silently fail to persist.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"
+check "F1: handoff_backups/ absent before first fire" no "$(exists "$repo/.claude/handoff_backups")"
+out=""
+for _ in 1 2 3; do out="$(fire_a "$repo" NODIR)"; done
+check "F1: warns at threshold with no pre-existing backups dir" yes "$(has "$out" "does not appear to be running")"
+check "F1: prompt counter persisted across fires" yes "$(exists "$repo/.claude/handoff_backups/.ctx_prompts_NODIR")"
+rm -rf "$repo"
+
 # Below threshold (default 3): two fires with no .ctx_<sid> -> silent.
 repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
 out1="$(fire_a "$repo" BELOW)"
@@ -70,10 +81,34 @@ check "opt-out -> silent even past threshold" no  "$(has "$out" "does not appear
 check "opt-out -> no prompt counter written"  no  "$(exists "$repo/.claude/handoff_backups/.ctx_prompts_OPTOUT")"
 rm -rf "$repo"
 
-# Threshold is tunable: HANDOFF_HEALTH_PROMPTS=1 warns on the very first fire.
+# Threshold is tunable, but clamped to a minimum of 2 (F4): a healthy
+# session's first prompt must never warn, so HANDOFF_HEALTH_PROMPTS=1 (and =0)
+# behave as 2 — silent on fire 1, warns on fire 2.
 repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
 out="$(fire_a "$repo" TUNED HANDOFF_HEALTH_PROMPTS=1)"
-check "tunable threshold=1 -> warns on 1st fire" yes "$(has "$out" "does not appear to be running")"
+check "F4: threshold=1 clamped -> silent on 1st fire" no "$(has "$out" "does not appear to be running")"
+out2="$(fire_a "$repo" TUNED HANDOFF_HEALTH_PROMPTS=1)"
+check "F4: threshold=1 clamped -> warns on 2nd fire" yes "$(has "$out2" "does not appear to be running")"
+rm -rf "$repo"
+
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+out="$(fire_a "$repo" TUNED0 HANDOFF_HEALTH_PROMPTS=0)"
+check "F4: threshold=0 clamped -> silent on 1st fire" no "$(has "$out" "does not appear to be running")"
+rm -rf "$repo"
+
+# F2 regression: post-compaction false positive. handoff_compact_reset.sh
+# deletes .ctx_<sid> on every PostCompact fire but KEEPS .ctx_model_<sid> and
+# .ctx_prompts_<sid>. A healthy session that just auto-compacted therefore has
+# its next prompt see a high carried-over prompt count with .ctx_<sid> absent
+# — must stay silent because .ctx_model_<sid> (Stop-hook-written, survives
+# compaction) proves the Stop hook has actually run this session.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"
+bd="$repo/.claude/handoff_backups"; must mkdir -p "$bd"
+must printf '5\n' > "$bd/.ctx_prompts_POSTCOMPACT"   # already past threshold, carried over
+must printf 'claude-x' > "$bd/.ctx_model_POSTCOMPACT" # kept across compaction
+out="$(fire_a "$repo" POSTCOMPACT)"
+check "F2: post-compaction (.ctx_ absent, .ctx_model_ present) -> silent" no \
+  "$(has "$out" "does not appear to be running")"
 rm -rf "$repo"
 
 # Detector A must not break the token-ledger nudge it coexists with: Stop hook
@@ -139,6 +174,24 @@ sleep 1
 must touch "$bd/.ctx_sl_OKPREV"   # newest by mtime, but same session as the Stop evidence above
 out="$(fire_b "$repo" NEWSESSION)"
 check "detector B: healthy previous session -> silent" no "$(has "$out" "does not appear to have run")"
+rm -rf "$repo"
+
+# F3 regression: a statusLine render racing SessionStart writes a fresh
+# .ctx_sl_<CURRENT session id> — newer by mtime than everything else in the
+# directory. Complete Stop-hook evidence exists for the actual previous
+# session (OLDPREV). Without excluding the current session's own candidate,
+# the newest-mtime pick lands on the brand-new session (which naturally has
+# no Stop-hook evidence yet) and false-positives on a healthy project.
+repo="$(mktemp -d)"; cleanup_on_exit "$repo"
+bd="$repo/.claude/handoff_backups"; must mkdir -p "$bd"
+must printf '# handoff\n\nCurated. MARKER\n' > "$repo/.claude/handoff_current.md"
+must printf '4000' > "$bd/.ctx_OLDPREV"
+must printf '600'  > "$bd/.ctx_tokens_OLDPREV"
+must printf 'model' > "$bd/.ctx_model_OLDPREV"
+sleep 1
+must touch "$bd/.ctx_sl_NEWSESSION"   # the racing statusline write for the NEW session
+out="$(fire_b "$repo" NEWSESSION)"
+check "F3: statusline race for current session -> silent" no "$(has "$out" "does not appear to have run")"
 rm -rf "$repo"
 
 # First session: no handoff_current.md at all -> silent (nothing expected).
