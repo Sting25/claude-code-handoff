@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: b72aee4a5e94a847b104e322d43ca6da31b474e61dbb03e474e6329d0a7b52e3
+# SOURCE-SHA256: d8b3af91f6b6f2a8c246eda015163c70fbca9e478c5eb02281f2ddc232b248ce
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1034,12 +1034,36 @@ signing_status_reason() {
 # later cleaned up) makes the corresponding hook no-op silently, so surface it
 # loudly here. Exit non-zero if anything is broken so CI / a wrapper can detect
 # it. (issue #21)
+#
+# Plugin-mode awareness (issues #64, #70): a plugin-only machine has none of
+# this installer's bin/ scripts or settings.json hooks by design (the plugin
+# ships its own hooks/hooks.json and runs from its own cache copy), so the
+# bare-scripts per-script loop below does not apply there. Reporting those
+# eight scripts as MISSING on a healthy plugin-only machine was issue #64: the
+# verdict contradicted the diagnosis, and the "re-run ./install.sh" remedy is
+# exactly the action that creates a second, parallel bare-scripts install
+# alongside the plugin (every hook then fires twice, see the coexistence
+# check further down). `plugin_only` below gates both: skip the per-script
+# loop and its MISSING lines, and never suggest ./install.sh in the closing
+# remedy, when a plugin cache is present and no bare-scripts artifact is.
 doctor() {
-  local broken=0 dst tgt name mdl secret smode plugin_dir script_hooks_present sign_reason
-  echo "doctor: checking installed handoff hooks under $claude_home/bin"
+  local broken=0 dst tgt name mdl secret smode sign_reason
+  local plugin_dir bare_present plugin_only script_hooks_present
+  local vdir vcount hooks_json missing_scripts events_str expected_events
+
+  # Plugin cache detection lives up front now (used by several sections
+  # below), via the `|| true` idiom already used elsewhere in this file so a
+  # "not found" result can't trip `set -e` (find_plugin_cache_dir returns 1
+  # when there's no cache; that's a normal, expected outcome, not an error).
+  plugin_dir="$(find_plugin_cache_dir || true)"
+
+  echo "doctor: checking runtime dependencies"
   # jq is a RUNTIME dependency of the Stop hook (payload parsing), the ctx
   # nudge, and the /handoff-recover tail rescue — a resolving script link is
   # not enough if the tool it needs is missing (they all no-op silently).
+  # Mode-neutral: this fires the same way whether the six hooks came from
+  # bare-scripts settings.json entries or the plugin's own hooks.json, since
+  # both invoke the same scripts under the hood (issue #70's "jq" note).
   if ! command -v jq >/dev/null 2>&1; then
     echo "  BROKEN  jq not found on PATH (Stop hook, ctx nudge, and /handoff-recover tail rescue are silently disabled)"
     broken=$((broken + 1))
@@ -1053,23 +1077,67 @@ doctor() {
     echo "          HMAC-signed, so the rules/pinned layer loads as reference"
     echo "          data instead of binding rules. Install openssl to enable."
   fi
+  echo
+
+  # bare_present: is there ANY evidence of a bare-scripts install at all,
+  # either a script under $claude_home/bin (even a dangling symlink, which
+  # is real breakage worth reporting, not absence) or a hook wired into
+  # settings.json? Deliberately broader than the six-marker jq lookup below
+  # (script_hooks_present, unchanged, keyed on SessionStart only, matching
+  # what the coexistence WARN has always used): this one only decides
+  # whether the per-script loop applies at all, not whether both modes are
+  # double-firing.
+  bare_present=0
   for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
     dst="$claude_home/bin/$name.sh"
-    if [[ -e "$dst" ]]; then
-      if [[ -L "$dst" ]]; then
-        echo "  ok      $dst -> $(readlink "$dst")"
-      else
-        echo "  ok      $dst (copy)"
-      fi
-    elif [[ -L "$dst" ]]; then
-      tgt="$(readlink "$dst" 2>/dev/null || true)"
-      echo "  BROKEN  $dst -> $tgt (dangling symlink — hook is silently disabled)"
-      broken=$((broken + 1))
-    else
-      echo "  MISSING $dst (not installed)"
-      broken=$((broken + 1))
+    if [[ -e "$dst" || -L "$dst" ]]; then
+      bare_present=1
+      break
     fi
   done
+  if (( ! bare_present )) && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
+    if jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
+           --arg st "$st_marker" --arg up "$up_marker" '
+         ( (.hooks.SessionStart // [])     | any(.. | .command? // "" | contains($ss)) ) or
+         ( (.hooks.SessionEnd // [])       | any(.. | .command? // "" | contains($se)) ) or
+         ( (.hooks.PreCompact // [])       | any(.. | .command? // "" | contains($se)) ) or
+         ( (.hooks.PostCompact // [])      | any(.. | .command? // "" | contains($post)) ) or
+         ( (.hooks.Stop // [])             | any(.. | .command? // "" | contains($st)) ) or
+         ( (.hooks.UserPromptSubmit // []) | any(.. | .command? // "" | contains($up)) )
+       ' "$settings" >/dev/null 2>&1; then
+      bare_present=1
+    fi
+  fi
+  plugin_only=0
+  if [[ -n "$plugin_dir" ]] && (( ! bare_present )); then
+    plugin_only=1
+  fi
+
+  if (( plugin_only )); then
+    echo "doctor: no bare-scripts install found under $claude_home/bin, skipping"
+    echo "        the per-script hook checks (this installer's own scripts were"
+    echo "        never installed here). See the plugin section below."
+  else
+    echo "doctor: checking installed handoff hooks under $claude_home/bin"
+    for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+      dst="$claude_home/bin/$name.sh"
+      if [[ -e "$dst" ]]; then
+        if [[ -L "$dst" ]]; then
+          echo "  ok      $dst -> $(readlink "$dst")"
+        else
+          echo "  ok      $dst (copy)"
+        fi
+      elif [[ -L "$dst" ]]; then
+        tgt="$(readlink "$dst" 2>/dev/null || true)"
+        echo "  BROKEN  $dst -> $tgt (dangling symlink — hook is silently disabled)"
+        broken=$((broken + 1))
+      else
+        echo "  MISSING $dst (not installed)"
+        broken=$((broken + 1))
+      fi
+    done
+  fi
+  echo
   # Secret-file hygiene. The per-machine HMAC secret is what makes a
   # handoff's rules layer load as BINDING (issue #42): group/other-readable,
   # any local reader can forge the trailer; a symlink at the path could be
@@ -1125,12 +1193,48 @@ doctor() {
   # `broken`: an unwired or user-owned statusLine is a legitimate state (we
   # never overwrite a user's own setting), not a fault. Only a dangling
   # SCRIPT (reported by the loop above) is real breakage.
-  if command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
+  #
+  # A genuinely plugin-only machine (#64, #70) may never have a settings.json
+  # at all, this installer never created one and the plugin doesn't need it
+  # for anything BUT statusLine. Report "unset" for that case too instead of
+  # silently saying nothing: in plugin mode statusLine is the only accurate
+  # context signal there is (docs/plugin-mode-context-watching-report.md),
+  # so its absence is worth a line even when there's no file to inspect.
+  if command -v jq >/dev/null 2>&1 && [[ ! -f "$settings" ]]; then
+    if (( plugin_only )); then
+      echo "  info    statusLine unset (optional: a plugin install can't wire it"
+      echo "          automatically; paste the manual snippet from"
+      echo "          docs/reference.md, Status line section, to enable the"
+      echo "          context nudge's most accurate signal in plugin mode)"
+    else
+      echo "  info    statusLine unset (re-run ./install.sh to wire it)"
+    fi
+    echo
+  elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
     if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
          "$settings" >/dev/null 2>&1; then
       echo "  ok      statusLine wired (ours)"
+    elif [[ -n "$plugin_dir" ]] && jq -e --arg p "$plugin_dir" '
+           (.statusLine.command // "") as $c
+           | ($c | contains($p)) and ($c | contains("handoff_statusline.sh"))
+         ' "$settings" >/dev/null 2>&1; then
+      # Second marker (issue #70): a plugin install can't wire statusLine
+      # itself (Claude Code has no per-plugin mechanism for it), so the only
+      # way this line matches is a user-pasted command pointing at the
+      # plugin's own cached script (README's documented manual snippet).
+      # Before this check, that command matched neither this branch nor the
+      # bare-scripts marker above, and fell through to "user's own" below.
+      echo "  ok      statusLine wired (ours, plugin)"
     elif jq -e '(.statusLine // null) != null' "$settings" >/dev/null 2>&1; then
       echo "  info    statusLine present (user's own — manual wiring documented in README)"
+    elif (( plugin_only )); then
+      # Plugin-only (#64): never suggest ./install.sh here, that's the
+      # dual-mode trap. statusLine is optional in every mode, so this stays
+      # an info line, not BROKEN, same as the bare-scripts case below.
+      echo "  info    statusLine unset (optional: a plugin install can't wire it"
+      echo "          automatically; paste the manual snippet from"
+      echo "          docs/reference.md, Status line section, to enable the"
+      echo "          context nudge's most accurate signal in plugin mode)"
     else
       echo "  info    statusLine unset (re-run ./install.sh to wire it)"
     fi
@@ -1148,12 +1252,75 @@ doctor() {
     esac
     echo
   fi
+  # Plugin-specific health checks (issue #70). The eight-script loop above
+  # only ever looks under $claude_home/bin, this installer's own copy; it has
+  # nothing to say about the plugin's own cache copy at $plugin_dir, which
+  # has real, checkable failure modes of its own: a partial or stale cache
+  # extraction makes every plugin hook a silent no-op, the same class of
+  # failure issue #21 fixed for bare-scripts symlinks, just relocated to
+  # wherever Claude Code checked the plugin out.
+  if [[ -n "$plugin_dir" ]]; then
+    echo "doctor: checking plugin cache at $plugin_dir"
+    # Cache layout is <plugin_dir>/<version>/{hooks,bin,...}; pick the newest
+    # version dir by mtime, same "ls -td | head -1" idiom the README's own
+    # manual statusLine snippet uses for the same reason (a cache can hold
+    # more than one version, see docs/reference.md's stale-cache note).
+    # shellcheck disable=SC2012  # ls -t is deliberate: mtime ordering, and BSD find has no -printf (same idiom as bin/handoff_recover_tail.sh's ls -t)
+    vdir="$(ls -td "$plugin_dir"/*/ 2>/dev/null | head -1)"
+    vdir="${vdir%/}"
+    # shellcheck disable=SC2012  # plain dir count, not name-sensitive: any non-empty ls -d line counts as one version regardless of its characters
+    vcount="$(ls -d "$plugin_dir"/*/ 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ -z "$vdir" || ! -d "$vdir" ]]; then
+      echo "  BROKEN  $plugin_dir has no version subdirectory, the plugin cache looks empty or corrupted"
+      broken=$((broken + 1))
+    else
+      if [[ -n "$vcount" ]] && (( vcount > 1 )); then
+        echo "  note    $vcount versions cached under $plugin_dir; using the newest by"
+        echo "          mtime ($vdir). An older cache touched more recently can shadow"
+        echo "          the current version, see docs/reference.md's stale-cache note."
+      fi
+      hooks_json="$vdir/hooks/hooks.json"
+      if [[ ! -f "$hooks_json" ]]; then
+        echo "  BROKEN  $hooks_json missing, every plugin hook is silently disabled"
+        broken=$((broken + 1))
+      elif ! command -v jq >/dev/null 2>&1; then
+        echo "  note    $hooks_json present but jq is missing, cannot verify it parses"
+      elif ! jq -e . "$hooks_json" >/dev/null 2>&1; then
+        echo "  BROKEN  $hooks_json is not valid JSON, every plugin hook is silently disabled"
+        broken=$((broken + 1))
+      else
+        events_str="$(jq -r '.hooks | keys | sort | join(",")' "$hooks_json" 2>/dev/null)"
+        expected_events="PostCompact,PreCompact,SessionEnd,SessionStart,Stop,UserPromptSubmit"
+        if [[ "$events_str" != "$expected_events" ]]; then
+          echo "  BROKEN  $hooks_json is missing hook event(s): has [$events_str], expected [$expected_events]"
+          broken=$((broken + 1))
+        else
+          echo "  ok      $hooks_json has all six hook events"
+        fi
+      fi
+      missing_scripts=""
+      for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+        [[ -f "$vdir/bin/$name.sh" ]] || missing_scripts="$missing_scripts $name.sh"
+      done
+      if [[ -n "$missing_scripts" ]]; then
+        echo "  BROKEN  $vdir/bin is missing:$missing_scripts (the plugin's hooks call these directly)"
+        broken=$((broken + 1))
+      else
+        echo "  ok      $vdir/bin has all eight scripts"
+      fi
+    fi
+    echo
+  fi
   # Plugin/script coexistence (v0.14.0+ ships a plugin form of this tool).
   # Plugin hooks and these script-install hooks COEXIST — Claude Code fires
   # both, no dedup — so a machine with both installed double-fires every
   # hook. Advisory only: never counts toward `broken`, same as the model and
   # statusLine checks above, since neither installed form is itself faulty.
-  if plugin_dir="$(find_plugin_cache_dir)"; then
+  # script_hooks_present is deliberately the narrow, SessionStart-marker-only
+  # signal (unchanged from before #64/#70): it decides WARN vs. info for
+  # the coexistence note specifically, not whether the per-script loop above
+  # ran (that's plugin_only/bare_present, a broader check, see above).
+  if [[ -n "$plugin_dir" ]]; then
     script_hooks_present=0
     if command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
        && jq -e --arg m "$ss_marker" \
@@ -1174,8 +1341,18 @@ doctor() {
     echo
   fi
   if (( broken )); then
-    echo "doctor: $broken hook(s) broken or missing." >&2
-    echo "        Re-run ./install.sh from a persistent clone (not a /tmp checkout)." >&2
+    echo "doctor: $broken issue(s) found." >&2
+    if (( plugin_only )); then
+      # #64: never point a plugin-only machine at ./install.sh, that is the
+      # one action that manufactures the dual-mode state the README warns
+      # about (a second, parallel bare-scripts install; every hook then
+      # fires twice). Point at the plugin's own update path instead.
+      echo "        This is a plugin-only install: do not run ./install.sh." >&2
+      echo "        Reinstall the plugin instead: '/plugin uninstall claude-code-handoff'," >&2
+      echo "        then '/plugin install claude-code-handoff@claude-code-handoff'." >&2
+    else
+      echo "        Re-run ./install.sh from a persistent clone (not a /tmp checkout)." >&2
+    fi
     return 1
   fi
   echo "doctor: all hooks resolve."

@@ -48,6 +48,32 @@ installs pick this up on update, bare-scripts installs on `git pull`
   paths (`.ctx_flagged_tok_`, `.fences_tok_`) so the two quantities
   can never be compared as one. This matters most on plugin installs,
   where the statusline is the only accurate context signal available.
+- **`--doctor` reported a healthy plugin-only install as 8 broken
+  hooks, exited 1, and advised the dual-mode trap (#64).** A
+  plugin-only machine has none of this installer's own `bin/`
+  scripts or `settings.json` hooks by design, so the per-script loop
+  reported all eight as `MISSING`, and the closing remedy said
+  "re-run `./install.sh`", the one action that creates a second,
+  parallel bare-scripts install alongside the plugin (every hook then
+  fires twice, see the Dual-mode warning). Doctor now detects a
+  genuinely plugin-only machine (plugin cache present, no bare-scripts
+  artifact anywhere) up front, skips the per-script loop entirely for
+  it, and never suggests `./install.sh` in that mode, healthy or not.
+- **`--doctor` had no plugin-mode diagnostics at all (#70).** Once
+  #64 stopped the false alarms, doctor said nothing about the
+  plugin's own cache copy, the one thing a plugin-only machine
+  actually has. It now checks the plugin cache directly: the newest
+  cached version's `hooks/hooks.json` is present, parses, and has all
+  six events; its `bin/` has all eight scripts; a `statusLine` pasted
+  by hand and pointing at the plugin's own script is recognized
+  (`statusLine wired (ours, plugin)`, a second marker alongside the
+  existing bare-scripts one); an unwired `statusLine` in plugin mode
+  is reported as optional info, never as broken, since a plugin
+  install cannot wire it automatically; and more than one version
+  cached under the same plugin gets an advisory note (stale-cache
+  risk). `jq` and `openssl` presence were already mode-neutral checks
+  and needed no change. Dual-mode (both installed) now runs both
+  check sets together, plus the existing coexistence warning.
 
 ### Added
 - `HANDOFF_CTX_COOLDOWN_TOKENS` — re-flag spacing for the token
