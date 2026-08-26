@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 0f26a123827b768f7727c224b47a469aed2e792f6d9b6e4845886d5d79f55c30
+# SOURCE-SHA256: fb4542f87f10f949a908a4f471a5ad2319360e04c6f093cf0f6898518449874b
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -55,6 +55,7 @@ Usage:
   ./install.sh --model 'opus[1m]'  # also pin "model" in settings.json (env: HANDOFF_MODEL)
   ./install.sh --doctor     # report any dangling/missing installed hooks
   ./install.sh --uninstall  # remove symlinks + strip patched entries
+  ./install.sh --uninstall --keep-secret  # same, but keep the per-machine HMAC secret
   ./install.sh --help
 USAGE
 }
@@ -85,6 +86,19 @@ model_pin=""
 # volatile one (see is_volatile_path below); --copy / --link force the choice,
 # and HANDOFF_FORCE_SYMLINK=1 is an escape hatch for the volatile auto-copy.
 link_mode="auto"
+
+# --uninstall --keep-secret (issue #65): preserve the per-machine HMAC secret
+# instead of deleting it. Only consulted by remove_secret_if_ours() in
+# install mode "uninstall" (harmless, and unused, with any other mode). The
+# secret is per-machine identity, not per-install-mode state: a user moving
+# from bare-scripts to the plugin (the README's own recommended migration,
+# via the dual-mode warning) runs --uninstall first, and without this flag
+# that silently invalidates every already-signed handoff_current.md: the
+# HANDOFF_BIND_BEGIN/END rules block stops verifying and downgrades to
+# reference data with no error, no prompt, nothing in the diff. Default stays
+# "delete" (unchanged, opt-in only) because the secret is also genuinely
+# uninstall-scoped key material for someone leaving the tool entirely.
+keep_secret=0
 
 # Validate $claude_home before creating or patching anything under it: an empty,
 # root, or relative value would scatter symlinks and a patched settings.json
@@ -156,10 +170,11 @@ cleanup() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --uninstall) mode=uninstall ;;
-    --doctor)    mode=doctor ;;
-    --copy)      link_mode=copy ;;
-    --link)      link_mode='link' ;;
+    --uninstall)   mode=uninstall ;;
+    --doctor)      mode=doctor ;;
+    --copy)        link_mode=copy ;;
+    --link)        link_mode='link' ;;
+    --keep-secret) keep_secret=1 ;;
     --model)
       if [[ $# -lt 2 || -z "$2" ]]; then
         echo "ERROR: --model requires a value (e.g. --model 'opus[1m]')" >&2
@@ -490,6 +505,21 @@ uninstall_symlinks() {
 # The content is shape-checked, never printed (it is secret material).
 remove_secret_if_ours() {
   local secret="$claude_home/handoff_secret" body
+  # --keep-secret (issue #65): skip the deletion entirely and say so. The
+  # secret is per-machine identity, not per-install-mode state, so a user
+  # switching from bare-scripts to the plugin (the README's own migration
+  # path, via the dual-mode warning) can carry it forward and keep every
+  # already-signed handoff_current.md verifying instead of it silently
+  # downgrading to reference data. Checked before every other guard below:
+  # keeping the file needs none of the shape/ownership proof that deleting
+  # it does.
+  if (( keep_secret )); then
+    echo "  skip    $secret (--keep-secret; preserving the per-machine HMAC secret)"
+    echo "          Existing signed handoffs keep verifying. Both install modes read"
+    echo "          this same default path, so it needs no copying: it's already"
+    echo "          where the plugin install will find it."
+    return 0
+  fi
   if [[ -n "${HANDOFF_SECRET_FILE:-}" ]]; then
     echo "  skip    handoff secret (HANDOFF_SECRET_FILE override set; leaving '$HANDOFF_SECRET_FILE' alone)"
     return 0

@@ -39,6 +39,12 @@ do_uninstall() {  # [ENV=VAL ...]
   # -u and win.
   OUT="$(env -u HANDOFF_SECRET_FILE CLAUDE_HOME="$HOME_DIR" "$@" bash "$SRC_DIR/install.sh" --uninstall 2>&1)"
 }
+# Same as do_uninstall, but also passes --keep-secret (issue #65: switching
+# from bare-scripts to the plugin must not silently unbind already-signed
+# handoffs by deleting the per-machine HMAC secret out from under them).
+do_uninstall_keep_secret() {
+  OUT="$(env -u HANDOFF_SECRET_FILE CLAUDE_HOME="$HOME_DIR" bash "$SRC_DIR/install.sh" --uninstall --keep-secret 2>&1)"
+}
 cleanup() { rm -rf "$SRC_DIR" "$HOME_DIR"; }
 
 # A real secret, exactly as handoff_ensure_secret writes it (64 lowercase hex).
@@ -59,6 +65,40 @@ setup_home
 must printf '%s' "$OURS" > "$HOME_DIR/handoff_secret"
 do_uninstall
 check "no-newline secret -> removed"  no "$([ -e "$HOME_DIR/handoff_secret" ] && echo yes || echo no)"
+cleanup
+
+# === --keep-secret (issue #65): migration to the plugin must not silently ===
+# === unbind already-signed handoffs by deleting the shared HMAC secret ======
+
+# --- --keep-secret: OURS survives, with content and permissions intact ------
+setup_home
+must printf '%s\n' "$OURS" > "$HOME_DIR/handoff_secret"
+must chmod 600 "$HOME_DIR/handoff_secret"
+do_uninstall_keep_secret
+check "keep-secret -> file survives"       yes "$([ -e "$HOME_DIR/handoff_secret" ] && echo yes || echo no)"
+check "keep-secret -> content unchanged"   "$OURS" "$(cat "$HOME_DIR/handoff_secret")"
+check "keep-secret -> reports skip"        yes "$(has "$OUT" "preserving the per-machine HMAC secret")"
+check "keep-secret -> never printed"       no  "$(has "$OUT" "$OURS")"
+check "keep-secret -> rest of uninstall ran" yes "$(has "$OUT" "uninstalling handoff skill")"
+cleanup
+
+# --- --keep-secret skips before the shape check: even a foreign file at -----
+# --- that path is left alone and reported as kept, not as "not the shape" --
+setup_home
+FOREIGN_FOR_KEEP_TEST='# unrelated notes, not our secret shape'
+must printf '%s\n' "$FOREIGN_FOR_KEEP_TEST" > "$HOME_DIR/handoff_secret"
+do_uninstall_keep_secret
+check "keep-secret -> foreign content survives" yes "$(has "$(cat "$HOME_DIR/handoff_secret")" "unrelated notes")"
+check "keep-secret -> reports skip, not shape check" yes "$(has "$OUT" "preserving the per-machine HMAC secret")"
+check "keep-secret -> does not say wrong shape"      no  "$(has "$OUT" "not the shape this tool generates")"
+cleanup
+
+# --- Without --keep-secret, the default (delete) behavior is unchanged ------
+setup_home
+must printf '%s\n' "$OURS" > "$HOME_DIR/handoff_secret"
+do_uninstall
+check "no flag -> still removed (default unchanged)" no "$([ -e "$HOME_DIR/handoff_secret" ] && echo yes || echo no)"
+check "no flag -> does not mention keep-secret"       no "$(has "$OUT" "preserving the per-machine HMAC secret")"
 cleanup
 
 # === NEGATIVE CONTROLS: someone else's data must survive =====================

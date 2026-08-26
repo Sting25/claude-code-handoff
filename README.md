@@ -101,6 +101,22 @@ writes and raw-dump appends. Pick one mode per machine. The doctor
 (`./install.sh --doctor`) warns when it detects both installed at
 once — run it if you're unsure which mode you're in.
 
+### Switching install modes
+
+Leaving bare-scripts mode means running `./install.sh --uninstall`
+first, and by default that deletes the per-machine HMAC secret at
+`~/.claude/handoff_secret` (see [Uninstall
+details](docs/reference.md#uninstall-details)) so no key material is
+left behind by a tool you removed. If you have any already-signed
+`handoff_current.md` (or entries in `handoff_history/`) you want to
+keep verifying as binding rules after switching to the plugin, run
+`./install.sh --uninstall --keep-secret` instead: it skips that
+deletion. Both install modes read the secret from the same default
+path, so nothing needs to be copied. Without `--keep-secret`, existing
+signed handoffs still load fine, just as reference data instead of
+binding rules, and `/handoff` re-signs new ones under the plugin's
+fresh secret.
+
 ## Requirements
 
 - `bash` and `jq`. If `jq` is not on PATH, the installer refuses to
