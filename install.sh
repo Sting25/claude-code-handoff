@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: d8b3af91f6b6f2a8c246eda015163c70fbca9e478c5eb02281f2ddc232b248ce
+# SOURCE-SHA256: a550607ddbbf5180d538d719b53be01ec2646d52a62ad2c1c726abf326f08123
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -21,7 +21,7 @@ set -euo pipefail
 
 # Usage text for --help / -h. A heredoc (not a self-read of this file's
 # comments) so it works no matter how the script's bytes arrived: piped in
-# via `curl ... | bash -s -- --help`  # scaffold-allow: prose example, not an executed pipe
+# via `curl ... | bash -s -- --help`
 # — BASH_SOURCE[0] is "bash" (there is no real path to sed), so a self-read
 # prints nothing. A heredoc is parsed out of the script text itself and
 # needs no path or working stdin.
