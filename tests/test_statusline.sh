@@ -183,6 +183,35 @@ check "prune: symlink victim intact"      yes "$(grep -q '^window=1000000$' "$sy
 check "prune: fresh sibling kept (ctrl)"  yes "$([[ -f "$bd/.ctx_sl_FRESH" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- REGRESSION (issue #81): embedded-newline filename must not redirect the
+#     janitor's deletion to an unintended file. Before the fix, find's
+#     newline-delimited output split a crafted aged ".ctx_sl_AAA\nX" across
+#     two "lines" of the read loop: the first line, "<bd>/.ctx_sl_AAA",
+#     collided with (and deleted) a genuinely FRESH, unrelated, real
+#     ".ctx_sl_AAA" cache that should have survived on age alone. NUL-
+#     delimited (`-print0` / `read -rd ''`) treats the whole crafted name as
+#     one opaque field instead, so the split can no longer happen.
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"
+must mkdir -p "$bd"
+# Fresh, real, cache-shaped sibling: the unintended victim. Must survive.
+must cat > "$bd/.ctx_sl_AAA" <<'EOF'
+window=200000
+tokens=1000
+EOF
+# Aged, crafted name with an embedded newline. Never a legitimate sid, and
+# never selected on its own merits: it exists only to prove the split can't
+# happen.
+must printf '' > "$bd/.ctx_sl_AAA
+X"
+must touch -t 202001010000 "$bd/.ctx_sl_AAA
+X"
+run_sl "$repo" "$(full_payload NEWLINE)" >/dev/null; rc=$?
+check "newline defect: exit 0"                                  0   "$rc"
+check "newline defect: fresh victim survives crafted namesake"  yes "$([[ -e "$bd/.ctx_sl_AAA" ]] && echo yes || echo no)"
+check "newline defect: fresh victim content intact" \
+  yes "$(grep -q '^window=200000$' "$bd/.ctx_sl_AAA" 2>/dev/null && echo yes || echo no)"
+rm -rf "$repo"
+
 # --- Handoff state segment: none / auto / curated ----------------------------
 repo="$(mk_repo)"; must mkdir -p "$repo/.claude"
 payload='{"session_id":"HS","context_window":{"context_window_size":200000,"used_percentage":10}}'

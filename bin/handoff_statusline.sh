@@ -219,8 +219,16 @@ write_cache() {
   # fail the name proof and linger instead of being reaped — their suffix is
   # indistinguishable from a user's ".backup"-style name, and leftover litter
   # beats deleting someone else's file.
+  # NUL-delimited: a crafted filename carrying an embedded newline (e.g.
+  # ".ctx_sl_AAA\nX") would otherwise split across two lines of a
+  # newline-delimited read, letting the second "line" masquerade as a
+  # DIFFERENT, unrelated candidate (a real ".ctx_sl_AAA") and get deleted by
+  # proxy. `-print0` / `read -rd ''` treats the whole crafted name as one
+  # opaque field, so it is judged (and, since it fails the name/content
+  # proofs below, rejected) only on its own actual bytes. Same idiom as the
+  # orphan sweep in handoff_session_start.sh.
   local stale sid
-  while IFS= read -r stale; do
+  while IFS= read -rd '' stale; do
     [[ -n "$stale" ]] || continue
     sid="${stale##*/}"; sid="${sid#.ctx_sl_}"
     [[ "$sid" =~ ^[A-Za-z0-9_-]+$ ]] || continue
@@ -230,7 +238,7 @@ write_cache() {
       continue  # some line is not cache-shaped -> not provably ours
     fi
     rm -f -- "$stale"
-  done < <(find "$bd" -maxdepth 1 -name '.ctx_sl_*' -type f -mtime +7 2>/dev/null || true)
+  done < <(find "$bd" -maxdepth 1 -name '.ctx_sl_*' -type f -mtime +7 -print0 2>/dev/null || true)
 }
 # `|| true`: display already succeeded; a cache failure must never surface as
 # a nonzero exit (which would blank the status line on some CC versions).
