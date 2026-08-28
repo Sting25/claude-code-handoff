@@ -113,6 +113,21 @@ if [ -n "$sess_id" ] && [ ! -L "$repo/.claude" ] && [ ! -L "$backup_dir" ]; then
       mv -n "$origin_tmp" "$origin_marker" 2>/dev/null || true
       if [ -e "$origin_tmp" ]; then rm -f "$origin_tmp"; fi
     fi
+  elif [ -f "$origin_marker" ] && [ ! -L "$origin_marker" ]; then
+    # Same-sid re-fire (issue #86): a session dormant past the sweep's 7-day
+    # horizon (below) re-fires SessionStart with the SAME session id while
+    # still live. Content is left untouched, the recorded origin epoch stays
+    # pinned, which is the guard's entire correctness, but the mtime is
+    # refreshed so this marker survives ANOTHER session's sweep for another 7
+    # days instead of being reaped as a false orphan and recreated later with
+    # today's epoch (which would silently move the origin forward and reopen
+    # the stale-overwrite hole issue #63 closes). write_handoff.sh's guard
+    # reads the origin epoch from the sidecar's CONTENT whenever that content
+    # is a plain integer (its mtime fallback only applies when content is
+    # not), so this touch cannot disturb guard semantics. Best-effort, same
+    # fail-open posture as the marker creation above: a missed refresh only
+    # returns to today's leak, never a false guard failure.
+    touch -- "$origin_marker" 2>/dev/null || true
   fi
 fi
 

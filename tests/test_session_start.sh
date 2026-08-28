@@ -186,13 +186,19 @@ rm -rf "$proj"
 # --- Overwrite-guard origin marker: create-once (issue #63) ------------------
 # write_handoff.sh's cross-session overwrite guard compares a stale writer's
 # ORIGIN (when this session id was first seen) against a handoff's write-time
-# stamp. Correctness depends entirely on that origin never moving once set:
-# resume/compact re-fire SessionStart with the SAME session id, and refreshing
-# the marker on those re-fires would make an old session look freshly started.
-# run_ss reads stdin from /dev/null (compact detection determinism), so it
-# can't carry a payload; this hook's session_id comes from stdin JSON only,
-# so fire it directly the way test_ctx_check_health.sh does for its sibling
-# hooks.
+# stamp. Correctness depends entirely on that origin's CONTENT never moving
+# once set: resume/compact re-fire SessionStart with the SAME session id, and
+# rewriting the marker's content on those re-fires would make an old session
+# look freshly started. The marker's mtime is a different axis: issue #86
+# deliberately refreshes it (content untouched) on a same-sid re-fire, so a
+# dormant-but-live session's marker survives another session's 7-day sweep
+# instead of being reaped as an orphan and recreated later with a moved-
+# forward origin. That refresh is covered in
+# tests/test_session_start_sidecar_refresh.sh; here we only assert the
+# CONTENT axis. run_ss reads stdin from /dev/null (compact detection
+# determinism), so it can't carry a payload; this hook's session_id comes
+# from stdin JSON only, so fire it directly the way test_ctx_check_health.sh
+# does for its sibling hooks.
 fire_ss_sid() {  # <project_dir> <session_id>
   ( cd "$1" && env CLAUDE_PROJECT_DIR="$1" bash "$SS" <<<"{\"session_id\":\"$2\"}" >/dev/null 2>/dev/null )
 }
@@ -202,16 +208,11 @@ marker="$proj/.claude/handoff_backups/.session_started_${sid}"
 fire_ss_sid "$proj" "$sid"
 check "origin marker: created on first fire" yes "$([[ -f "$marker" ]] && echo yes || echo no)"
 check "origin marker: content is a plain epoch" yes "$([[ "$(cat "$marker" 2>/dev/null)" =~ ^[0-9]+$ ]] && echo yes || echo no)"
-# Overwrite with a distinctive sentinel + an old, distinguishable mtime so a
-# second fire that (wrongly) recreated the file would be caught on EITHER axis
-# — no sleep needed, no timing race.
+# Overwrite with a distinctive sentinel so a second fire that (wrongly)
+# rewrote the file's content would be caught.
 printf '111222333\n' > "$marker"
-touch -t 202001010000 "$marker"
-mtime1="$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null)"
 fire_ss_sid "$proj" "$sid"
 check "origin marker: content unchanged on 2nd fire (same id)" "111222333" "$(cat "$marker" 2>/dev/null)"
-check "origin marker: mtime unchanged on 2nd fire (same id)" "$mtime1" \
-  "$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null)"
 # A DIFFERENT session id still gets its own marker, independent of the first.
 # Reset the first marker's mtime off its year-2020 stamp before this fire —
 # a REAL 7+-day-old marker is exactly what the orphaned-marker sweep (issue
