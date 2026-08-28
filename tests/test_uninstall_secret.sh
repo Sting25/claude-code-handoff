@@ -77,9 +77,39 @@ must chmod 600 "$HOME_DIR/handoff_secret"
 do_uninstall_keep_secret
 check "keep-secret -> file survives"       yes "$([ -e "$HOME_DIR/handoff_secret" ] && echo yes || echo no)"
 check "keep-secret -> content unchanged"   "$OURS" "$(cat "$HOME_DIR/handoff_secret")"
+# Mode 0600 is the shape handoff_ensure_secret writes it in (owner-only,
+# it's key material); --keep-secret must leave it exactly as found, not just
+# its content (issue #82 test gap: earlier assertions here only covered
+# content, never mode).
+check "keep-secret -> mode 0600 preserved" 600 "$(file_mode "$HOME_DIR/handoff_secret")"
 check "keep-secret -> reports skip"        yes "$(has "$OUT" "preserving the per-machine HMAC secret")"
 check "keep-secret -> never printed"       no  "$(has "$OUT" "$OURS")"
 check "keep-secret -> rest of uninstall ran" yes "$(has "$OUT" "uninstalling handoff skill")"
+cleanup
+
+# --- --keep-secret: message names the DEFAULT path, and does not claim to ---
+# --- have preserved a secret that was never generated (issue #82) -----------
+setup_home
+rm -f "$HOME_DIR/handoff_secret"
+do_uninstall_keep_secret
+check "keep-secret, no secret -> stays absent" no  "$([ -e "$HOME_DIR/handoff_secret" ] && echo yes || echo no)"
+check "keep-secret, no secret -> names the default path" yes "$(has "$OUT" "$HOME_DIR/handoff_secret")"
+check "keep-secret, no secret -> does not claim preservation" no "$(has "$OUT" "preserving the per-machine HMAC secret")"
+check "keep-secret, no secret -> says nothing to keep" yes "$(has "$OUT" "nothing to keep")"
+cleanup
+
+# --- --keep-secret + HANDOFF_SECRET_FILE override: message names the --------
+# --- EFFECTIVE (overridden) path, never the default it doesn't apply to -----
+setup_home
+custom="$(mktemp -d)/team_secret"
+must printf '%s\n' "$OURS" > "$custom"
+OUT="$(env CLAUDE_HOME="$HOME_DIR" HANDOFF_SECRET_FILE="$custom" bash "$SRC_DIR/install.sh" --uninstall --keep-secret 2>&1)"
+check "keep-secret+override -> custom path survives" yes "$([ -f "$custom" ] && echo yes || echo no)"
+check "keep-secret+override -> content unchanged"    "$OURS" "$(cat "$custom")"
+check "keep-secret+override -> names the custom path" yes "$(has "$OUT" "$custom")"
+check "keep-secret+override -> never names the default path" no "$(has "$OUT" "$HOME_DIR/handoff_secret")"
+check "keep-secret+override -> reports skip"          yes "$(has "$OUT" "preserving the per-machine HMAC secret")"
+rm -rf "$(dirname "$custom")"
 cleanup
 
 # --- --keep-secret skips before the shape check: even a foreign file at -----
