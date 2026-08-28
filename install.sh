@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: d774cfc352ea489bcf71e8d742a1c88b28eb5c814d31de0ef9edc104760e92ea
+# SOURCE-SHA256: caf415ba37af890709a6681196d37519a88b458232ed7acc6ee15fd6be121af9
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -57,6 +57,11 @@ Usage:
   ./install.sh --uninstall  # remove symlinks + strip patched entries
   ./install.sh --uninstall --keep-secret  # same, but keep the per-machine HMAC secret
   ./install.sh --help
+
+--keep-secret only changes what --uninstall does. It is still accepted
+without --uninstall (plain install, --doctor) so a script that always
+passes it doesn't have to branch on mode, but it has no effect there and
+prints a one-line warning saying so.
 USAGE
 }
 
@@ -190,6 +195,16 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# --keep-secret only does anything in remove_secret_if_ours(), which only
+# runs in uninstall mode (see the flag's own comment above). Accepted in
+# every mode regardless (a script that always passes it shouldn't have to
+# branch on which mode it's calling), but silently ignoring it in the other
+# two modes would let a user believe a plain install or --doctor run had
+# preserved something it never touched (issue #82): warn instead.
+if (( keep_secret )) && [[ "$mode" != uninstall ]]; then
+  echo "warning: --keep-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
+fi
 
 # Env fallback for the model pin; an explicit --model flag wins.
 if [[ -z "$model_pin" && -n "${HANDOFF_MODEL:-}" ]]; then
