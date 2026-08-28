@@ -207,11 +207,11 @@ check "origin marker: content is a plain epoch" yes "$([[ "$(cat "$marker" 2>/de
 # — no sleep needed, no timing race.
 printf '111222333\n' > "$marker"
 touch -t 202001010000 "$marker"
-mtime1="$(stat -f %m "$marker" 2>/dev/null || stat -c %Y "$marker" 2>/dev/null)"
+mtime1="$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null)"
 fire_ss_sid "$proj" "$sid"
 check "origin marker: content unchanged on 2nd fire (same id)" "111222333" "$(cat "$marker" 2>/dev/null)"
 check "origin marker: mtime unchanged on 2nd fire (same id)" "$mtime1" \
-  "$(stat -f %m "$marker" 2>/dev/null || stat -c %Y "$marker" 2>/dev/null)"
+  "$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null)"
 # A DIFFERENT session id still gets its own marker, independent of the first.
 # Reset the first marker's mtime off its year-2020 stamp before this fire —
 # a REAL 7+-day-old marker is exactly what the orphaned-marker sweep (issue
