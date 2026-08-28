@@ -194,6 +194,76 @@ out="$(fire_b "$repo" NEWSESSION)"
 check "F3: statusline race for current session -> silent" no "$(has "$out" "does not appear to have run")"
 rm -rf "$repo"
 
+# --- REGRESSION (issue #81): embedded-newline filename must not let the read
+#     loop split one directory entry into two "lines", with the first
+#     fragment phantom-matching a different, real file's exact path and
+#     getting mistaken for it. Before the fix, `ls -t` (mtime-newest first)
+#     listed a crafted, newest-mtime file named ".ctx_sl_DEADPREV<NEWLINE>ZZZ"
+#     first; printed with its embedded newline, that single entry split
+#     across two lines of the read loop, and the FIRST line,
+#     "<bd>/.ctx_sl_DEADPREV", exactly matched a real, older, evidence-less
+#     session's own statusline-cache sidecar (not itself Stop-hook evidence).
+#     The loop broke on that phantom match before ever reaching the true
+#     newest-by-mtime real candidate: OKPREV, a healthy session with full
+#     Stop-hook evidence. Result: a false "Stop hook did not run" warning
+#     about a healthy project. NUL-delimited (`-print0` / `read -rd ''`),
+#     plus a full-string sid charset check on the recovered candidate
+#     (rather than the sid-recovery helper's own first-character-only
+#     glob), close both halves of the hole: the crafted name is read as one
+#     opaque field, and its own embedded-newline "sid" is rejected outright
+#     rather than silently accepted.
+repo="$(mktemp -d)"; cleanup_on_exit "$repo"
+bd="$repo/.claude/handoff_backups"; must mkdir -p "$bd"
+must printf '# handoff\n\nCurated. MARKER\n' > "$repo/.claude/handoff_current.md"
+# Real, older, evidence-less session: the phantom-match target. A statusline
+# cache sidecar, not one of the four Stop-hook evidence files, so DEADPREV
+# genuinely has no Stop-hook evidence of its own.
+: > "$bd/.ctx_sl_DEADPREV"
+sleep 1
+# Real, newer, healthy session: the TRUE most-recent-by-mtime candidate.
+must printf '4000' > "$bd/.ctx_OKPREV"
+must printf '600'  > "$bd/.ctx_tokens_OKPREV"
+must printf 'model' > "$bd/.ctx_model_OKPREV"
+sleep 1
+# Crafted, newest-mtime file with an embedded newline in its own name.
+must printf '' > "$bd/.ctx_sl_DEADPREV
+ZZZ"
+out="$(fire_b "$repo" NEWSESSION)"; rc=$?
+check "defect: crafted newline namesake does not mask healthy previous session" \
+  no "$(has "$out" "does not appear to have run")"
+check "defect: exit 0 (not a crash-to-silence)"      0   "$rc"
+check "defect: handoff still emitted (not swallowed)" yes "$(has "$out" "MARKER")"
+rm -rf "$repo"
+
+# --- REGRESSION: a non-matching-sid candidate must not abort the hook -----
+#     handoff_ss_sid_of's full-string charset check above is written as
+#     `[[ ... ]] && printf ...`; under this script's `set -euo pipefail`,
+#     a NON-matching "$s" makes that `[[ ]]` the function's last command, its
+#     failure becomes the function's own exit status, and the caller
+#     (`cand_sid="$(handoff_ss_sid_of ...)"`) is a bare assignment that is
+#     NOT exempt from errexit — so a single ordinary stray file in
+#     handoff_backups/ that merely MATCHES detector B's find glob (mktemp
+#     litter like ".ctx_sl_OK.a1b2c3", an editor swap file, a ".bak") would
+#     silently abort the whole hook before the handoff is ever cat'd. The
+#     fix rewrites the check as if/fi, which always returns 0. This is
+#     deliberately the SAME scenario as the "crafted newline namesake" test
+#     above but WITHOUT any newline: it isolates the crash bug from the
+#     newline-splitting bug, so a regression in either one is caught on its
+#     own.
+repo="$(mktemp -d)"; cleanup_on_exit "$repo"
+bd="$repo/.claude/handoff_backups"; must mkdir -p "$bd"
+must printf '# handoff\n\nCurated. MARKER\n' > "$repo/.claude/handoff_current.md"
+must printf '4000' > "$bd/.ctx_OKPREV"
+must printf '600'  > "$bd/.ctx_tokens_OKPREV"
+must printf 'model' > "$bd/.ctx_model_OKPREV"
+sleep 1
+: > "$bd/.ctx_sl_OK.a1b2c3"   # mktemp-style litter: matches the find glob, fails the sid charset
+out="$(fire_b "$repo" NEWSESSION)"; rc=$?
+check "stray non-matching-sid file: exit 0 (not aborted)"  0   "$rc"
+check "stray non-matching-sid file: handoff still emitted" yes "$(has "$out" "MARKER")"
+check "stray non-matching-sid file: no false warning"      no  "$(has "$out" "does not appear to have run")"
+rm -rf "$repo"
+
 # First session: no handoff_current.md at all -> silent (nothing expected).
 repo="$(mktemp -d)"; cleanup_on_exit "$repo"
 must mkdir -p "$repo/.claude"

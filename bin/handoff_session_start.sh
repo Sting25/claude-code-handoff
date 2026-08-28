@@ -554,9 +554,28 @@ if [ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]; then
         .fences_*)             s="${b#.fences_}" ;;
         .ctx_*)                 s="${b#.ctx_}" ;;   # bare byte ledger, tried last
       esac
-      case "$s" in
-        [A-Za-z0-9_-]*) printf '%s\n' "$s" ;;
-      esac
+      # Full-string charset proof, matching the orphan sweep's own sid guard
+      # above. A `case ... in [A-Za-z0-9_-]*)` glob only anchors the FIRST
+      # character (the rest is consumed by the trailing `*`, which also
+      # matches an embedded newline), so a crafted basename recovered from
+      # the NUL-delimited scan below could still smuggle a newline through
+      # as part of "s" and be accepted as a session id. The bash regex form
+      # anchors both ends, rejecting any such candidate outright.
+      #
+      # Written as if/fi, not `[[ ... ]] && printf`: this script runs under
+      # `set -euo pipefail`, and the caller assigns the result directly
+      # (`cand_sid="$(handoff_ss_sid_of ...)"`), a plain simple command that
+      # is NOT exempt from errexit. A non-matching "$s" (any routine stray
+      # file in handoff_backups/, e.g. mktemp litter or an editor swap file
+      # that happens to match the find glob below) would make `[[ ]] &&`
+      # itself the function's last command, its failure would become the
+      # function's own exit status, and that would abort the whole hook
+      # before the handoff is ever cat'd. if/fi always exits 0 regardless of
+      # which branch is taken, keeping this a pure "match or stay silent"
+      # filter with no side effect on control flow.
+      if [[ "$s" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        printf '%s\n' "$s"
+      fi
     }
     ss_sid="$(printf '%s' "$payload" \
       | LC_ALL=C sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
@@ -565,20 +584,37 @@ if [ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]; then
       [A-Za-z0-9_-]*) : ;;
       *) ss_sid="unknown" ;;
     esac
-    # LC_ALL=C: same mtime-tie collation reasoning as the prune loop in
-    # handoff_turn_append.sh. shellcheck: ls over find here is deliberate,
-    # matching that same precedent (BSD find has no -printf for mtime sort).
-    # shellcheck disable=SC2012
+    # NUL-delimited: a crafted filename carrying an embedded newline (e.g.
+    # ".ctx_AAA\nX") would otherwise split across two lines of a
+    # newline-delimited read, letting the second "line" masquerade as a
+    # DIFFERENT, unrelated candidate. `-print0` / `read -rd ''` treats the
+    # whole crafted name as one opaque field, same idiom as the orphan sweep
+    # above and the janitor in handoff_statusline.sh.
+    #
+    # `find` gives no ordering guarantee, unlike the `ls -t` this replaces, so
+    # mtime order is recovered here instead: a single running-max scan over
+    # each candidate's own mtime (portable GNU/BSD `stat`, same idiom as
+    # handoff_turn_append.sh's lock staleness check), rather than sorting the
+    # listing and taking the first line. This is read-only (detector B never
+    # deletes), so a stat failure just drops that candidate from contention
+    # (mtime -1, i.e. never wins) instead of being treated as fatal.
     prev_sid=""
-    while IFS= read -r cand; do
+    prev_mtime=-1
+    while IFS= read -rd '' cand; do
       [ -n "$cand" ] || continue
       [ -f "$cand" ] || continue
       cand_sid="$(handoff_ss_sid_of "$(basename "$cand")")"
       [ -n "$cand_sid" ] || continue
       [ "$cand_sid" = "$ss_sid" ] && continue   # skip the CURRENT session
-      prev_sid="$cand_sid"
-      break
-    done < <(LC_ALL=C ls -t "$hb"/.ctx_* "$hb"/.fences_* "$hb"/handoff_raw_*.md 2>/dev/null || true)
+      cand_mtime="$(stat -c %Y "$cand" 2>/dev/null || stat -f %m "$cand" 2>/dev/null || echo -1)"
+      [[ "$cand_mtime" =~ ^-?[0-9]+$ ]] || cand_mtime=-1
+      if [ "$cand_mtime" -gt "$prev_mtime" ]; then
+        prev_mtime="$cand_mtime"
+        prev_sid="$cand_sid"
+      fi
+    done < <(find "$hb" -maxdepth 1 \
+      \( -name '.ctx_*' -o -name '.fences_*' -o -name 'handoff_raw_*.md' \) \
+      -print0 2>/dev/null || true)
     if [ -n "$prev_sid" ] \
        && [ ! -f "$hb/.ctx_tokens_${prev_sid}" ] \
        && [ ! -f "$hb/.ctx_model_${prev_sid}" ] \
