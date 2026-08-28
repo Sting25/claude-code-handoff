@@ -244,6 +244,11 @@ uninstall_symlinks() {
 # The content is shape-checked, never printed (it is secret material).
 remove_secret_if_ours() {
   local secret="$claude_home/handoff_secret" body
+  # The path this run actually reads/writes: HANDOFF_SECRET_FILE if set,
+  # otherwise the default. The --keep-secret messages below name THIS path,
+  # not the bare default, so a HANDOFF_SECRET_FILE override is reported
+  # accurately instead of pointing at a file that was never in play (#82).
+  local effective="${HANDOFF_SECRET_FILE:-$secret}"
   # --keep-secret (issue #65): skip the deletion entirely and say so. The
   # secret is per-machine identity, not per-install-mode state, so a user
   # switching from bare-scripts to the plugin (the README's own migration
@@ -253,10 +258,23 @@ remove_secret_if_ours() {
   # keeping the file needs none of the shape/ownership proof that deleting
   # it does.
   if (( keep_secret )); then
-    echo "  skip    $secret (--keep-secret; preserving the per-machine HMAC secret)"
-    echo "          Existing signed handoffs keep verifying. Both install modes read"
-    echo "          this same default path, so it needs no copying: it's already"
-    echo "          where the plugin install will find it."
+    # Nothing to keep: don't claim to have preserved a secret that was
+    # never generated (#82): a fresh machine or a --keep-secret run before
+    # any signed write would otherwise print a misleading "preserving" line
+    # for a file that doesn't exist.
+    if [[ ! -e "$effective" ]]; then
+      echo "  ok      $effective (--keep-secret; no secret file there; nothing to keep)"
+      return 0
+    fi
+    echo "  skip    $effective (--keep-secret; preserving the per-machine HMAC secret)"
+    if [[ -n "${HANDOFF_SECRET_FILE:-}" ]]; then
+      echo "          Existing signed handoffs keep verifying. HANDOFF_SECRET_FILE points"
+      echo "          here, so both install modes will keep reading it from this path."
+    else
+      echo "          Existing signed handoffs keep verifying. Both install modes read"
+      echo "          this same default path, so it needs no copying: it's already"
+      echo "          where the plugin install will find it."
+    fi
     return 0
   fi
   if [[ -n "${HANDOFF_SECRET_FILE:-}" ]]; then
