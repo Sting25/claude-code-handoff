@@ -621,25 +621,70 @@ fi
 # Safe-direction trade-off: a dump of ours whose cursor was manually removed is
 # no longer pruned (it lingers) rather than risking someone else's file. (#46)
 list_our_dumps() {
-  local f base id
-  # LC_ALL=C: `ls -t` breaks MTIME TIES by collated name, and ties are not
-  # exotic here — `cp -p`, `rsync -t`, and a tar restore all reproduce
-  # timestamps exactly. Under a UTF-8 locale the tie-break flips against byte
-  # collation, so which dump falls outside the keep-3 cut (and is deleted)
-  # depends on the user's locale. Pinned for the same reason the rotation
-  # sorts in write_handoff.sh and handoff_session_start.sh are.
-  # shellcheck disable=SC2012  # ls -t is deliberate: prune needs mtime ordering and BSD find has no -printf
-  LC_ALL=C ls -t "$backup_dir"/handoff_raw_*.md 2>/dev/null | while IFS= read -r f; do
+  local f base id mtime
+  local -a dumps=() mtimes=()
+  # NUL-delimited: a crafted dump filename carrying an embedded newline
+  # (e.g. "handoff_raw_AAA\nX.md") would otherwise split across two lines of
+  # a newline-delimited read, letting the second "line" masquerade as a
+  # DIFFERENT, unrelated dump path and get deleted by proxy along with its
+  # 12 companion sidecars below. `-print0` / `read -rd ''` treats the whole
+  # crafted name as one opaque field, same idiom as the orphan sweep in
+  # handoff_session_start.sh (issue #76) and the janitor in
+  # handoff_statusline.sh (issue #81). `find` gives no ordering guarantee,
+  # unlike the `ls -t` this replaces, so newest-first order is recovered
+  # explicitly below instead of relying on the listing order.
+  while IFS= read -rd '' f; do
     [[ -n "$f" ]] || continue
     base="$(basename "$f" .md)"       # handoff_raw_<id>
     id="${base#handoff_raw_}"
     [[ "$id" =~ ^[A-Za-z0-9_-]+$ ]] || continue
     [[ -f "$backup_dir/.handoff_raw_${id}.cursor" ]] || continue
-    printf '%s\n' "$f"
+    # Portable mtime epoch: GNU `stat -c` first, BSD `stat -f` fallback.
+    # GNU-first, never the reverse: GNU `stat -f` (filesystem mode, not
+    # per-file) still prints multi-line filesystem stats to stdout before
+    # failing on an unknown format, so a BSD-first fallback chain silently
+    # captures garbage on Linux instead of erroring (issue #92).
+    mtime="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo -1)"
+    [[ "$mtime" =~ ^-?[0-9]+$ ]] || mtime=-1
+    dumps+=("$f")
+    mtimes+=("$mtime")
+  done < <(find "$backup_dir" -maxdepth 1 -name 'handoff_raw_*.md' -print0 2>/dev/null || true)
+
+  # Insertion sort by mtime, newest first, ties broken by leaving relative
+  # `find` order alone (a stable sort) rather than by name collation: this
+  # keeps the same LC_ALL=C tie-break reasoning the old `ls -t` relied on
+  # from mattering for correctness, since dump counts here are small (this
+  # only prunes beyond the newest 3) and a stable order is deterministic
+  # enough for a keep-3 cut either way.
+  local n=${#dumps[@]} i j key_mtime key_dump
+  for ((i = 1; i < n; i++)); do
+    key_mtime="${mtimes[i]}"
+    key_dump="${dumps[i]}"
+    j=$((i - 1))
+    while ((j >= 0)) && ((mtimes[j] < key_mtime)); do
+      mtimes[j + 1]="${mtimes[j]}"
+      dumps[j + 1]="${dumps[j]}"
+      j=$((j - 1))
+    done
+    mtimes[j + 1]="$key_mtime"
+    dumps[j + 1]="$key_dump"
+  done
+
+  local k
+  for ((k = 0; k < n; k++)); do
+    printf '%s\0' "${dumps[k]}"
   done
 }
-while IFS= read -r old; do
+# Keep the 3 newest dumps (list_our_dumps is newest-first), prune the rest.
+# A plain index counter replaces the old `tail -n +4`: `tail -z` is a GNU
+# extension BSD/macOS tail lacks, so it cannot consume a NUL-delimited
+# stream portably, and NUL is required end to end for the same
+# embedded-newline safety the producer above establishes.
+keep_rank=0
+while IFS= read -rd '' old; do
   [[ -z "$old" ]] && continue
+  keep_rank=$((keep_rank + 1))
+  ((keep_rank <= 3)) && continue
   rm -f  -- "$old"
   base="$(basename "$old" .md)"      # handoff_raw_<id>
   id="${base#handoff_raw_}"
@@ -659,6 +704,6 @@ while IFS= read -r old; do
   rm -f  -- "$backup_dir/.ctx_health_${id}"    # Stop-hook health once-per-session warning marker (issue #71)
   rm -f  -- "$backup_dir/.ss_health_${id}"     # handoff_session_start.sh's retrospective Stop-hook health marker (issue #71)
   rm -f  -- "$backup_dir/.session_started_${id}"  # overwrite-guard origin marker (issue #63)
-done < <(list_our_dumps | tail -n +4)
+done < <(list_our_dumps)
 
 exit 0

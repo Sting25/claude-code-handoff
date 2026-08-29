@@ -154,6 +154,74 @@ check "prune: evicted .ctx_nojq_ removed"        no  "$([[ -f "$bd/.ctx_nojq_OLD
 check "prune: surviving .ctx_nojq_ kept"         yes "$([[ -f "$bd/.ctx_nojq_OLD3" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
+# --- REGRESSION (issue #89): embedded-newline dump filename must not redirect
+#     the prune loop's deletion to an unintended session's sidecars.
+#
+#     list_our_dumps() used to consume `LC_ALL=C ls -t ... | while IFS= read
+#     -r f`. A single directory entry whose NAME carries a real embedded
+#     newline byte prints as two lines of that stream, and each half is
+#     re-validated on its own: the first half regains a clean "<dir>/
+#     handoff_raw_<id>.md" shape by itself, and the second half (whatever
+#     text follows the embedded newline, no directory prefix) is validated
+#     purely as a STRING: if it happens to read as "handoff_raw_<some real
+#     id>.md" and that id has a real cursor file, it is accepted as an extra,
+#     phantom prune candidate for that id, even though the crafted file
+#     itself has nothing to do with that id, and even though the real id's
+#     own dump is nowhere near its retention cutoff.
+#
+#     VICTIM here is deliberately the 2nd-newest dump, comfortably inside the
+#     keep-3 window on its own merits. The crafted file
+#     "handoff_raw_ATTACKER.md\nhandoff_raw_VICTIM.md" (one filename, one
+#     embedded newline) is the OLDEST dump present, so under the old code
+#     both halves of its split land in the "tail -n +4" prune tail regardless
+#     of this defect (same as D2, a legitimate 4th-newest eviction once the
+#     live fire below adds a 5th, newer real dump). The defect is what gets
+#     destroyed alongside that expected D2 eviction: VICTIM's own cursor and
+#     sidecar, via a phantom "handoff_raw_VICTIM.md" line that is bare text,
+#     not a real path: `rm -f` on the dump itself silently no-ops (wrong
+#     cwd), but the 12 companion-sidecar `rm -f`s that follow are always
+#     built from `$backup_dir` plus the id string alone, so they hit
+#     VICTIM's REAL sidecars regardless. Confirmed against the pre-fix code
+#     (`git show fea99546aa24ce39f2ffe19f9535454120f52cfb:bin/handoff_turn_append.sh`):
+#     VICTIM's dump survives that no-op rm, but its cursor and every sidecar
+#     are wiped. `find -print0` / `read -rd ''` reads the crafted name as one
+#     opaque field instead, so its own id-charset check (which requires the
+#     WHOLE string, embedded newline included, to match `^[A-Za-z0-9_-]+$`)
+#     rejects it outright: it never contributes any entry, phantom or real.
+repo="$(mk_repo)"; bd="$repo/.claude/handoff_backups"; mkdir -p "$bd"; tx="$repo/tx.jsonl"
+printf '{"type":"user","message":{"content":"hi"}}\n' > "$tx"
+
+must eval "echo d > '$bd/handoff_raw_VICTIM.md'; echo 0 > '$bd/.handoff_raw_VICTIM.cursor'; echo t > '$bd/.ctx_tokens_VICTIM'"
+must touch -t 202506010000 "$bd/handoff_raw_VICTIM.md" "$bd/.handoff_raw_VICTIM.cursor" "$bd/.ctx_tokens_VICTIM"
+
+must eval "echo d > '$bd/handoff_raw_D1.md'; echo 0 > '$bd/.handoff_raw_D1.cursor'"
+must touch -t 202505010000 "$bd/handoff_raw_D1.md" "$bd/.handoff_raw_D1.cursor"
+
+must eval "echo d > '$bd/handoff_raw_D2.md'; echo 0 > '$bd/.handoff_raw_D2.cursor'"
+must touch -t 202504010000 "$bd/handoff_raw_D2.md" "$bd/.handoff_raw_D2.cursor"
+
+# The crafted file. No cursor of its own: its own id ("ATTACKER") never
+# needs to pass ownership, only the phantom second-line reuse of VICTIM's id
+# matters here.
+craft="$bd/handoff_raw_ATTACKER.md
+handoff_raw_VICTIM.md"
+must printf '' > "$craft"
+must touch -t 202001010000 "$craft"
+
+run_turn "$repo" NEWCRAFT "$tx"; rc=$?
+check "newline-in-dump-name: hook still exits 0"              0   "$rc"
+check "newline-in-dump-name: VICTIM dump survives"             yes "$([[ -f "$bd/handoff_raw_VICTIM.md" ]] && echo yes || echo no)"
+check "newline-in-dump-name: VICTIM cursor survives (pre-fix: deleted)" \
+  yes "$([[ -f "$bd/.handoff_raw_VICTIM.cursor" ]] && echo yes || echo no)"
+check "newline-in-dump-name: VICTIM sidecar survives (pre-fix: deleted)" \
+  yes "$([[ -f "$bd/.ctx_tokens_VICTIM" ]] && echo yes || echo no)"
+# Normal retention is unaffected by the fix: D2 (legitimately 4th-newest once
+# the live NEWCRAFT fire adds a 5th, newer real dump) is still correctly
+# pruned, same as it would be with no crafted file present at all.
+check "newline-in-dump-name: normal retention unaffected (D2 still pruned)" \
+  no "$([[ -f "$bd/handoff_raw_D2.md" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
 # --- .gitignore bootstrap lock (shared with write_handoff.sh) ----------------
 # The check-ignore-then-append bootstrap is serialized against write_handoff.sh
 # via the shared mkdir lock at .claude/.handoff_gitignore.lock. A held (fresh)
