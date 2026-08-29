@@ -787,10 +787,26 @@ if [ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]; then
     ss_sid="$(printf '%s' "$payload" \
       | LC_ALL=C sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
       | head -n 1 || true)"
-    case "$ss_sid" in
-      [A-Za-z0-9_-]*) : ;;
-      *) ss_sid="unknown" ;;
-    esac
+    # Full-string charset proof, same reasoning and idiom as
+    # handoff_ss_sid_of() above: a `case ... in [A-Za-z0-9_-]*)` glob only
+    # anchors the FIRST character (the trailing `*` matches anything after,
+    # including an embedded newline), so a hostile session_id in the
+    # SessionStart payload with junk (or a newline) past position one would
+    # still pass unmodified. The bash regex form anchors both ends.
+    #
+    # if/fi, not a `[[ ... ]] && cmd` tail: this script runs under
+    # `set -euo pipefail`. A non-matching "$ss_sid" would make a bare
+    # `[[ ... ]] && :` itself fail, and since this sits at the top level of
+    # the script (not inside a function whose result feeds a command
+    # substitution), that failure would abort the whole hook before the
+    # handoff is ever emitted. if/fi always returns 0 regardless of which
+    # branch is taken, so the non-matching path safely falls through to
+    # "unknown" instead.
+    if [[ "$ss_sid" =~ ^[A-Za-z0-9_-]+$ ]]; then
+      : # already a bare session-id charset, keep it as-is
+    else
+      ss_sid="unknown"
+    fi
     # NUL-delimited: a crafted filename carrying an embedded newline (e.g.
     # ".ctx_AAA\nX") would otherwise split across two lines of a
     # newline-delimited read, letting the second "line" masquerade as a

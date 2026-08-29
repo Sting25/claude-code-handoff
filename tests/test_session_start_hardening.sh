@@ -122,4 +122,118 @@ check "spoof: closing tags neutralized too"         no  "$(has "$out" "</tool_re
 check "spoof: legit prose survives"                 yes "$(has "$out" "Curated notes (real2).")"
 rm -rf "$proj"
 
+echo "handoff_session_start.sh: ss_sid guard, full anchoring (issue #89)"
+
+# The ss_sid guard's only observable consumer (Stop-hook health detector B's
+# own-session exclusion, `[ "$cand_sid" = "$ss_sid" ] && continue`) always
+# compares against a candidate id that has ALREADY passed
+# handoff_ss_sid_of()'s own full-anchor regex (fixed by #90/#81), so a
+# hostile ss_sid can never accidentally STRING-EQUAL a real candidate through
+# that comparison alone: there is no end-to-end scenario where the old and
+# the fixed guard observably diverge today. This tests the guard itself in
+# isolation instead: does it actually reject (normalize to "unknown") a
+# string that is not a full charset match, the exact defect the issue
+# describes ("a `case ... in [A-Za-z0-9_-]*)` glob only anchors the FIRST
+# character"). The pre-fix snippet below is transcribed verbatim from the
+# case block this fix replaced (bin/handoff_session_start.sh, origin/main
+# before issue #89: `case "$ss_sid" in [A-Za-z0-9_-]*) : ;; *)
+# ss_sid="unknown" ;; esac`); the post-fix snippet is read live from the
+# current script by anchor (not a fixed line range, which drifts as the file
+# grows) so this test tracks the real guard rather than a second
+# transcription that could go stale.
+# shellcheck disable=SC2016  # single-quoted on purpose: this is bash source text for run_guard to eval later, not an expression to expand now
+guard_pre_fix='
+case "$ss_sid" in
+  [A-Za-z0-9_-]*) : ;;
+  *) ss_sid="unknown" ;;
+esac
+'
+# shellcheck disable=SC2016  # the $ in the sed pattern is literal (matching the script's own "$ss_sid" text), not a shell expansion
+guard_post_fix="$(sed -n '/"\$ss_sid" =~ \^\[A-Za-z0-9_-\]/,/^    fi$/p' "$SS")"
+if [[ -z "$guard_post_fix" ]]; then
+  printf '  FAIL  could not locate the live ss_sid guard block in %s (anchor drifted?)\n' "$SS"
+  _fail=$((_fail + 1))
+fi
+
+# run_guard <snippet> <hostile-value> -> sets _guard_out, _guard_rc.
+# `set -euo pipefail` matches the real hook's own shebang contract. This is
+# exactly the errexit hazard the issue calls out ("a failed command
+# substitution in an assignment aborts the hook"); a snippet that regresses
+# to a bare `[[ ... ]] && cmd` tail would make this helper's own `bash "$tmp"`
+# exit non-zero on a non-matching value instead of normalizing quietly.
+run_guard() {
+  local snippet="$1" hostile="$2" tmp
+  tmp="$(mktemp)"
+  {
+    printf 'set -euo pipefail\n'
+    # shellcheck disable=SC2016  # writing literal bash source for the tmp script, not expanding here
+    printf 'ss_sid="$1"\n'
+    printf '%s\n' "$snippet"
+    # shellcheck disable=SC2016  # same: literal source text for the tmp script
+    printf 'printf %%s "$ss_sid"\n'
+  } > "$tmp"
+  _guard_out="$(bash "$tmp" "$hostile" 2>/dev/null)"
+  _guard_rc=$?
+  rm -f "$tmp"
+}
+
+# Junk after the first char, no newline: "A" is a valid first character, the
+# "!!!evil" tail is not in [A-Za-z0-9_-], but the old glob's trailing `*`
+# accepted it anyway.
+hostile1='AAAA!!!evil'
+run_guard "$guard_pre_fix" "$hostile1"
+check "pre-fix defect: junk-after-first-char kept verbatim" "$hostile1" "$_guard_out"
+check "pre-fix defect: guard still exits 0"                 0         "$_guard_rc"
+run_guard "$guard_post_fix" "$hostile1"
+check "fixed: junk-after-first-char rejected to unknown"    "unknown" "$_guard_out"
+check "fixed: guard exits 0 (errexit-safe)"                 0         "$_guard_rc"
+
+# Embedded newline: the character the issue names explicitly.
+hostile2=$'AAAA\nevil'
+run_guard "$guard_pre_fix" "$hostile2"
+check "pre-fix defect: embedded-newline kept verbatim" "$hostile2" "$_guard_out"
+check "pre-fix defect: guard still exits 0"             0         "$_guard_rc"
+run_guard "$guard_post_fix" "$hostile2"
+check "fixed: embedded-newline rejected to unknown"     "unknown" "$_guard_out"
+check "fixed: guard exits 0 (errexit-safe)"              0         "$_guard_rc"
+
+# A clean id must still pass through unchanged in both versions: the fix
+# must not start rejecting legitimate session ids.
+clean="Real_Session-123"
+run_guard "$guard_pre_fix" "$clean"
+check "pre-fix: clean id passes unchanged"  "$clean" "$_guard_out"
+run_guard "$guard_post_fix" "$clean"
+check "fixed: clean id still passes unchanged" "$clean" "$_guard_out"
+
+echo "handoff_session_start.sh: ss_sid guard, hostile session_id end-to-end (issue #89)"
+
+run_ss_payload() {  # <project_dir> <raw-json-payload>
+  ( cd "$1" && env CLAUDE_PROJECT_DIR="$1" bash "$SS" <<<"$2" 2>/dev/null )
+}
+
+proj="$(mk_project)"
+cat > "$proj/.claude/handoff_current.md" <<EOF
+# handoff
+## Notes from this session
+Curated notes surviving a hostile session_id, MARKER_SSID_89A.
+EOF
+out="$(run_ss_payload "$proj" '{"session_id":"AAAA!!!evil"}')"; rc=$?
+check "hostile session_id (junk): hook still exits 0"     0   "$rc"
+check "hostile session_id (junk): handoff still emitted"  yes "$(has "$out" "MARKER_SSID_89A")"
+rm -rf "$proj"
+
+proj="$(mk_project)"
+cat > "$proj/.claude/handoff_current.md" <<EOF
+# handoff
+## Notes from this session
+Curated notes surviving a hostile session_id, MARKER_SSID_89B.
+EOF
+# A conformant JSON string value can't carry a raw newline, but a hook
+# receiving one anyway (a non-conformant client, or the same crafted-input
+# spirit as the prune-loop fix) must not be tripped up either.
+out="$(run_ss_payload "$proj" "$(printf '{"session_id":"AAAA\nevil"}')")"; rc=$?
+check "hostile session_id (newline): hook still exits 0"    0   "$rc"
+check "hostile session_id (newline): handoff still emitted" yes "$(has "$out" "MARKER_SSID_89B")"
+rm -rf "$proj"
+
 finish
