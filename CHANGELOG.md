@@ -12,6 +12,34 @@ are appended).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-29
+
+Self-prunes stale cached versions of the plugin itself. No hook-command
+or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Added
+- **`SessionStart` self-prunes stale cached versions of this plugin.**
+  Claude Code's plugin updater never removes an old cached version
+  once a newer one is installed, so the cache under
+  `plugins/cache/<marketplace>/claude-code-handoff/<version>/` grows
+  forever. That is more than wasted disk: `install.d`'s doctor check
+  and the skills' cache-fallback loop each independently pick "the"
+  cached version by newest mtime, so a session can load this plugin's
+  skill from an OLD cached version while its hook scripts resolve a
+  NEWER one, mixing two versions inside one session. Observed on a
+  real machine with 0.14.1, 0.16.0, and 0.17.0 all cached at once, a
+  session loading the 0.14.1 skill while 0.17.0 was the version
+  actually installed. New `bin/handoff_cache_prune.sh`, called
+  best-effort from `handoff_session_start.sh`, resolves its own
+  cache-parent directory from its own path and only ever acts when
+  that path matches the plugin-cache shape exactly (never another
+  plugin's cache, never a bare-scripts install); it keeps the
+  newest-by-mtime version and the version the running script itself
+  lives in, and prunes every other version-shaped sibling. `rm -rf` on
+  an already-gone directory is not an error, so two sessions racing to
+  prune concurrently are safe.
+
 ## [0.17.0] - 2026-08-28
 
 Auto-rebuild for a missing or corrupted `handoff_current.md`, a

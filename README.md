@@ -19,6 +19,7 @@ digest you never read.
 - **Keeps a history of past handoffs** (last 5 by default) that you can pull back into context on demand.
 - **Auto-rebuilds a missing or corrupted handoff on load**: if `handoff_current.md` is missing, empty, unreadable, or fails an integrity check, the next session start composes a best-effort stand-in from your history and per-turn backups instead of loading nothing, clearly labeled `AUTO-REBUILT` and never written to disk or signed.
 - **Guards against a stale resumed session clobbering a fresher one's handoff** — refuses (exit 3) rather than silently rotating a newer session's curated work under an older one's; see [Cross-session overwrite guard](docs/reference.md#cross-session-overwrite-guard).
+- **Self-prunes its own stale cached plugin versions on every session start** (v0.18.0+): Claude Code never removes an old cached version once a newer one installs, and a leftover one can otherwise get loaded instead of the current version. This closes that gap automatically, no user action required.
 - **Works in git and non-git projects**, in both the Claude Code CLI and the desktop app.
 
 ## Installation

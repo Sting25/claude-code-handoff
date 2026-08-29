@@ -799,6 +799,24 @@ directory-source marketplace, `hooks/hooks.json` was read live from
 the repo path while the plugin's identity came from the cache — so
 hook edits can look live while manifest edits look stale.
 
+**End-user side, self-healing since v0.18.0:** the same cache
+directory also accumulates every OLD version once Claude Code
+installs a newer one; nothing in the CLI ever removes a superseded
+version on its own. Left alone this is more than clutter: a session
+can load this plugin's skill from a stale cached version while its
+hook scripts resolve the current one (both install.d's doctor check
+and the skills' cache-fallback loop independently pick "the" cache by
+newest mtime, so which one wins can differ from what the model's
+skill invocation actually read), mixing two versions inside one
+session. `bin/handoff_cache_prune.sh`, called from the `SessionStart`
+hook, prunes every cached sibling version except the newest by mtime
+and the version dir the running script itself lives in, on every
+session start, with no user action required. It only ever acts when
+its own resolved path proves the exact
+`plugins/cache/<marketplace>/claude-code-handoff/<version>/bin` shape
+first; anything else (a bare-scripts install, a relocated checkout, a
+sibling plugin's cache) is a silent no-op.
+
 ## Uninstall details
 
 ```bash
