@@ -43,6 +43,22 @@ Three slash commands plus one automatic safety net, doing different jobs:
   thin, when you reference work from a session further back than
   yesterday, or to give a sibling re-entering the repo continuity
   deeper than the last session alone.
+- **Auto-rebuild (automatic, no command to run):** before any of the
+  above, if the `SessionStart` hook finds `.claude/handoff_current.md`
+  missing, refused (a symlink), zero-length, missing any markdown
+  heading, or carrying a malformed `HANDOFF_HMAC` trailer (a prefix
+  present but not 64 lowercase hex), it composes a best-effort
+  replacement from the newest valid `handoff_history/` snapshot plus
+  the newest raw per-turn dump under `handoff_backups/` (excluding
+  this session's own in-progress dump). The rebuild is emitted into
+  session context only, labeled `AUTO-REBUILT` with each source named,
+  through the same untrusted-defang path any unsigned document takes:
+  it is never written to disk and never signed, so nothing persists
+  for a later session to mistakenly trust. It's followed by the
+  `ACTION: RUN /handoff-recover` banner below for a curated pass. A
+  well-formed but non-verifying HMAC, or unbalanced skeleton markers,
+  does not trigger a rebuild; those documents still load as untrusted
+  reference data with warnings, unchanged from before.
 - **`/handoff-recover` (prompted by an ACTION banner from the SessionStart hook):**
   composes a retroactive curated handoff when the previous session
   ended without `/handoff` — crashed, killed, or just never
@@ -447,8 +463,14 @@ silent-but-safe), the guard fires only when BOTH hold:
   writing session's own id, AND
 - the document's stamped write time is LATER than this session's own
   recorded start (a one-time, per-session-id marker the `SessionStart`
-  hook writes the first time it sees that id — never refreshed on a
-  `resume`/`compact` re-fire of the same session).
+  hook writes the first time it sees that id, with its stamped epoch
+  never rewritten by a `resume`/`compact` re-fire of the same
+  session). A same-session-id re-fire long after the marker was first
+  written does refresh the marker file's mtime, never its content, so
+  an actively resumed session's marker survives
+  `handoff_session_start.sh`'s own orphan sweep instead of being
+  reaped as stale; the recorded origin epoch the guard compares
+  against is exactly as first written either way (#86).
 
 Identity alone isn't the test: every legitimate handoff succession (B
 picks up after A ends) would otherwise trip it. The origin-time
@@ -810,6 +832,17 @@ state, and both modes read it from the same default path, so any
 already-signed `handoff_current.md` (and anything in
 `handoff_history/`) keeps verifying as binding rules across the
 switch instead of silently downgrading to reference data (issue #65).
+
+The skip message names the effective secret path it resolved before
+printing, not always the default: with `HANDOFF_SECRET_FILE` set it
+names that custom path and explains the override, and with no secret
+file present at that location it reports "no secret file there;
+nothing to keep" rather than claiming a preservation that didn't
+happen (issue #82). `--keep-secret` still parses in plain-install and
+`--doctor` modes too, so a wrapper script doesn't need to branch on
+mode, but it only changes behavior under `--uninstall`; used
+elsewhere it prints a one-line warning that it had no effect, and
+`--help` documents that scope.
 
 Everything else in your `settings.json` — your own hooks (including ones
 co-located in the same event), permissions, `statusLine`, `env`, theme —
