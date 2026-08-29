@@ -12,6 +12,99 @@ are appended).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-28
+
+Auto-rebuild for a missing or corrupted `handoff_current.md`, a
+newline-safety sweep closing three more unsafe `find`/`ls` consumer
+loops plus two fully anchored sid guards, `--keep-secret` messaging
+polish, a sidecar mtime refresh that closes the overwrite guard's
+dormant-session gap, and a Linux CI flake fix. No hook-command or
+permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Added
+- **`SessionStart` auto-rebuilds a missing or corrupted
+  `handoff_current.md` from history and backups (#78).** When the
+  loader finds the file missing, refused (a symlink), zero-length,
+  lacking any markdown heading, or carrying a malformed
+  `HANDOFF_HMAC` trailer (prefix present but not 64 lowercase hex),
+  it now composes a best-effort handoff from the newest valid
+  `handoff_history/` snapshot plus the newest raw per-turn dump in
+  `handoff_backups/` (excluding the current session's own in-progress
+  dump) and emits it into session context labeled `AUTO-REBUILT`,
+  with each source named, followed by the existing `ACTION: RUN
+  /handoff-recover` banner for a curated pass. The rebuild is
+  ephemeral by construction: it goes out through the existing
+  untrusted-defang path, is never written to disk, and is never
+  signed, so no artifact exists for a later session to mistakenly
+  trust. A well-formed but non-verifying HMAC, or unbalanced skeleton
+  markers, deliberately does not trigger a rebuild; those documents
+  keep the existing behavior of loading as untrusted data with
+  warnings. A rebuild source whose own HMAC does not verify can never
+  contribute a binding rules block.
+
+### Fixed
+- **Two more newline-unsafe `find`/`ls` consumer loops, plus a
+  first-character-only sid guard (#81).**
+  `bin/handoff_statusline.sh`'s janitor delete loop and
+  `bin/handoff_session_start.sh`'s detector B scan (previously a
+  line-by-line `ls -t`) now use the repo's `find -print0` and `while
+  IFS= read -rd ''` idiom, so a crafted marker-prefixed filename with
+  an embedded newline can no longer redirect deletion onto an
+  unintended file or desync the newest-mtime scan. Riding along:
+  `handoff_ss_sid_of`'s sid-charset guard was a first-character-only
+  `case` glob; it is now a fully anchored regex, written
+  errexit-safe (explicit `if`, function always returns 0), so a
+  routine stray file in `handoff_backups/` (mktemp litter, an editor
+  swap file) can never abort the hook under `set -euo pipefail`.
+- **`--keep-secret` named the wrong path and stayed silent when it
+  did nothing (#82).** The `--uninstall --keep-secret` skip message
+  now resolves the effective secret location before printing: with
+  `HANDOFF_SECRET_FILE` set it names that custom path, never the
+  default, and explains the override; with no secret file present it
+  reports "no secret file there; nothing to keep" instead of
+  claiming a preservation that didn't happen. `--keep-secret` still
+  parses in plain-install and `--doctor` modes, so wrapper scripts
+  don't need to branch on mode, but now prints a one-line warning
+  that it only changes what `--uninstall` does, and `--help`
+  documents that scope. A regression test asserts the preserved
+  secret also keeps mode `0600`, closing a gap found during PR #80
+  verification.
+- **The overwrite guard's origin marker could drift into a reap
+  window on an actively resumed session (#86).** A session dormant
+  past the orphan sweep's 7-day horizon could have its
+  `.session_started_<sid>` sidecar reaped by another session's
+  sweep; on resume, create-once recreated it with a fresh epoch, and
+  the guard stopped firing against a fresher handoff written during
+  the dormancy. The create-once block now has a same-sid re-fire
+  branch that refreshes only the existing marker's mtime, never its
+  content, symlinks excluded, failure swallowed so the hook can
+  never abort, keeping an actively resumed session's marker outside
+  other sessions' reap windows while the guard's recorded origin
+  epoch stays pinned.
+- **Two more newline-unsafe sites closed, completing the
+  newline-safety sweep (#89).** `bin/handoff_turn_append.sh`'s
+  raw-dump prune loop (the delete path that removes a pruned dump
+  plus its companion sidecar files per id) consumed `ls -t`
+  line-by-line; a crafted dump filename with an embedded newline
+  could split into two lines and redirect companion-file deletion
+  onto an uninvolved id's files. It now uses `find -print0` consumed
+  with `while IFS= read -rd ''`, a GNU-first mtime scan preserving
+  the existing newest-first keep-3 retention, and a fully anchored id
+  check that rejects a crafted name whole instead of matching a
+  prefix of it. `bin/handoff_session_start.sh`'s payload-derived
+  `ss_sid` guard had the same first-character-only `case` glob gap as
+  #81's `handoff_ss_sid_of`; it is now a fully anchored regex, written
+  errexit-safe, with the non-matching fallback unchanged (normalizes
+  to `unknown`, always exits 0).
+
+### Tests
+- GNU-first `stat -c %Y || stat -f %m` order in
+  `tests/test_session_start.sh`'s mtime checks, matching the order
+  used throughout `bin/`, eliminating a Linux CI flake where GNU
+  `stat -f` printed filesystem statistics into the captured value
+  instead of a mtime (#92).
+
 ## [0.16.0] - 2026-08-26
 
 Cross-session overwrite guard for the fresher-session race, a
