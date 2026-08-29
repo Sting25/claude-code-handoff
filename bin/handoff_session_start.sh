@@ -72,6 +72,16 @@ if [ -n "$prov_dir" ] && [ -f "$prov_dir/handoff_provenance.sh" ]; then
   # shellcheck source=bin/handoff_provenance.sh
   . "$prov_dir/handoff_provenance.sh"
 fi
+
+# Self-prune stale cached versions of THIS plugin (bin/handoff_cache_prune.sh).
+# Independent of repo/root resolution above (it operates on the global plugin
+# cache, not this project's .claude/), so it runs before that resolution and
+# on every fire of this hook, plugin install or not: the shape guard inside
+# the script itself is what makes it a no-op everywhere except a real plugin
+# cache install. `|| true`: must never be able to fail this hook.
+if [ -n "$prov_dir" ] && [ -f "$prov_dir/handoff_cache_prune.sh" ]; then
+  bash "$prov_dir/handoff_cache_prune.sh" 2>/dev/null || true
+fi
 if type handoff_resolve_root >/dev/null 2>&1; then
   handoff_resolve_root "$hook_cwd"
   repo="$HANDOFF_ROOT"

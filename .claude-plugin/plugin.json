@@ -1,7 +1,7 @@
 {
   "name": "claude-code-handoff",
   "displayName": "Claude Code Handoff",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Session-state handoff for Claude Code: hooks auto-snapshot at SessionEnd/PreCompact and auto-load at SessionStart. Rebuilds lost handoffs from per-turn backups, keeps rotating history, nudges at ~40% context, and HMAC-signs handoffs so cloned repos can't inject trusted rules.",
   "author": {
     "name": "Christopher Chadwick",
