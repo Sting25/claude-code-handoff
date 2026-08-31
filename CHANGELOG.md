@@ -12,6 +12,31 @@ are appended).
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-31
+
+Hardens the v0.18.0 cache self-prune's delete path (#102). No
+hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Fixed
+- **Cache prune's newest-pick was newline/symlink-unsafe, `.in_use`
+  markers were ignored, and `installed_plugins.json` was never
+  consulted (#102).** Independent post-merge verification of v0.18.0's
+  `handoff_cache_prune.sh` found the `ls -td | head -1` newest-pick
+  could mis-parse a directory name containing an embedded newline, a
+  live session's in-use version directory had no protection from
+  being pruned, and "current" was inferred from mtime rather than
+  read from the manifest Claude Code itself writes. The mtime scan
+  now iterates the quoted glob with bash `-nt` comparisons (immune to
+  embedded newlines), requires real, existing, non-symlink,
+  version-shaped directories, and is diagnostic-only. Any version
+  directory with entries in `.in_use/` is now never deleted. The
+  current version is now read from `installed_plugins.json`; every
+  ambiguous or unreadable manifest state fails safe to prune-nothing,
+  with a WARN on stderr for direct runs. `tests/test_cache_prune.sh`
+  grows from 30 to 61 assertions, each new one proven discriminating
+  (fails pre-fix, passes post-fix).
+
 ## [0.18.0] - 2026-08-29
 
 Self-prunes stale cached versions of the plugin itself. No hook-command
