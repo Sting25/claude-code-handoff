@@ -130,7 +130,35 @@ nothing gets lost across the restart boundary.
    removed and replaced with your Notes content. The SessionEnd safety-
    net stands down only when that sentinel is gone, so leaving it in
    place (even with Notes added below) means the safety-net write
-   could later clobber your work. Capture in your Notes, in order of
+   could later clobber your work.
+
+   **First, account for every fence and caution you inherited — before
+   drafting anything new.** Look at what the handoff you *started* this
+   session with carried forward: every bullet in its `## Rules (fences
+   — carried into the next session)` section, plus any cautions/lessons
+   carried in its own Notes. Triage each one as **Settled** (now fixed
+   in code, or written into a spec / `AGENTS.md` / memory / the system
+   log — a gotcha that's been codified has graduated, move it to that
+   permanent home first), **Still live** (could still cause a wrong
+   move next session), or **Stale** (no longer applies). This is not a
+   mental judgment call you can make silently and skip — it produces a
+   visible line in your Notes for EACH ONE:
+   - `kept: <fence> — <Still live: still open on issue #Y / reason>`
+   - `dropped: <fence> — <Settled: graduated to AGENTS.md/memory/spec,
+     or Stale: no longer applies — one clause why>`
+   If every single inherited item is genuinely Still live, that's
+   allowed, but say so as its own line, not by omission: `kept: all N
+   inherited — none graduated or went stale this session`. An inherited
+   fence whose text closely matches something already sitting in this
+   project's memory or `AGENTS.md` is a strong signal it's actually
+   Settled — check before defaulting to `kept`. Silent, unexplained
+   monotonic growth (more surviving than a `kept: all N` line would
+   account for, or a `dropped` naming no permanent home) is exactly the
+   failure this step exists to prevent: the handoff is a working set,
+   not an archive, and should trend smaller as lessons graduate, not
+   grow every session by reflex.
+
+   Once that accounting is written, capture in your Notes, in order of
    importance:
    - **Work product produced this session.** If a plan was approved,
      a spec was drafted, a design was decided, or any artifact beyond
@@ -149,24 +177,6 @@ nothing gets lost across the restart boundary.
      project-specific reads).
    Skip items that are already in the auto-snapshot (HEAD, dirty files,
    commit list — those live above the `Notes` section).
-
-   **Garbage-collect what you inherited.** Before writing, look at the
-   cautions and lessons the handoff you *started* this session with
-   carried forward (the auto-loaded `handoff_current.md`). Don't copy
-   them forward by reflex — decide each one's fate:
-   - **Settled** — now fixed in code, or written into a spec / `AGENTS.md`
-     / memory / the system log → move it to that permanent home and
-     **drop it from the Notes.** A gotcha that's been codified has
-     graduated; it no longer belongs in the handoff.
-   - **Still live** — could still cause a wrong move next session →
-     carry it forward.
-   - **Stale** — no longer applies → drop it.
-
-   The handoff is a working set, not an archive: it should **trend
-   smaller** as lessons graduate into permanent homes, not grow every
-   session. If you carried everything forward and dropped nothing, say
-   so and why — silent monotonic growth is the signal the loop has
-   stopped maintaining itself.
 
    **Fences go in the `## Rules` block, not in Notes.** The doc contains
    a `## Rules (fences — carried into the next session)` section wrapped
