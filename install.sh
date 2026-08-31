@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: caf415ba37af890709a6681196d37519a88b458232ed7acc6ee15fd6be121af9
+# SOURCE-SHA256: ebbc9da7a42f657bda04d6e37c120ef70b96b116eaf022228d2c705c2834199e
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -72,7 +72,15 @@ USAGE
 # unaffected, and hooks run via `bash <path>` so the copies need no exec bit.
 umask 077
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# `2>/dev/null` + `|| repo_root=""` fallback: same guard bin/*.sh already uses
+# around every other BASH_SOURCE[0] resolution in this repo. Needed here too —
+# under `curl ... | bash -s -- --help`, BASH_SOURCE[0] has no element to read,
+# which trips `set -u` as "unbound variable" and prints it to stderr before
+# this line's own fallback is reached. `--help`/`-h` (parsed further below)
+# exits via usage() before repo_root is ever used, so an empty fallback here
+# is safe for that path; every other invocation shape still resolves a real
+# BASH_SOURCE[0] and this fallback never engages.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || repo_root=""
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
 # Include the PID so two installs in the same clock second don't collide on the

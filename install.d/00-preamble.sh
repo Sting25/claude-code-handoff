@@ -60,7 +60,15 @@ USAGE
 # unaffected, and hooks run via `bash <path>` so the copies need no exec bit.
 umask 077
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# `2>/dev/null` + `|| repo_root=""` fallback: same guard bin/*.sh already uses
+# around every other BASH_SOURCE[0] resolution in this repo. Needed here too —
+# under `curl ... | bash -s -- --help`, BASH_SOURCE[0] has no element to read,
+# which trips `set -u` as "unbound variable" and prints it to stderr before
+# this line's own fallback is reached. `--help`/`-h` (parsed further below)
+# exits via usage() before repo_root is ever used, so an empty fallback here
+# is safe for that path; every other invocation shape still resolves a real
+# BASH_SOURCE[0] and this fallback never engages.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || repo_root=""
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
 # Include the PID so two installs in the same clock second don't collide on the
