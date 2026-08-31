@@ -322,6 +322,39 @@ beside every dump the tool creates) is present. The optional statusline
 janitor also prunes the context-cache sidecars (`.ctx_sl_*` files) it
 generates in the same backups directory.
 
+### Orphaned sidecar sweep
+
+Most per-session sidecars under `handoff_backups/` get cleaned up as a
+side effect of pruning the dump they belong to (see above). Five don't
+have an owning dump to key eviction to, because they can outlive the
+session that wrote them even when nothing ever goes wrong:
+`.ctx_nojq_<id>` (once-per-session jq-missing warning), `.ctx_prompts_<id>`
+and `.ctx_health_<id>` (Stop-hook health-warning counters and throttles,
+see [Stop-hook health warnings](#stop-hook-health-warnings)),
+`.ss_health_<id>` (the statusline's own health throttle), and
+`.session_started_<id>` (the cross-session overwrite guard's origin
+marker, see [Cross-session overwrite guard](#cross-session-overwrite-guard)).
+
+`handoff_session_start.sh` sweeps these five shapes on every `SessionStart`
+fire, before any other work in the hook runs. Since there's no dump to
+count them against, **age is the only signal**: anything older than
+**7 days** (matching the statusline janitor's own horizon) is a
+candidate. A candidate is only ever deleted if it proves it's one of
+ours on both name shape (one of the five prefixes above, with a
+session-id-charset suffix) and content shape (always empty, except
+`.ctx_prompts_`/`.session_started_`, which are always a single decimal
+counter) — a file that happens to collide on name but holds different
+content is left alone, and a symlink is never followed or removed.
+
+One deliberate exception: a `.session_started_<id>` marker is never
+reaped for the *currently firing* session's own id, no matter how old it
+is. A session paused past the 7-day horizon and then resumed re-fires
+`SessionStart` with the same id while still genuinely live; reaping its
+origin marker would make the hook recreate it with today's epoch,
+silently moving the origin forward and reopening the exact
+stale-overwrite hole the [cross-session overwrite
+guard](#cross-session-overwrite-guard) (issue #63) closes.
+
 ## Pinned context (carried forward every handoff)
 
 Some context outlives a single session but isn't a permanent rule —
