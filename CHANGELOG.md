@@ -12,6 +12,16 @@ are appended).
 
 ## [Unreleased]
 
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Added
+- **CI gate: GNU-first stat fallback order (#110).** New `stat-order`
+  job greps `bin/`, `install.d/`, and `tests/` for the BSD-first
+  `stat -f ... || stat -c ...` shape that made a required job flaky in
+  issue #92. Not yet a required check; branch protection is a separate
+  server-side step.
+
 ## [0.18.2] - 2026-09-01
 
 No hook-command or permission-entry changes: nothing to re-patch in

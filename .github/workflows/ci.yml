@@ -174,3 +174,25 @@ jobs:
           fi
           [ "$status" -eq 0 ] && echo "install.sh matches install.d/*.sh + tools/build-install.sh"
           exit "$status"
+
+  # #110: reject the BSD-first 'stat -f ... || stat -c ...' fallback order.
+  # GNU-first is the repo idiom (issue #92): in a cross-platform fallback
+  # chain the noisy-failure variant goes last, because BSD stat -f on a GNU
+  # system can "fail" by succeeding partially with garbage on stdout, which
+  # made a required job a coin flip. Tree-state check, not diff-scoped, so a
+  # regression anywhere goes red. Scope includes tests/ because #92's actual
+  # incident was in a test file.
+  stat-order:
+    name: stat fallback order (GNU-first)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Grep bin/ install.d/ tests/ for BSD-first stat chains
+        run: |
+          set -euo pipefail
+          if hits="$(grep -rnE 'stat[[:space:]]+-f[^|]*\|\|[^|]*stat[[:space:]]+-c' bin/ install.d/ tests/)"; then
+            echo "$hits"
+            echo "::error::BSD-first stat order found: put the GNU (stat -c) variant first (see #92, #110)"
+            exit 1
+          fi
+          echo "no BSD-first stat chains"
