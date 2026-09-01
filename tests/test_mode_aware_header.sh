@@ -262,11 +262,12 @@ sec4="$(mktemp -d)/secret"; cleanup_on_exit "$(dirname "$sec4")"
     bash "$hostile_plugin_bin/write_handoff.sh" >/dev/null 2>&1 </dev/null )
 doc4="$proj4/.claude/handoff_current.md"
 must test -f "$doc4"
-# Only the writer's own Rules region may open a real bind pair -- exactly one
-# BEGIN and one END (no Pin section here: no pinned file configured).
-check "hostile self_dir (plugin) -> exactly 1 real BEGIN" 1 \
+# Only the writer's own Rules and Verify regions may open a real bind pair --
+# exactly two BEGIN and two END (no Pin section here: no pinned file
+# configured).
+check "hostile self_dir (plugin) -> exactly 2 real BEGIN" 2 \
   "$(LC_ALL=C grep -c '^<!-- HANDOFF_BIND_BEGIN -->$' "$doc4")"
-check "hostile self_dir (plugin) -> exactly 1 real END" 1 \
+check "hostile self_dir (plugin) -> exactly 2 real END" 2 \
   "$(LC_ALL=C grep -c '^<!-- HANDOFF_BIND_END -->$' "$doc4")"
 check "hostile self_dir (plugin) -> planted pair defanged" yes \
   "$(has "$(cat "$doc4")" "«HANDOFF_BIND_BEGIN» (defanged")"
@@ -300,9 +301,9 @@ sec5="$(mktemp -d)/secret"; cleanup_on_exit "$(dirname "$sec5")"
     bash "$hostile_other_bin/write_handoff.sh" >/dev/null 2>&1 </dev/null )
 doc5="$proj5/.claude/handoff_current.md"
 must test -f "$doc5"
-check "hostile self_dir (neither) -> exactly 1 real BEGIN" 1 \
+check "hostile self_dir (neither) -> exactly 2 real BEGIN" 2 \
   "$(LC_ALL=C grep -c '^<!-- HANDOFF_BIND_BEGIN -->$' "$doc5")"
-check "hostile self_dir (neither) -> exactly 1 real END" 1 \
+check "hostile self_dir (neither) -> exactly 2 real END" 2 \
   "$(LC_ALL=C grep -c '^<!-- HANDOFF_BIND_END -->$' "$doc5")"
 check "hostile self_dir (neither) -> planted pair defanged" yes \
   "$(has "$(cat "$doc5")" "«HANDOFF_BIND_BEGIN» (defanged")"

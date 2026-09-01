@@ -57,20 +57,24 @@ must rewrite_notes "$doc" "$proj/notes_body"
 ( cd "$proj" && CLAUDE_PROJECT_DIR="$proj" bash "$REPO_ROOT/bin/write_handoff.sh" \
     --restamp >/dev/null 2>&1 </dev/null )
 
-# The writer's own Rules region survives; the smuggled pair is defanged.
+# The writer's own Rules and Verify regions survive (no pin file here, so
+# those are the only two writer-owned regions); the smuggled pair is defanged.
 writer_markers="$(LC_ALL=C grep -c '^<!-- HANDOFF_BIND_\(BEGIN\|END\) -->$' "$doc")"
-check "writer's own BIND pair survives the restamp" 2 "$writer_markers"
+check "writer's own BIND pairs survive the restamp (rules+verify)" 4 "$writer_markers"
 defanged="$(LC_ALL=C grep -c 'defanged: only write_handoff.sh may' "$doc")"
 check "smuggled BEGIN and END are both defanged" 2 "$defanged"
 
 # The smuggled line must not reach the next session's BINDING tier. The loader
-# prints the binding block under a "Standing rules" header; anything outside a
-# bind region is emitted as reference data instead.
+# prints the binding block under a "Standing rules" header — which now always
+# shows once the doc verifies (issue #113: the Verify step alone is enough
+# substantive content) — so the real check is WHERE SMUGGLED_RULE lands, not
+# whether the header shows at all: it may appear defanged in the narrative
+# (before the header), never in the binding tier (after it).
 out="$(CLAUDE_PROJECT_DIR="$proj" bash "$REPO_ROOT/bin/handoff_session_start.sh" \
         </dev/null 2>&1)"
+after="${out#*"Standing rules"}"
 bound=no
-printf '%s' "$out" | LC_ALL=C grep -q 'Standing rules' \
-  && printf '%s' "$out" | LC_ALL=C grep -q 'SMUGGLED_RULE' && bound=yes
+printf '%s' "$after" | LC_ALL=C grep -q 'SMUGGLED_RULE' && bound=yes
 check "smuggled rule does NOT load as binding" no "$bound"
 
 # --- 2. A legitimate curated fence still binds (no false positive) -----------
