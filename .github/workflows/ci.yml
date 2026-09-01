@@ -196,3 +196,38 @@ jobs:
             exit 1
           fi
           echo "no BSD-first stat chains"
+
+  # #109: reject NEW em dashes (U+2014) on added lines. Diff-scoped on
+  # purpose: the repo-wide legacy cleanup was considered and rejected in
+  # #100 (too large a diff for the value, touches test-asserted strings).
+  # This blocks the character from landing going forward and ignores what
+  # is already there. The character never appears literally in this file:
+  # the gate matches the \x{2014} escape, so it cannot trip on itself.
+  # PRs only: on a push there is no base to diff against.
+  no-new-em-dash:
+    name: no new em dashes (diff-scoped)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Grep added lines for U+2014
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin "$BASE_REF"
+          bad=0
+          while IFS= read -r f; do
+            # Added lines only: '+' but not the '+++' file header.
+            if git diff -U0 "origin/$BASE_REF"...HEAD -- "$f" \
+                 | grep -qP '^\+(?!\+\+).*\x{2014}'; then
+              echo "::error file=$f::new em dash (U+2014) added in $f; rewrite with a period, comma, colon, or parentheses (see #109)"
+              git diff -U0 "origin/$BASE_REF"...HEAD -- "$f" \
+                | grep -P '^\+(?!\+\+).*\x{2014}' | head -n 5
+              bad=1
+            fi
+          done < <(git diff --name-only "origin/$BASE_REF"...HEAD)
+          [ "$bad" -eq 0 ] && echo "no new em dashes"
+          exit "$bad"

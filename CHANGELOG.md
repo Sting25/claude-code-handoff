@@ -16,6 +16,11 @@ No hook-command or permission-entry changes: nothing to re-patch in
 `~/.claude/settings.json`.
 
 ### Added
+- **CI gate: no new em dashes (#109).** New diff-scoped `no-new-em-dash`
+  job fails a PR when an added line contains U+2014, naming the file and
+  the offending lines. Legacy occurrences are deliberately untouched
+  (the repo-wide cleanup was rejected in #100 as too large a diff for
+  the value). Not yet a required check.
 - **CI gate: GNU-first stat fallback order (#110).** New `stat-order`
   job greps `bin/`, `install.d/`, and `tests/` for the BSD-first
   `stat -f ... || stat -c ...` shape that made a required job flaky in
