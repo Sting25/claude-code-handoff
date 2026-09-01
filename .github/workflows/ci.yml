@@ -174,3 +174,127 @@ jobs:
           fi
           [ "$status" -eq 0 ] && echo "install.sh matches install.d/*.sh + tools/build-install.sh"
           exit "$status"
+
+  # #110: reject the BSD-first 'stat -f ... || stat -c ...' fallback order.
+  # GNU-first is the repo idiom (issue #92): in a cross-platform fallback
+  # chain the noisy-failure variant goes last, because BSD stat -f on a GNU
+  # system can "fail" by succeeding partially with garbage on stdout, which
+  # made a required job a coin flip. Tree-state check, not diff-scoped, so a
+  # regression anywhere goes red. Scope includes tests/ because #92's actual
+  # incident was in a test file.
+  stat-order:
+    name: stat fallback order (GNU-first)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Grep bin/ install.d/ tests/ for BSD-first stat chains
+        run: |
+          set -euo pipefail
+          if hits="$(grep -rnE 'stat[[:space:]]+-f[^|]*\|\|[^|]*stat[[:space:]]+-c' bin/ install.d/ tests/)"; then
+            echo "$hits"
+            echo "::error::BSD-first stat order found: put the GNU (stat -c) variant first (see #92, #110)"
+            exit 1
+          fi
+          echo "no BSD-first stat chains"
+
+  # #109: reject NEW em dashes (U+2014) on added lines. Diff-scoped on
+  # purpose: the repo-wide legacy cleanup was considered and rejected in
+  # #100 (too large a diff for the value, touches test-asserted strings).
+  # This blocks the character from landing going forward and ignores what
+  # is already there. The character never appears literally in this file:
+  # the gate matches the \x{2014} escape, so it cannot trip on itself.
+  # PRs only: on a push there is no base to diff against.
+  no-new-em-dash:
+    name: no new em dashes (diff-scoped)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Grep added lines for U+2014
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin "$BASE_REF"
+          bad=0
+          while IFS= read -r f; do
+            # Added lines only: '+' but not the '+++' file header.
+            if git diff -U0 "origin/$BASE_REF"...HEAD -- "$f" \
+                 | grep -qP '^\+(?!\+\+).*\x{2014}'; then
+              echo "::error file=$f::new em dash (U+2014) added in $f; rewrite with a period, comma, colon, or parentheses (see #109)"
+              git diff -U0 "origin/$BASE_REF"...HEAD -- "$f" \
+                | grep -P '^\+(?!\+\+).*\x{2014}' | head -n 5
+              bad=1
+            fi
+          done < <(git diff --name-only "origin/$BASE_REF"...HEAD)
+          [ "$bad" -eq 0 ] && echo "no new em dashes"
+          exit "$bad"
+
+  # #108: version bumps travel only in release commits. The real incident:
+  # PR #99 merged a VERSION bump to main with no tag and no GitHub release,
+  # and marketplace installs (which track main) picked up an unreleased
+  # version. plugin-version-sync above audits tag pushes after the fact;
+  # this is the preventive PR-time half, keyed off the release/* branch
+  # convention this repo already uses. PRs only: pushes have no head ref.
+  version-freeze:
+    name: version freeze (non-release PRs)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Fail if VERSION or plugin.json version changed outside release/*
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          case "$HEAD_REF" in
+            release/*)
+              echo "release branch ($HEAD_REF): version changes allowed"
+              exit 0
+              ;;
+          esac
+          git fetch --quiet origin "$BASE_REF"
+          base="origin/$BASE_REF"
+          if ! git diff --quiet "$base"...HEAD -- VERSION; then
+            echo "::error file=VERSION::VERSION changed outside a release/* PR; version bumps travel only in release PRs (see #108)"
+            exit 1
+          fi
+          old_v="$(git show "$base:.claude-plugin/plugin.json" | jq -r '.version')"
+          new_v="$(jq -r '.version' .claude-plugin/plugin.json)"
+          if [ "$old_v" != "$new_v" ]; then
+            echo "::error file=.claude-plugin/plugin.json::plugin.json version changed ($old_v -> $new_v) outside a release/* PR (see #108)"
+            exit 1
+          fi
+          echo "no version changes on non-release branch $HEAD_REF"
+
+  # #107: validate both manifests with the marketplace's own validator.
+  # Two passes because the validator, pointed at a directory holding both
+  # manifests, silently auto-picks marketplace.json only; the plugin
+  # manifest must be validated from a copy without marketplace.json
+  # (verified: a plugin.json stripped of a required field fails pass 2
+  # with exit 1, so this is not re-validating the marketplace twice).
+  # Deliberately UNPINNED (@latest), unlike everything else in CI: the
+  # point is to hear when the CURRENT validator starts rejecting these
+  # manifests, so tracking the live validator is the feature, not drift.
+  # If a validator release goes red on an unchanged tree, that is real
+  # information about what the marketplace now enforces.
+  plugin-validate:
+    name: plugin validate --strict (both manifests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Two-pass claude plugin validate --strict
+        run: |
+          set -euo pipefail
+          echo "pass 1: marketplace.json (validator auto-picks it)"
+          npx --yes @anthropic-ai/claude-code@latest plugin validate --strict .
+          echo "pass 2: plugin.json (from a copy without marketplace.json)"
+          workdir="$(mktemp -d)"
+          cp -R . "$workdir/repo"
+          rm -f "$workdir/repo/.claude-plugin/marketplace.json"
+          npx --yes @anthropic-ai/claude-code@latest plugin validate --strict "$workdir/repo"

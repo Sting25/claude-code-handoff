@@ -12,6 +12,36 @@ are appended).
 
 ## [Unreleased]
 
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Added
+- **CI gate: two-pass plugin validation (#107).** New `plugin-validate`
+  job runs `claude plugin validate --strict` twice: once against the
+  repo (the validator auto-picks `marketplace.json`) and once against a
+  copy without `marketplace.json` so `plugin.json` is actually
+  validated. Verified to catch a broken plugin manifest, not just
+  re-validate the marketplace twice. Uses the validator at `@latest`
+  on purpose, to surface new marketplace requirements. Not yet a
+  required check.
+- **CI gate: version freeze on non-release PRs (#108).** New
+  `version-freeze` job fails a PR that changes `VERSION` or
+  `plugin.json`'s version field unless the head branch matches
+  `release/*`, preventing a repeat of the #99 incident where main
+  carried an unreleased version that marketplace installs picked up.
+  Complements `plugin-version-sync`, which only audits tag pushes
+  after the fact. Not yet a required check.
+- **CI gate: no new em dashes (#109).** New diff-scoped `no-new-em-dash`
+  job fails a PR when an added line contains U+2014, naming the file and
+  the offending lines. Legacy occurrences are deliberately untouched
+  (the repo-wide cleanup was rejected in #100 as too large a diff for
+  the value). Not yet a required check.
+- **CI gate: GNU-first stat fallback order (#110).** New `stat-order`
+  job greps `bin/`, `install.d/`, and `tests/` for the BSD-first
+  `stat -f ... || stat -c ...` shape that made a required job flaky in
+  issue #92. Not yet a required check; branch protection is a separate
+  server-side step.
+
 ## [0.18.2] - 2026-09-01
 
 No hook-command or permission-entry changes: nothing to re-patch in
