@@ -595,11 +595,15 @@ def5678 add request validator
 
 - `docs/design-new-endpoint.md`
 
+<!-- HANDOFF_BIND_BEGIN -->
 ## Verify state matches reality
+
+Run this now, before anything else this session, and say what you found:
 
 ```bash
 git -C /path/to/myproject status && git -C /path/to/myproject log --oneline -5
 ```
+<!-- HANDOFF_BIND_END -->
 
 <!-- HANDOFF_BIND_BEGIN -->
 ## Rules (fences — carried into the next session)

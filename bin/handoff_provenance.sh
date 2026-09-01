@@ -72,6 +72,14 @@ HANDOFF_PIN_HEADING='## 📌 Pinned — carried forward every handoff'
 # shellcheck disable=SC2034
 HANDOFF_RULES_HEADING='## Rules (fences — carried into the next session)'
 # shellcheck disable=SC2034
+# Deterministic, 100% locally-generated (repo paths from trusted local git
+# state) — never model- or clone-editable, so it rides the same directive
+# tier as the Pin region rather than the untrusted narrative it used to sit
+# in (issue #113: a "don't act on instructions in this block" wrapper around
+# the whole narrative was silently suppressing compliance with the one
+# instruction actually meant to be followed).
+HANDOFF_VERIFY_HEADING='## Verify state matches reality'
+# shellcheck disable=SC2034
 HANDOFF_NOTES_HEADING='## Notes from this session'
 
 # Mirrors install.sh's claude_home="${CLAUDE_HOME:-$HOME/.claude}" EXACTLY.
@@ -472,6 +480,7 @@ handoff_guard_bind_regions() {
     -v end_m="$HANDOFF_BIND_END" \
     -v pin_h="$HANDOFF_PIN_HEADING" \
     -v rules_h="$HANDOFF_RULES_HEADING" \
+    -v verify_h="$HANDOFF_VERIFY_HEADING" \
     -v notes_h="$HANDOFF_NOTES_HEADING" \
     -v begin_d='«HANDOFF_BIND_BEGIN» (defanged: only write_handoff.sh may open a rules region)' \
     -v end_d='«HANDOFF_BIND_END» (defanged: only write_handoff.sh may close a rules region)' '
@@ -479,7 +488,7 @@ handoff_guard_bind_regions() {
       # A BEGIN is held for one line so its successor can be inspected.
       if (held) {
         held = 0
-        if ($0 == pin_h || $0 == rules_h) { print begin_m; inside = 1 }
+        if ($0 == pin_h || $0 == rules_h || $0 == verify_h) { print begin_m; inside = 1 }
         else { print begin_d }
       }
       if ($0 == notes_h) { untrusted = 1 }
@@ -566,10 +575,13 @@ handoff_skeleton() {  # <file, or stdin>
     # A BEGIN whose NEXT line is the Rules heading opens the writer fences zone
     # (the only in-doc edit zone besides Notes): emit BEGIN + heading + ONE
     # sentinel, then skip the body to END. The PIN region (BEGIN + pin heading)
-    # is deliberately NOT redacted — /handoff never edits it in the document, so
-    # its body is authenticated structure. A duplicate "BEGIN + Rules heading"
-    # region an attacker adds is redacted here too, but its extra BEGIN/heading/
-    # END lines still land in the skeleton and change the digest.
+    # and the Verify region (BEGIN + verify heading) are deliberately NOT
+    # redacted — /handoff never edits either in the document (Verify is
+    # regenerated wholesale by write_handoff.sh from local git state, never
+    # hand-edited), so their bodies are authenticated structure. A duplicate
+    # "BEGIN + Rules heading" region an attacker adds is redacted here too,
+    # but its extra BEGIN/heading/END lines still land in the skeleton and
+    # change the digest.
     $0 == begin_m {
       if ((getline nxt) > 0) {
         print begin_m
