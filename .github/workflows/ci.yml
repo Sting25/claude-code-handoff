@@ -271,3 +271,30 @@ jobs:
             exit 1
           fi
           echo "no version changes on non-release branch $HEAD_REF"
+
+  # #107: validate both manifests with the marketplace's own validator.
+  # Two passes because the validator, pointed at a directory holding both
+  # manifests, silently auto-picks marketplace.json only; the plugin
+  # manifest must be validated from a copy without marketplace.json
+  # (verified: a plugin.json stripped of a required field fails pass 2
+  # with exit 1, so this is not re-validating the marketplace twice).
+  # Deliberately UNPINNED (@latest), unlike everything else in CI: the
+  # point is to hear when the CURRENT validator starts rejecting these
+  # manifests, so tracking the live validator is the feature, not drift.
+  # If a validator release goes red on an unchanged tree, that is real
+  # information about what the marketplace now enforces.
+  plugin-validate:
+    name: plugin validate --strict (both manifests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Two-pass claude plugin validate --strict
+        run: |
+          set -euo pipefail
+          echo "pass 1: marketplace.json (validator auto-picks it)"
+          npx --yes @anthropic-ai/claude-code@latest plugin validate --strict .
+          echo "pass 2: plugin.json (from a copy without marketplace.json)"
+          workdir="$(mktemp -d)"
+          cp -R . "$workdir/repo"
+          rm -f "$workdir/repo/.claude-plugin/marketplace.json"
+          npx --yes @anthropic-ai/claude-code@latest plugin validate --strict "$workdir/repo"

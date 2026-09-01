@@ -16,6 +16,14 @@ No hook-command or permission-entry changes: nothing to re-patch in
 `~/.claude/settings.json`.
 
 ### Added
+- **CI gate: two-pass plugin validation (#107).** New `plugin-validate`
+  job runs `claude plugin validate --strict` twice: once against the
+  repo (the validator auto-picks `marketplace.json`) and once against a
+  copy without `marketplace.json` so `plugin.json` is actually
+  validated. Verified to catch a broken plugin manifest, not just
+  re-validate the marketplace twice. Uses the validator at `@latest`
+  on purpose, to surface new marketplace requirements. Not yet a
+  required check.
 - **CI gate: version freeze on non-release PRs (#108).** New
   `version-freeze` job fails a PR that changes `VERSION` or
   `plugin.json`'s version field unless the head branch matches
