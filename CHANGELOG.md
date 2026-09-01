@@ -16,6 +16,13 @@ No hook-command or permission-entry changes: nothing to re-patch in
 `~/.claude/settings.json`.
 
 ### Added
+- **CI gate: version freeze on non-release PRs (#108).** New
+  `version-freeze` job fails a PR that changes `VERSION` or
+  `plugin.json`'s version field unless the head branch matches
+  `release/*`, preventing a repeat of the #99 incident where main
+  carried an unreleased version that marketplace installs picked up.
+  Complements `plugin-version-sync`, which only audits tag pushes
+  after the fact. Not yet a required check.
 - **CI gate: no new em dashes (#109).** New diff-scoped `no-new-em-dash`
   job fails a PR when an added line contains U+2014, naming the file and
   the offending lines. Legacy occurrences are deliberately untouched

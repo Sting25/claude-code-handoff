@@ -231,3 +231,43 @@ jobs:
           done < <(git diff --name-only "origin/$BASE_REF"...HEAD)
           [ "$bad" -eq 0 ] && echo "no new em dashes"
           exit "$bad"
+
+  # #108: version bumps travel only in release commits. The real incident:
+  # PR #99 merged a VERSION bump to main with no tag and no GitHub release,
+  # and marketplace installs (which track main) picked up an unreleased
+  # version. plugin-version-sync above audits tag pushes after the fact;
+  # this is the preventive PR-time half, keyed off the release/* branch
+  # convention this repo already uses. PRs only: pushes have no head ref.
+  version-freeze:
+    name: version freeze (non-release PRs)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Fail if VERSION or plugin.json version changed outside release/*
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          case "$HEAD_REF" in
+            release/*)
+              echo "release branch ($HEAD_REF): version changes allowed"
+              exit 0
+              ;;
+          esac
+          git fetch --quiet origin "$BASE_REF"
+          base="origin/$BASE_REF"
+          if ! git diff --quiet "$base"...HEAD -- VERSION; then
+            echo "::error file=VERSION::VERSION changed outside a release/* PR; version bumps travel only in release PRs (see #108)"
+            exit 1
+          fi
+          old_v="$(git show "$base:.claude-plugin/plugin.json" | jq -r '.version')"
+          new_v="$(jq -r '.version' .claude-plugin/plugin.json)"
+          if [ "$old_v" != "$new_v" ]; then
+            echo "::error file=.claude-plugin/plugin.json::plugin.json version changed ($old_v -> $new_v) outside a release/* PR (see #108)"
+            exit 1
+          fi
+          echo "no version changes on non-release branch $HEAD_REF"
