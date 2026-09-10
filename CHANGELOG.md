@@ -15,6 +15,16 @@ are appended).
 No hook-command or permission-entry changes: nothing to re-patch in
 `~/.claude/settings.json`.
 
+### Fixed
+- **Context nudge effectively never fired on 1M-window models (#119).**
+  The 40% trigger was calibrated on 200k windows (about 80k tokens);
+  once 1M-window models were detected correctly it became 400k tokens,
+  and ordinary sessions never reached it. New `HANDOFF_CTX_THRESHOLD_TOKENS`
+  (default 100000) adds an absolute gate; the nudge fires at whichever of
+  the absolute or percentage gate is reached first. 200k-window behavior
+  is unchanged (80k < 100k). Set it to 0 to restore the pure percentage
+  rule. Documented in README and docs/reference.md.
+
 ### Added
 - **CI gate: two-pass plugin validation (#107).** New `plugin-validate`
   job runs `claude plugin validate --strict` twice: once against the
