@@ -67,6 +67,22 @@
 #                               that opt into REMINDER_MODE=act below — the
 #                               model needs runway to find a clean boundary
 #                               before context quality degrades.
+#   HANDOFF_CTX_THRESHOLD_TOKENS absolute token count that triggers (default:
+#                               100000). The nudge fires at whichever gate is
+#                               reached FIRST: this figure or THRESHOLD_PCT of
+#                               the window. Why both (issue #119): the 40%
+#                               default was calibrated on 200k windows, where
+#                               it meant ~80k tokens. Once 1M-window models
+#                               were detected correctly, the same 40% became
+#                               400k tokens (five times later in absolute
+#                               terms), and the nudge effectively stopped
+#                               firing. Quality degrades as a function of
+#                               tokens in context, not of the fraction of the
+#                               window, so the absolute gate is the one that
+#                               tracks what the nudge exists to catch. On a
+#                               200k window 80k < 100k, so behavior there is
+#                               unchanged. Set 0 to disable the absolute gate
+#                               and restore the pure percentage rule.
 #   HANDOFF_CTX_REMINDER_MODE   "suggest" (default) emits a reminder that
 #                               instructs the assistant to surface a passive
 #                               mention to the user, who decides whether to
@@ -151,6 +167,7 @@ set -euo pipefail
 umask 077
 
 THRESHOLD_PCT="${HANDOFF_CTX_THRESHOLD_PCT:-40}"
+THRESHOLD_TOKENS="${HANDOFF_CTX_THRESHOLD_TOKENS:-100000}"
 COOLDOWN_KB="${HANDOFF_CTX_COOLDOWN_KB:-100}"
 # Validate both numerically, mirroring the MAX_FLAGS guard below. A slightly-
 # wrong override ("40%", "100KB", a negative) previously reached the $((...))
@@ -159,6 +176,7 @@ COOLDOWN_KB="${HANDOFF_CTX_COOLDOWN_KB:-100}"
 # session. Fall back to the defaults instead (a negative THRESHOLD_PCT would
 # otherwise also pass and make the threshold always-fire).
 [[ "$THRESHOLD_PCT" =~ ^[0-9]+$ ]] || THRESHOLD_PCT=40
+[[ "$THRESHOLD_TOKENS" =~ ^[0-9]+$ ]] || THRESHOLD_TOKENS=100000
 [[ "$COOLDOWN_KB"   =~ ^[0-9]+$ ]] || COOLDOWN_KB=100
 REMINDER_MODE="${HANDOFF_CTX_REMINDER_MODE:-suggest}"
 # Per-session flag cap. Default depends on mode: "suggest" nudges once and then
@@ -715,8 +733,17 @@ if [[ "$window_source" == "auto" ]] \
   WINDOW_TOKENS=1000000
 fi
 
-# --- Threshold check ---
+# --- Threshold check: first gate reached wins (issue #119) ---
+# The percentage gate scales with the window; the absolute gate does not. A
+# 1M window at 40% is 400k tokens, far past the point where summary quality
+# has already degraded, so the absolute gate (default 100k) fires first there
+# while a 200k window still hits its 80k percentage gate first. Ties and
+# THRESHOLD_TOKENS=0 keep the percentage rule, so every pinned-window test
+# contract (window 1000 -> gate 400) is byte-for-byte unchanged.
 threshold_tokens=$((WINDOW_TOKENS * THRESHOLD_PCT / 100))
+if (( THRESHOLD_TOKENS > 0 && THRESHOLD_TOKENS < threshold_tokens )); then
+  threshold_tokens="$THRESHOLD_TOKENS"
+fi
 if (( est_tokens < threshold_tokens )); then
   exit 0
 fi

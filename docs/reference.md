@@ -107,8 +107,14 @@ The `Stop` hook does two jobs each assistant turn:
    JSONL byte size into `.ctx_<session_id>` as a fallback.
 
 The `UserPromptSubmit` hook reads those on the next prompt
-and, if usage has crossed ~40% of the configured context window
-(auto-detected as 1,000,000 tokens if the session's recorded model
+and, if usage has crossed the nudge threshold: `HANDOFF_CTX_THRESHOLD_TOKENS`
+(default 100,000 tokens) or `HANDOFF_CTX_THRESHOLD_PCT` (default 40%) of
+the configured context window, whichever is reached first. The absolute
+gate exists because 40% of a 1M window is 400k tokens, long past the
+point where summary quality has degraded (issue #119); on a 200k window
+the 40% gate (80k) still fires first, so nothing changes there. Set
+`HANDOFF_CTX_THRESHOLD_TOKENS=0` to keep the pure percentage rule. The
+window is auto-detected (as 1,000,000 tokens if the session's recorded model
 matches the 1M-model regex — the `[1m]` beta suffix or a 1M-native
 Claude 5 family id, extendable via `HANDOFF_CTX_1M_MODEL_REGEX` —
 else 200,000, falling back to `~/.claude.json` when no model is
