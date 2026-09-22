@@ -16,6 +16,16 @@ No hook-command or permission-entry changes: nothing to re-patch in
 `~/.claude/settings.json`.
 
 ### Fixed
+- **Handoffs over about 10 KB never reached the next session.** Claude
+  Code puts `SessionStart` output into context only up to about 10,000
+  characters. Past that, the model got a 2 KB preview holding only the
+  header and git metadata, so the Notes, the trusted rules and the verify
+  step were silently lost while the hook reported success. Curated
+  handoffs of 11 to 20 KB are common. The loader now keeps its output
+  under `HANDOFF_SS_MAX_BYTES` (default 9000). It puts the Notes ahead of
+  the git snapshot, trims narrative and fallback sections from their ends
+  (never the trusted rules), and when it trims, says so on the first line
+  and names the full file to read. Documented in docs/reference.md.
 - **Context % was about 5x too high on Opus 5 and Sonnet 5.** The
   built-in list of 1M-window models only knew Fable and Mythos, so a
   `claude-opus-5-5` session was measured against a 200,000-token window

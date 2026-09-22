@@ -697,6 +697,16 @@ guard](#cross-session-overwrite-guard): `block` refuses a stale
 cross-session write with exit 3 unless `--takeover` is given; `warn`
 prints the same notice but always proceeds; `off` disables the guard.
 
+**`HANDOFF_SS_MAX_BYTES`**: byte budget for everything the `SessionStart`
+hook prints, default `9000`; `0` turns trimming off. Claude Code puts hook
+output into context only up to about 10,000 characters. Past that, the
+model gets a 2 KB preview of the head and nothing else. To stay under the
+limit, the loader puts the Notes ahead of the git snapshot and trims the
+narrative and fallback sections from their ends, never the trusted rules.
+When it trims, it says so on the first line and names the full file to
+read. The default sits just under the largest load measured arriving
+inline (9,017 bytes); lower it if you ever see a preview anyway.
+
 ### Test/debug overrides
 
 ```bash
