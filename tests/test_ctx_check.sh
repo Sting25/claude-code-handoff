@@ -258,6 +258,23 @@ check "1M-native model file -> 1000000-token window" yes "$(has "$out" "1000000-
 check "1M-native model file -> pct against 1M (15%)" yes "$(has "$out" "15%")"
 rm -rf "$repo"
 
+# Claude 5+ Opus/Sonnet ids are 1M-native too. The default regex only knew
+# fable/mythos, so an opus-5-5 desktop session (no statusline cache) reported
+# 47% at 94,637 tokens: 5x over. Same below-200k shape as above so the
+# ratchet cannot mask a miss. Claude 4 ids without [1m] must stay 200k.
+for m in claude-opus-5-5 claude-sonnet-5 claude-opus-6; do
+  repo="$(mk_repo)"; seed "$repo" C5 4000 150000; seed_model "$repo" C5 "$m"
+  out="$(run_cc_auto "$repo" C5 HANDOFF_CTX_THRESHOLD_PCT=10)"
+  check "$m -> 1000000-token window" yes "$(has "$out" "1000000-token window")"
+  rm -rf "$repo"
+done
+for m in claude-opus-4-8 claude-sonnet-4-5-20250929; do
+  repo="$(mk_repo)"; seed "$repo" C4 4000 100000; seed_model "$repo" C4 "$m"
+  out="$(run_cc_auto "$repo" C4)"
+  check "$m -> 200000-token window" yes "$(has "$out" "200000-token window")"
+  rm -rf "$repo"
+done
+
 # Non-1M model recorded -> 200k window (explicit non-1M signal respected).
 repo="$(mk_repo)"; seed "$repo" M200K 4000 100000
 seed_model "$repo" M200K claude-haiku-4-5-20251001

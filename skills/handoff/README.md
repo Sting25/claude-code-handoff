@@ -323,12 +323,13 @@ export HANDOFF_SS_DISABLE_RECOVER=1
 export HANDOFF_CTX_WINDOW_TOKENS=200000
 
 # POSIX ERE matching model ids known to run a 1M-token context window.
-# Default: '\[1m\]|claude-(fable|mythos)-' — the `[1m]` beta suffix,
-# plus Claude 5 family ids which are 1M-native without any suffix.
-# Extend when new 1M models ship. (A measured token count above 200k
+# Default: '\[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])'.
+# That is the `[1m]` beta suffix, plus Claude 5 and later ids, which are
+# 1M-native without any suffix. Claude 4 ids without `[1m]` stay 200k.
+# Extend when other new 1M models ship. (A measured token count above 200k
 # also ratchets the window to 1M regardless, since a 200k window
 # provably can't hold it.)
-export HANDOFF_CTX_1M_MODEL_REGEX='\[1m\]|claude-(fable|mythos)-'
+export HANDOFF_CTX_1M_MODEL_REGEX='\[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])'
 
 # Percent of the window at which the reminder fires.
 # Default: 40 — fire at 40% used (lowered from 50 in 0.8.4). Drop to 30

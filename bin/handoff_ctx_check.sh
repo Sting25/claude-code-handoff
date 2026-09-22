@@ -55,13 +55,18 @@
 #                               same regex.
 #   HANDOFF_CTX_1M_MODEL_REGEX  POSIX ERE matching model ids known to run a
 #                               1M-token context window. Default:
-#                                 \[1m\]|claude-(fable|mythos)-
+#                                 \[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])
 #                               i.e. the `[1m]` beta suffix, plus Claude 5
 #                               family ids which are 1M-native WITHOUT any
 #                               suffix (the pre-regex detection assumed
 #                               [1m]-or-200k and over-reported usage 5x on
-#                               those models). Extend it when new 1M models
-#                               ship.
+#                               those models). Opus/Sonnet match from major
+#                               version 5 up, so a new release does not
+#                               silently fall back to 200k: the fable-only
+#                               list did exactly that for claude-opus-5-5 in
+#                               the desktop app, where no statusline cache
+#                               exists to supply the real window. Claude 4
+#                               ids without [1m] stay 200k.
 #   HANDOFF_CTX_THRESHOLD_PCT   percent of window that triggers (default: 40).
 #                               Lower (e.g. 30) is recommended for projects
 #                               that opt into REMINDER_MODE=act below — the
@@ -606,7 +611,7 @@ fi
 # The regex is a POSIX ERE, used both with bash `=~` and jq `test()`; the
 # bash-escaped default passes through --arg with single backslashes, which is
 # exactly the ERE jq expects. See the header for what the default matches.
-ONE_M_MODEL_RE="${HANDOFF_CTX_1M_MODEL_REGEX:-\[1m\]|claude-(fable|mythos)-}"
+ONE_M_MODEL_RE="${HANDOFF_CTX_1M_MODEL_REGEX:-\[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])}"
 window_tokens="${HANDOFF_CTX_WINDOW_TOKENS:-}"
 window_source="env"
 # A non-positive-integer override (0, negative, or garbage) would make the

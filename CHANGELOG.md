@@ -12,7 +12,18 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Fixed
+- **Context % was about 5x too high on Opus 5 and Sonnet 5.** The
+  built-in list of 1M-window models only knew Fable and Mythos, so a
+  `claude-opus-5-5` session was measured against a 200,000-token window
+  and reported 47% at 94,637 tokens (really about 9.5% of 1M). This shows
+  up in the desktop app, which does not run the status line that would
+  otherwise supply the real window. The default
+  `HANDOFF_CTX_1M_MODEL_REGEX` now also matches Opus and Sonnet from
+  version 5 up; Claude 4 ids without `[1m]` still count as 200k.
 
 ## [0.18.3] - 2026-09-10
 
