@@ -24,6 +24,12 @@ No hook-command or permission-entry changes: nothing to re-patch in
   otherwise supply the real window. The default
   `HANDOFF_CTX_1M_MODEL_REGEX` now also matches Opus and Sonnet from
   version 5 up; Claude 4 ids without `[1m]` still count as 200k.
+- **The context reminder now reports Claude Code's own percentage.** When
+  the status line has cached `context_window.used_percentage`, that exact
+  figure is reported instead of the hook's own tokens / window math. When
+  it is not available and the window was guessed from the model id (the
+  desktop app, which does not run the status line), the figure is
+  labelled "(estimated)" and the reminder names the model it came from.
 
 ## [0.18.3] - 2026-09-10
 

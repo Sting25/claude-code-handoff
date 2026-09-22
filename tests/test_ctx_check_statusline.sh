@@ -123,4 +123,51 @@ check "sl window not ratcheted -> 50%"           yes "$(has "$out" "50%")"
 check "sl window not ratcheted -> no 1M"         no  "$(has "$out" "1000000-token window")"
 rm -rf "$repo"
 
+# --- Claude Code's own used_percentage is what gets reported -----------------
+# sl reports window=1000, tokens=600, pct=73. Our math would say 60%; CC's
+# figure is ground truth, so the reminder must say 73% (deliberately
+# different numbers, so the assertion can tell the two sources apart).
+repo="$(mk_repo)"; seed "$repo" CCPCT 4000 100
+seed_sl "$repo" CCPCT "window=1000" "tokens=600" "pct=73.4"
+out="$(run_cc_auto "$repo" CCPCT)"
+check "sl pct reported -> 73%"          yes "$(has "$out" "~73% of a 1000-token window")"
+check "sl pct reported -> not our 60%"  no  "$(has "$out" "60%")"
+check "sl pct reported -> no estimate"  no  "$(has "$out" "estimated")"
+rm -rf "$repo"
+
+# Env pin beats CC's pct: the user chose a different budget, so report the
+# pinned-window math (600/1000 = 60%), not CC's 73.
+repo="$(mk_repo)"; seed "$repo" PINPCT 4000 100
+seed_sl "$repo" PINPCT "window=500000" "tokens=600" "pct=73"
+out="$(run_cc "$repo" PINPCT)"
+check "env pin -> computed 60%"         yes "$(has "$out" "~60% of a 1000-token window")"
+check "env pin -> CC pct not used"      no  "$(has "$out" "73%")"
+rm -rf "$repo"
+
+# A stale sl cache's pct is dropped with its tokens (same payload snapshot).
+repo="$(mk_repo)"; seed "$repo" STPCT 4000 600
+seed_sl "$repo" STPCT "window=1000" "tokens=600" "pct=73"
+must touch -t 202001010000 "$repo/.claude/handoff_backups/.ctx_sl_STPCT"
+must touch "$repo/.claude/handoff_backups/.ctx_tokens_STPCT"
+out="$(run_cc_auto "$repo" STPCT)"
+check "stale sl pct dropped -> 60%"     yes "$(has "$out" "~60% of a 1000-token window")"
+check "stale sl pct dropped -> not 73"  no  "$(has "$out" "73%")"
+rm -rf "$repo"
+
+# --- No CC figure + window guessed from the model id -> labelled estimate ---
+# The desktop-app case: no sl cache, auto window from .ctx_model_. The pct is
+# still reported but must say it is an estimate and name the model it came from.
+repo="$(mk_repo)"; seed "$repo" GUESS 4000 150000
+printf 'claude-opus-5-5\n' > "$repo/.claude/handoff_backups/.ctx_model_GUESS"
+out="$(run_cc_auto "$repo" GUESS HANDOFF_CTX_THRESHOLD_PCT=10)"
+check "guessed window -> labelled estimated" yes "$(has "$out" "~15% (estimated) of a 1000000-token window")"
+check "guessed window -> names the model"    yes "$(has "$out" "inferred from the model id (claude-opus-5-5)")"
+check "guessed window -> flag line labelled" yes "$(has "$out" "15% (estimated) of context used")"
+rm -rf "$repo"
+# An env-pinned window is the user's own number, not a guess: no label.
+repo="$(mk_repo)"; seed "$repo" PINNED 4000 600
+out="$(run_cc "$repo" PINNED)"
+check "env-pinned window -> no estimate label" no "$(has "$out" "estimated")"
+rm -rf "$repo"
+
 finish
