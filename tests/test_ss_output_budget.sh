@@ -28,7 +28,7 @@ mk_doc() {
   local d="$1" snap="$2" extra="${3:-}" i
   mkdir -p "$d/.claude" || return 1
   {
-    echo "# handoff — session handoff (auto-generated)"
+    echo "# handoff: session handoff (auto-generated)"
     echo
     echo "**Generated:** 2026-09-22 12:00 UTC"
     echo
@@ -115,7 +115,7 @@ check "fence -> fences balanced"         0 \
 
 # --- 6. Signed doc: rules are never trimmed and stay in the binding tier ----
 if ! command -v openssl >/dev/null 2>&1; then
-  skip "openssl not installed — cannot build the signed-handoff case"
+  skip "openssl not installed: cannot build the signed-handoff case"
 else
   p6="$(mk_repo)" || exit 1
   cleanup_on_exit "$p6"
