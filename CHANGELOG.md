@@ -20,6 +20,18 @@ No hook-command or permission-entry changes: nothing to re-patch in
 `~/.claude/settings.json`.
 
 ### Fixed
+- **Curated Notes could be hidden, then pruned, after sessions that did
+  not run `/handoff`.** When a session ended without curating, the
+  safety net carried the previous handoff's Rules fences into the new
+  document, and the next such session archived that carried copy. The
+  `SessionStart` fallback then loaded the carried copy (placeholder Notes)
+  as the newest curated snapshot instead of the older snapshot holding the
+  real Notes, and after `HANDOFF_HISTORY_KEEP` more sessions the snapshot
+  with the real Notes was pruned. The fallback now prefers the newest
+  snapshot with curated Notes, pruning keeps both the newest
+  Notes-curated and the newest Rules-curated snapshot, and a carried-only
+  copy is not archived when the next refresh carries the same fences
+  again.
 - **Five low-severity issues found in review.** `SessionStart` output
   trimming could waste most of the byte budget and lose the Notes and git
   snapshot when a single line was far bigger than a section's remaining
