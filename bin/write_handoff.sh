@@ -1328,12 +1328,16 @@ prune_history() {
   # the retention cutoff below: a run of uncurated safety-net rotations
   # (each one just mechanical git state) would otherwise age the one
   # snapshot worth keeping out of history before anything ever reads it.
-  # "Curated" reuses the same Notes-placeholder check write_handoff.sh
-  # already applies everywhere else, so a rotated file counts as curated
-  # here exactly when it did at rotation time.
+  # "Curated" means Notes curated OR Rules curated (same OR the --if-curated
+  # preserve decision and rotate_existing_handoff's delete-vs-archive
+  # decision both use, via handoff_rules_curated): a rules-only curated
+  # snapshot (placeholder Notes, curated Rules fence) is real curated
+  # content too, and used to be indistinguishable here from an ordinary
+  # uncurated safety-net rotation, so it could be pruned like any other
+  # stale file.
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
-    if ! handoff_is_unedited_placeholder "$f"; then
+    if ! handoff_is_unedited_placeholder "$f" || handoff_rules_curated "$f"; then
       newest_curated="$f"
       break
     fi

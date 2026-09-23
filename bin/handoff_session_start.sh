@@ -1079,22 +1079,35 @@ handoff_is_unedited_placeholder() {  # <file> -> exit 0 if unedited placeholder
   ' "$1"
 }
 
+# Mirrors write_handoff.sh's handoff_rules_curated (this script must stay
+# self-contained and cannot source write_handoff.sh's functions): Rules were
+# curated iff the doc HAS a bind region (new-format write) AND the
+# rules-placeholder token is gone. Same literal markers write_handoff.sh
+# uses by default (HANDOFF_BIND_BEGIN / HANDOFF_RULES_PLACEHOLDER_TOKEN).
+handoff_rules_curated() {  # <file> -> exit 0 if the Rules block was curated
+  grep -qF '<!-- HANDOFF_BIND_BEGIN -->' "$1" 2>/dev/null \
+    && ! grep -qF 'HANDOFF_RULES_PLACEHOLDER' "$1" 2>/dev/null
+}
+
 # Newest CURATED history snapshot (#125): same rotation-shape filter and
 # newest-first sort as handoff_newest_history_snapshot above, but walks the
 # list skipping any snapshot whose Notes are still the unedited placeholder
-# (or, for pre-0.5.0 archives, carry the legacy placeholder sentence):
-# a run of uncurated safety-net rotations between two /handoff sessions must
-# not surface one of those placeholder-only files here in place of the last
-# real curated prose. The missing/corrupted auto-rebuild path above keeps
-# using handoff_newest_history_snapshot (newest regardless of curation):
-# that path already labels its output "best-effort, not curated," so newest
-# is the right choice there.
+# (or, for pre-0.5.0 archives, carry the legacy placeholder sentence) AND
+# whose Rules were not curated either (handoff_rules_curated above): a
+# rules-only curated snapshot (placeholder Notes, curated Rules fence) is
+# real curated content too, so a run of uncurated safety-net rotations
+# between two /handoff sessions must not surface a placeholder-only file
+# here while skipping past a rules-only curated one. The missing/corrupted
+# auto-rebuild path above keeps using handoff_newest_history_snapshot
+# (newest regardless of curation): that path already labels its output
+# "best-effort, not curated," so newest is the right choice there.
 handoff_newest_curated_history_snapshot() {  # <history_dir>
   local f
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    if ! handoff_is_unedited_placeholder "$f" \
-       && ! grep -qF "$placeholder_marker_legacy" "$f" 2>/dev/null; then
+    if { ! handoff_is_unedited_placeholder "$f" \
+         && ! grep -qF "$placeholder_marker_legacy" "$f" 2>/dev/null; } \
+       || handoff_rules_curated "$f"; then
       printf '%s\n' "$f"
       return 0
     fi

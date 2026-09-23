@@ -255,6 +255,62 @@ check "9: rules-only stale, unsigned -> fences not carried into current" no \
   "$(has "$(cat "$repo/.claude/handoff_current.md")" "RULESONLYFENCE")"
 rm -rf "$repo"
 
+# History-file body carrying a curated Rules bind region but a still-
+# placeholder Notes block (rules_curated definition: has the bind region AND
+# lacks HANDOFF_RULES_PLACEHOLDER). Used by cases 11 and 12 below to plant
+# rules-only-curated snapshots directly into handoff_history/.
+rules_only_hist_body() {  # <fence_text>
+  printf '# handoff\n\n%s\n%s\n\n- %s\n%s\n\n## Notes from this session\n\n%s\n' \
+    "$BIND_B" "$RULES_H" "$1" "$BIND_E" "$SENTINEL"
+}
+
+# --- 11: prune_history keeps the newest RULES-only-curated snapshot, not --
+#         just the newest NOTES-curated one -------------------------------
+#         Repro (#125 follow-up): a history dir with one rules-only curated
+#         snapshot (placeholder Notes, curated Rules fence) plus 3 newer
+#         fully-uncurated (placeholder Notes, no bind region) snapshots and
+#         HANDOFF_HISTORY_KEEP=2. prune_history's newest_curated scan used
+#         handoff_is_unedited_placeholder (Notes only), so it never
+#         recognized the rules-only snapshot as curated and deleted it along
+#         with the other pruned files. Must survive, mirroring case 7 but for
+#         Rules curation instead of Notes curation. ------------------------
+repo="$(mk_repo_gitignored)"
+mkdir -p "$repo/.claude/handoff_history"
+rules_only_hist_body MARKERRULESKEEP > "$repo/.claude/handoff_history/handoff_2026-01-01_000000.md"
+placeholder_body                     > "$repo/.claude/handoff_history/handoff_2026-01-02_000000.md"
+placeholder_body                     > "$repo/.claude/handoff_history/handoff_2026-01-03_000000.md"
+placeholder_body                     > "$repo/.claude/handoff_history/handoff_2026-01-04_000000.md"
+rc=0
+out="$( cd "$repo" && env HANDOFF_HISTORY_KEEP=2 bash "$WH" --session-id sidPrune11 2>/dev/null )"; rc=$?
+check "11: prune -> exit 0" 0 "$rc"
+check "11: prune -> rules-only curated snapshot survives despite being oldest" yes \
+  "$([[ -f "$repo/.claude/handoff_history/handoff_2026-01-01_000000.md" ]] && echo yes || echo no)"
+check "11: prune -> the 2 newest survive" yes \
+  "$([[ -f "$repo/.claude/handoff_history/handoff_2026-01-03_000000.md" && -f "$repo/.claude/handoff_history/handoff_2026-01-04_000000.md" ]] && echo yes || echo no)"
+check "11: prune -> non-curated middle file pruned" yes \
+  "$([[ ! -f "$repo/.claude/handoff_history/handoff_2026-01-02_000000.md" ]] && echo yes || echo no)"
+check "11: prune -> exactly 3 files kept (2 + rules-curated)" 3 "$(hist_count "$repo")"
+rm -rf "$repo"
+
+# --- 12: SessionStart fallback finds a RULES-only-curated history snapshot -
+#         behind newer fully-uncurated ones, not just a NOTES-curated one --
+#         handoff_newest_curated_history_snapshot walked history using the
+#         same Notes-only placeholder check, so a rules-only curated
+#         snapshot was invisible to the fallback: nothing at all was loaded
+#         even though real curated content (the Rules fence) existed in
+#         history. Mirrors case 6 but for Rules curation. -----------------
+proj="$(mk_repo_gitignored)"
+mkdir -p "$proj/.claude/handoff_history"
+placeholder_body > "$proj/.claude/handoff_current.md"    # current: uncurated placeholder
+rules_only_hist_body MARKERRULESHIST > "$proj/.claude/handoff_history/handoff_2026-02-01_000000.md"
+placeholder_body                     > "$proj/.claude/handoff_history/handoff_2026-02-02_000000.md"
+placeholder_body                     > "$proj/.claude/handoff_history/handoff_2026-02-03_000000.md"
+out="$( cd "$proj" && env CLAUDE_PROJECT_DIR="$proj" bash "$SS" </dev/null 2>/dev/null )"; rc=$?
+check "12: session start -> exit 0" 0 "$rc"
+check "12: session start -> recover banner shown" yes "$(has "$out" "ACTION: RUN /handoff-recover")"
+check "12: session start -> loads the rules-only curated snapshot" yes "$(has "$out" "MARKERRULESHIST")"
+rm -rf "$proj"
+
 # --- 10 (F3): stale refresh carries VERIFIED binding Rules forward ---------
 #        After one non-curating session, the previous session's fences used
 #        to reach later sessions only as untrusted DATA via the history
