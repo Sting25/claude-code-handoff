@@ -897,8 +897,14 @@ if (( IF_CURATED )); then
       # guard. Doc newer than this session's origin (a concurrent session
       # curated it during this session's lifetime) must still be preserved
       # (that's "doc_write_epoch < origin_epoch", not "!=").
+      #
+      # HANDOFF_HISTORY_KEEP=0 disables archiving, so a refresh there would
+      # overwrite the curated doc with no history copy at all. The refresh
+      # must never destroy curated content, so with archiving disabled we
+      # keep the pre-#125 behavior (preserve), matching "retention disabled
+      # means existing content is never touched".
       stale_curated=0
-      if [[ -n "$writer_session_id" ]]; then
+      if [[ -n "$writer_session_id" && "$HISTORY_KEEP" -gt 0 ]]; then
         handoff_parse_writer_marker "$handoff_path"
         if [[ -n "$doc_author_id" && "$doc_author_id" != "$writer_session_id" \
               && -n "$doc_write_epoch" ]]; then

@@ -190,4 +190,22 @@ check "7: prune -> non-curated middle files pruned" yes \
 check "7: prune -> exactly 3 files kept (2 + curated)" 3 "$(hist_count "$repo")"
 rm -rf "$repo"
 
+# --- 8 (F1): HANDOFF_HISTORY_KEEP=0 + stale curated -> preserved ----------
+#        KEEP=0 disables archiving, so a stale refresh would overwrite the
+#        curated doc with zero history copies. The refresh must never
+#        destroy curated content: with archiving disabled the doc is kept
+#        exactly as before #125 (retention disabled means existing content
+#        is never touched). ------------------------------------------------
+repo="$(mk_repo_gitignored)"
+plant_doc "$repo" "$(writer_marker sidB 100)" yes MARKERKEEP0
+plant_origin "$repo" sidA 5000
+before="$(cat "$repo/.claude/handoff_current.md")"
+rc=0
+out="$( cd "$repo" && env HANDOFF_HISTORY_KEEP=0 bash "$WH" --if-curated --session-id sidA 2>/dev/null )"; rc=$?
+check "8: KEEP=0 stale -> exit 0" 0 "$rc"
+check "8: KEEP=0 stale -> stdout is the path" yes "$(has "$out" "handoff_current.md")"
+check "8: KEEP=0 stale -> doc untouched (byte-for-byte)" "$before" "$(cat "$repo/.claude/handoff_current.md")"
+check "8: KEEP=0 stale -> nothing written to history" 0 "$(hist_count "$repo")"
+rm -rf "$repo"
+
 finish
