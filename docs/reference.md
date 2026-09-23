@@ -319,11 +319,14 @@ setting it). So the on-disk layout looks like:
 
 Two consumers read this directory:
 
-- The `SessionStart` hook auto-includes the most recent history entry
-  *if* `handoff_current.md` was an auto-write (no curated Notes from
+- The `SessionStart` hook auto-includes a history entry *if*
+  `handoff_current.md` was an auto-write (no curated Notes from
   `/handoff`) — so an unplanned exit doesn't strand the next session
-  with only mechanical git state. When current already has curated
-  Notes, the hook just notes that history exists.
+  with only mechanical git state. It picks the newest snapshot whose
+  Notes were curated; only when no snapshot has curated Notes does it
+  fall back to the newest one whose `## Rules` fences were curated.
+  When current already has curated Notes, the hook just notes that
+  history exists.
 - `/handoff-more` reads up to N retained snapshots into context on
   demand, so the assistant can see further back than just yesterday.
 
@@ -350,6 +353,13 @@ If you want unlimited retention, set a large `N` — there is no value
 that means "never prune." If you want the tool to stop writing history
 for a one-off run, `0` does that, at the cost of the document it
 replaces.
+
+**Curated snapshots outlive the retention window.** Pruning never
+deletes the newest snapshot with curated Notes, nor the newest snapshot
+with curated `## Rules` fences (often the same file), however many
+uncurated sessions have ended since. A run of sessions that end without
+`/handoff` therefore cannot age the last curated handoff out of
+history.
 
 **Retention only ever deletes files this tool generated.** If you drop
 your own file into `handoff_history/` or `handoff_backups/` — say you
@@ -479,7 +489,13 @@ loader uses (untracked, balanced markers, valid HMAC); an unsigned,
 tampered, planted, or tracked doc carries nothing, so an unverified
 doc's fences can never end up in a signed doc's binding tier. The Notes
 are not carried: they stay in history and load through the fallback as
-data. The pin needs no carrying, since every write re-reads it from
+data. A doc whose only curated content is carried fences (its Notes are
+still the placeholder) is not archived again when the next refresh
+carries the same fences forward, so a string of non-curating sessions
+does not fill history with copies. It is archived like any curated doc
+whenever the incoming write does not carry those exact fences (a
+`/handoff` or manual write, a carry refused by the provenance check, or
+fences edited by hand). The pin needs no carrying, since every write re-reads it from
 `handoff_pinned.md`.
 
 One consequence to know about: the `/handoff` skill *edits* the doc
