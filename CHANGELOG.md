@@ -34,6 +34,26 @@ No hook-command or permission-entry changes: nothing to re-patch in
   cache held a percentage but no window size, showed a bogus "~0%
   (estimated)" instead of the real cached figure; both now report
   accurately.
+- **Five more low-severity issues found in a follow-up review of the fixes
+  above.** The oversized-line placeholder only fired when a line exceeded
+  a section's WHOLE allowance, not merely what was left of it (remaining),
+  so a line that easily fit the whole allowance but not the remainder
+  still sank the rest of the section; it now fires off the remaining
+  allowance, as the paragraph above and this changelog always described.
+  The end-of-section trim note always said "from the end of this section"
+  even when the only thing trimmed was a mid-section placeholder line; it
+  now says so only when bytes were actually cut from the end. An omitted
+  line that opened a ` ``` ` fence did not toggle the loader's internal
+  fence tracking, so a real closing fence later in the same section could
+  make the loader append a second, spurious closing fence; omitted fence
+  lines now toggle the same as printed ones. The context reminder's
+  "widened from the 200k default" wording implied the pre-ratchet window
+  always came from having no model evidence at all, even when it actually
+  came from the session's own recorded model id; it no longer claims
+  "default" for that case. A comment about when the cached
+  `used_percentage` wins said "the window is CC's too", but the code uses
+  it for any non-pinned window, not only a status-line-reported one; the
+  comment now matches.
 
 ## [0.18.4] - 2026-09-22
 

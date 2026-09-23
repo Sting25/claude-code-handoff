@@ -710,12 +710,15 @@ narrative and fallback sections from their ends, never the trusted rules.
 When it trims, it says so on the first line and names the full file to
 read. The default sits just under the largest load measured arriving
 inline (9,017 bytes); lower it if you ever see a preview anyway. A single
-line far bigger than a section's remaining allowance is replaced with a
+line that does not fit what is left of a section's allowance, when at
+least 1 KB of that allowance is still unused, is replaced with a
 one-line placeholder (naming its byte count) rather than dropping every
-line after it, so the rest of that section still comes through. If the
-loader cannot create a temp buffer to trim into (e.g. `TMPDIR` points at a
-missing directory), it says so on the first line and falls back to
-untrimmed output instead of silently disabling trimming.
+line after it, so the rest of that section still comes through; the
+end-of-section note then says whether bytes were actually trimmed off
+the end, or only omitted mid-section like this. If the loader cannot
+create a temp buffer to trim into (e.g. `TMPDIR` points at a missing
+directory), it says so on the first line and falls back to untrimmed
+output instead of silently disabling trimming.
 
 ### Test/debug overrides
 

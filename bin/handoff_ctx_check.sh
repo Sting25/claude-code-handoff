@@ -804,8 +804,10 @@ fi
 
 # --- Compose and emit the system-reminder ---
 # Which percentage to report. Claude Code's own used_percentage is the ground
-# truth, so it wins whenever it is fresh AND the window is CC's too (an env pin
-# means the user chose a different budget, so CC's pct would contradict it).
+# truth, so it wins whenever it is fresh AND the window was not pinned by the
+# user (window_source != "env": both "auto" and "statusline" defer to it). An
+# env pin means the user chose a different budget, so CC's pct would
+# contradict it.
 # Otherwise we compute tokens/window; when that window was merely INFERRED from
 # the model id, the reminder says so. That is the normal case in the desktop
 # app: it does not run the statusLine, the only place Claude Code exposes
@@ -822,7 +824,12 @@ case "${window_detail:-default}" in
   claude_json)
     window_reason="inferred from the model recorded for this project in ~/.claude.json (lastModelUsage), because no model id was recorded for this session" ;;
   ratchet)
-    window_reason="widened from the 200k default because measured usage exceeded 200,000 tokens, which a 200k window cannot fit (a 1M-native model auto-detection did not otherwise recognize)" ;;
+    # Pre-ratchet WINDOW_TOKENS is always 200000 in the auto path (every
+    # non-1M detection step, including the model-id and claude.json steps,
+    # picks that same value) but NOT always because no model id was found:
+    # say "the 200k window auto-detection had picked", never "default" -
+    # the pre-ratchet source may have been the session's own model id.
+    window_reason="widened from the 200k window auto-detection had picked, because measured usage exceeded 200,000 tokens, which a 200k window cannot fit (a 1M-native model auto-detection did not otherwise recognize)" ;;
   *)
     window_reason="a default (no model id was recorded for this session and ~/.claude.json had no usable lastModelUsage)" ;;
 esac

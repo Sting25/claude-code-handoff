@@ -217,6 +217,19 @@ rm -rf "$repo"
 # byte-for-byte (already covered by the "guessed window" case above); no new
 # assertion needed here beyond that existing pass.
 
+# (d) U4: ratchet fired AFTER a session-model-file detection (claude-sonnet-4-5
+# -> 200k, then measured usage of 250000 ratchets to 1M). Before the fix the
+# note claimed "widened from the 200k default" even though the pre-ratchet
+# 200k came from the session's own recorded model id, not from having no
+# evidence at all. The wording must not claim "default" here.
+repo="$(mk_repo)"; seed "$repo" RATCHMODEL 4000 250000
+printf 'claude-sonnet-4-5\n' > "$repo/.claude/handoff_backups/.ctx_model_RATCHMODEL"
+out="$(run_cc_auto "$repo" RATCHMODEL HANDOFF_CTX_THRESHOLD_PCT=10)"
+check "ratchet after model-id -> 1M"                yes "$(has "$out" "1000000-token window")"
+check "ratchet after model-id -> note names widened" yes "$(has "$out" "widened")"
+check "ratchet after model-id -> not mislabeled default" no "$(has "$out" "200k default")"
+rm -rf "$repo"
+
 # (d) Cache has pct= but no window=: the cached pct must still be used (no
 # "~0% (estimated)" and no false claim that used_percentage has not reached
 # the hook, since it plainly has).

@@ -218,4 +218,91 @@ check "mktemp fail -> warning emitted"    yes "$(has "$out" 'could not create a 
 check "mktemp fail -> warning is line 1"  1   "$(line_of "$out" 'could not create a temp buffer')"
 check "mktemp fail -> notes still load"   yes "$(has "$out" NOTE_TAIL)"
 
+# --- 10a. U2 + U3: a mid-region omitted line that opens a ``` fence, with a
+#     real closer and NOTE_TAIL both surviving after it (this region is never
+#     cut at the end). Before the fix: (U2) the trim note always said
+#     "trimmed N of M bytes from the END of this section" even though only a
+#     mid-region line was omitted here, never anything cut from the end; and
+#     (U3) the omitted line's leading ``` never toggled the internal fence
+#     tracker, so the real closer that follows toggled it from 0 -> 1
+#     instead of 1 -> 0, leaving the region's fence-tracking believe a block
+#     was still open at the true end and auto-inserting a second, spurious
+#     closing ``` right before the trim note (two ``` lines in the output
+#     for one real fence, i.e. unbalanced).
+p10a="$(mk_repo)" || exit 1
+cleanup_on_exit "$p10a"
+must mkdir -p "$p10a/.claude"
+{
+  echo "# handoff: session handoff (auto-generated)"
+  echo
+  echo "**Generated:** 2026-09-22 12:00 UTC"
+  echo
+  echo "---"
+  echo
+  echo "## Repo: fixture"
+  echo
+  for ((i = 1; i <= 5; i++)); do
+    echo "SNAP_LINE $i: mechanical git snapshot filler that the loader may trim"
+  done
+  echo
+  echo "## Notes from this session"
+  echo
+  echo "NOTE_HEAD curated prose starts here."
+  must printf '```'
+  must printf '%*s\n' 10000 '' | tr ' ' 'X'
+  echo '```'
+  echo "NOTE_TAIL curated prose ends here."
+} > "$p10a/.claude/handoff_current.md"
+out="$(run_ss "$p10a")"
+check "u2/u3 -> placeholder shown"           yes "$(has "$out" 'byte line omitted')"
+check "u2/u3 -> notes tail survives"         yes "$(has "$out" NOTE_TAIL)"
+check "u2/u3 -> snapshot survives"           yes "$(has "$out" 'SNAP_LINE 5:')"
+check "u2/u3 -> note is not end-cut wording" no  "$(has "$out" 'from the end of this section')"
+check "u2/u3 -> note says from this section" yes "$(has "$out" 'from this section to fit')"
+check "u2/u3 -> fence balanced (no spurious closer)" 1 \
+  "$(printf '%s\n' "$out" | grep -c '^```$')"
+
+# --- 10b. U1: the oversized-line placeholder must fire once a line does not
+#     fit what is left of the region's allowance (remaining), not only once it
+#     exceeds the region's WHOLE allowance (keep[cur]). This fixture spends
+#     most of the allowance on small filler lines FIRST, so by the time the
+#     4 KB fenced line arrives it easily fits inside keep[cur] but no longer
+#     fits remaining. Before the fix the old gate (b > keep[cur]) missed this
+#     case entirely and fell through to the contiguous "cut from here to the
+#     end" path, dropping NOTE_TAIL and most of the snapshot while leaving a
+#     meaningful share of the budget unused.
+p10b="$(mk_repo)" || exit 1
+cleanup_on_exit "$p10b"
+must mkdir -p "$p10b/.claude"
+{
+  echo "# handoff: session handoff (auto-generated)"
+  echo
+  echo "**Generated:** 2026-09-22 12:00 UTC"
+  echo
+  echo "---"
+  echo
+  echo "## Repo: fixture"
+  echo
+  for ((i = 1; i <= 300; i++)); do
+    echo "SNAP_LINE $i: mechanical git snapshot filler that the loader may trim"
+  done
+  echo
+  echo "## Notes from this session"
+  echo
+  echo "NOTE_HEAD curated prose starts here."
+  for ((i = 1; i <= 80; i++)); do
+    must printf '%*s\n' 60 '' | tr ' ' 'F'
+  done
+  must printf '```'
+  must printf '%*s\n' 4000 '' | tr ' ' 'X'
+  echo '```'
+  echo "NOTE_TAIL curated prose ends here."
+} > "$p10b/.claude/handoff_current.md"
+out="$(run_ss "$p10b")"
+check "u1 -> placeholder shown"        yes "$(has "$out" 'byte line omitted')"
+check "u1 -> notes tail survives"      yes "$(has "$out" NOTE_TAIL)"
+check "u1 -> snapshot head survives"   yes "$(has "$out" 'SNAP_LINE 1:')"
+check "u1 -> most of the budget used (not wasted)" yes "$(ge "$(bytes "$out")" 8000)"
+check "u1 -> fence balanced"           1 "$(printf '%s\n' "$out" | grep -c '^```$')"
+
 finish

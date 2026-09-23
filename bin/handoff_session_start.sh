@@ -139,12 +139,20 @@ FNR == 1 {
   cur = 0; m = 0
 }
 {
-  if (isb($0)) { cur = ++m; used = 0; cutb = 0; fence = 0; permacut = 0; next }
+  if (isb($0)) { cur = ++m; used = 0; cutb = 0; endcutb = 0; fence = 0; permacut = 0; next }
   if (ise($0)) {
     # A cut inside a ``` block would leave it open and swallow the note.
     if (cur && cutb > 0 && fence) print "```"
-    if (cur && cutb > 0)
-      printf "\n> _[handoff: trimmed %d of %d bytes from the end of this section to fit the hook-output limit. Full text: `%s`]_\n", cutb, size[cur], path[cur]
+    if (cur && cutb > 0) {
+      # "from the end" is only true when the region was actually cut there
+      # (permacut fired). A region that only lost one or more mid-region
+      # lines to the omitted-line placeholder below was never cut at the
+      # end, so say so plainly instead of the (false) end-cut framing.
+      if (endcutb > 0)
+        printf "\n> _[handoff: trimmed %d of %d bytes from the end of this section to fit the hook-output limit. Full text: `%s`]_\n", cutb, size[cur], path[cur]
+      else
+        printf "\n> _[handoff: trimmed %d of %d bytes from this section to fit the hook-output limit. Full text: `%s`]_\n", cutb, size[cur], path[cur]
+    }
     cur = 0; next
   }
   b = length($0) + 1
@@ -158,28 +166,33 @@ FNR == 1 {
       }
       # Trimming is otherwise contiguous-from-here (permacut below): once a
       # line does not fit, the rest of the region is cut too. That breaks
-      # badly on ONE outlier line far bigger than the whole allowance: it
-      # would drop every line after it even though most of the allowance is
-      # still unused. When this single line alone exceeds the whole region
-      # allowance AND cutting it would still leave most of that allowance
-      # unused, replace just this line with a placeholder (charged against
-      # the allowance, so accounting stays conservative) and keep evaluating
-      # later lines against the same allowance instead of cutting the rest.
-      if (b > keep[cur] && remaining >= keep[cur] * 0.5) {
+      # badly whenever a single line does not fit what is left of the
+      # allowance while a MEANINGFUL share of that allowance (at least
+      # 1 KB) is still unused: cutting from here forward would waste it.
+      # In that case, replace just this line with a placeholder (charged
+      # against the allowance, so accounting stays conservative) and keep
+      # evaluating later lines against the same allowance instead of
+      # cutting the rest. A placeholder line that itself opens/closes a
+      # fenced code block toggles fence parity the same as a printed line
+      # would, so a later real closer does not open a stray code block.
+      if (remaining >= 1024) {
         ph = sprintf("[handoff: one %d-byte line omitted to fit the hook-output limit]", length($0))
         phb = length(ph) + 1
         if (phb <= remaining) {
           print ph
           used += phb
           cutb += b
+          if ($0 ~ /^[ \t]*```/) fence = !fence
           next
         }
       }
       permacut = 1
       cutb += b
+      endcutb += b
       next
     }
     cutb += b
+    endcutb += b
     next
   }
   print
