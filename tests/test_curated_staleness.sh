@@ -765,4 +765,44 @@ else
   rm -rf "$repo"
 fi
 
+# --- 20 (issue #136): the history fallback shows an archived doc's fences --
+#         as reference text without its BIND marker lines. A curates, B ends
+#         without curating, so B's start loads A's snapshot through the
+#         fallback. Then again with that snapshot converted to CRLF (#128).
+# The fallback section of a SessionStart output, up to the recover banner.
+fallback_section() {  # <ss_output>
+  case "$1" in *"$FALLBACK_HDR"*) ;; *) return 0 ;; esac
+  printf '%s\n' "${1#*"$FALLBACK_HDR"}" | sed '/ACTION: RUN \/handoff-recover/,$d'
+}
+marker_lines() {  # stdin -> count of BIND marker lines, trailing CR tolerated
+  tr -d '\r' | grep -cE '^<!-- HANDOFF_BIND_(BEGIN|END) -->$' || true
+}
+if ! command -v openssl >/dev/null 2>&1; then
+  skip "20: openssl not installed, cannot build the signed fixture for the fallback marker checks"
+else
+  repo="$(mk_repo_gitignored)"
+  mk_signed_stale "$repo" "Do NOT merge. FENCE20" "NOTES20 curated by A"
+  uncurated_session "$repo" sidB20
+  a20="$(grep -rl NOTES20 "$repo/.claude/handoff_history" | head -n 1)"
+  check "20: fixture -> A's archived snapshot has BIND marker lines" yes \
+    "$([[ "$(marker_lines <"$a20")" -gt 0 ]] && echo yes || echo no)"
+  out20="$(run_ss_in "$repo")"
+  fb20="$(fallback_section "$out20")"
+  check "20: B start -> fallback loaded" yes "$(has "$out20" "$FALLBACK_HDR")"
+  check "20: fallback -> A's Notes present" yes "$(has "$fb20" NOTES20)"
+  check "20: fallback -> A's fence kept as reference text" yes "$(has "$fb20" FENCE20)"
+  check "20: fallback -> no BIND marker lines" 0 "$(printf '%s\n' "$fb20" | marker_lines)"
+  check "20: fence still binding from the current doc" yes "$(in_binding_tier "$out20" FENCE20)"
+
+  awk '{ printf "%s\r\n", $0 }' "$a20" > "$a20.tmp" && mv "$a20.tmp" "$a20"
+  check "20: CRLF fixture -> marker lines end in CR" yes \
+    "$(grep -q $'^<!-- HANDOFF_BIND_BEGIN -->\r$' "$a20" && echo yes || echo no)"
+  out20c="$(run_ss_in "$repo")"
+  fb20c="$(fallback_section "$out20c")"
+  check "20: CRLF fallback -> A's Notes present" yes "$(has "$fb20c" NOTES20)"
+  check "20: CRLF fallback -> A's fence kept" yes "$(has "$fb20c" FENCE20)"
+  check "20: CRLF fallback -> no BIND marker lines" 0 "$(printf '%s\n' "$fb20c" | marker_lines)"
+  rm -rf "$repo"
+fi
+
 finish

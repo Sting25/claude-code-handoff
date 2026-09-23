@@ -502,7 +502,9 @@ those fences by hand and restamped: the edited fences are carried into
 the new doc, so nothing is lost. The carried copy is archived like any
 curated doc whenever the incoming write does not carry its fences (a
 `/handoff` or manual write, or a carry refused by the provenance check).
-The pin needs no carrying, since every write re-reads it from
+The history fallback shows an archived doc's fences as reference text
+without its BIND marker lines, since nothing in history binds. The pin
+needs no carrying, since every write re-reads it from
 `handoff_pinned.md`.
 
 One consequence to know about: the `/handoff` skill *edits* the doc
