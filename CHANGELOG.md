@@ -12,6 +12,10 @@ are appended).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.18.6] - 2026-09-23
+
 No hook-command or permission-entry changes: nothing to re-patch in
 `~/.claude/settings.json`.
 
