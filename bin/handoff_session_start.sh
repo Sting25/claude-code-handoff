@@ -1078,6 +1078,45 @@ handoff_is_unedited_placeholder() {  # <file> -> exit 0 if unedited placeholder
     END { exit found ? result : 1 }
   ' "$1"
 }
+
+# Mirrors write_handoff.sh's handoff_rules_curated (this script must stay
+# self-contained and cannot source write_handoff.sh's functions): Rules were
+# curated iff the doc HAS a bind region (new-format write) AND the
+# rules-placeholder token is gone. Same literal markers write_handoff.sh
+# uses by default (HANDOFF_BIND_BEGIN / HANDOFF_RULES_PLACEHOLDER_TOKEN).
+handoff_rules_curated() {  # <file> -> exit 0 if the Rules block was curated
+  grep -qF '<!-- HANDOFF_BIND_BEGIN -->' "$1" 2>/dev/null \
+    && ! grep -qF 'HANDOFF_RULES_PLACEHOLDER' "$1" 2>/dev/null
+}
+
+# Newest CURATED history snapshot (#125): same rotation-shape filter and
+# newest-first sort as handoff_newest_history_snapshot above, but walks the
+# list skipping any snapshot whose Notes are still the unedited placeholder
+# (or, for pre-0.5.0 archives, carry the legacy placeholder sentence) AND
+# whose Rules were not curated either (handoff_rules_curated above): a
+# rules-only curated snapshot (placeholder Notes, curated Rules fence) is
+# real curated content too, so a run of uncurated safety-net rotations
+# between two /handoff sessions must not surface a placeholder-only file
+# here while skipping past a rules-only curated one. The missing/corrupted
+# auto-rebuild path above keeps using handoff_newest_history_snapshot
+# (newest regardless of curation): that path already labels its output
+# "best-effort, not curated," so newest is the right choice there.
+handoff_newest_curated_history_snapshot() {  # <history_dir>
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if { ! handoff_is_unedited_placeholder "$f" \
+         && ! grep -qF "$placeholder_marker_legacy" "$f" 2>/dev/null; } \
+       || handoff_rules_curated "$f"; then
+      printf '%s\n' "$f"
+      return 0
+    fi
+  done < <(find "$1" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
+    | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
+    | LC_ALL=C sort -r)
+  return 0
+}
+
 is_placeholder=0
 if handoff_is_unedited_placeholder "$current" \
    || grep -qF "$placeholder_marker_legacy" "$current" 2>/dev/null; then
@@ -1087,10 +1126,12 @@ fi
 prev=""
 if [ "$is_placeholder" = "1" ] \
    && [ "${HANDOFF_SS_DISABLE_FALLBACK:-0}" != "1" ]; then
-  # Same selection the missing/corrupted auto-rebuild above uses (issue #78);
-  # see handoff_newest_history_snapshot's own comment for the LC_ALL=C /
-  # rotation-shape / symlink-exclusion reasoning.
-  prev="$(handoff_newest_history_snapshot "$history_dir")"
+  # Newest CURATED snapshot (#125), not just newest: see
+  # handoff_newest_curated_history_snapshot's own comment above for why this
+  # fallback needs curated content specifically, plus handoff_newest_history_
+  # snapshot's comment for the shared LC_ALL=C / rotation-shape / symlink-
+  # exclusion reasoning both selectors build on.
+  prev="$(handoff_newest_curated_history_snapshot "$history_dir")"
   if [ -n "$prev" ] && [ -f "$prev" ]; then
     echo
     echo "---"

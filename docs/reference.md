@@ -78,8 +78,21 @@ Three slash commands plus one automatic safety net, doing different jobs:
   loss, not as a substitute for `/handoff`. The hook passes
   `--if-curated`, so if you already ran `/handoff` this session (it
   replaced the placeholder block with curated Notes), the safety-net
-  write is a no-op — your curated content stays put rather than being
-  rotated into history. A `/resume` session-switch (which fires
+  write is a no-op: your curated content stays put rather than being
+  rotated into history. That preservation only holds while the
+  curation is current: if the curated doc's `HANDOFF_WRITER` marker
+  names an earlier session whose write predates this session's own
+  start, this session never curated it, so `--if-curated` falls
+  through to a normal write instead, archiving the stale curated doc
+  into `.claude/handoff_history/` (not deleting it) rather than
+  preserving it forever (issue #125). A doc counts as curated here when
+  its Notes OR its `## Rules` fences were curated, and either kind is
+  archived, never deleted. Two limits keep that refresh from ever
+  losing content: with `HANDOFF_HISTORY_KEEP=0` (archiving disabled)
+  the stale curated doc is preserved as before, and when the stale
+  doc's provenance verifies, its `## Rules` fences are carried forward
+  into the fresh doc so they keep binding (see
+  [Trusted rules](#trusted-rules-when-the-fences-actually-bind)). A `/resume` session-switch (which fires
   `SessionEnd` with reason `resume`) is treated as a pause, not an
   ending, and skips the safety-net write; tune via
   `HANDOFF_SESSIONEND_SKIP_REASONS` (set it empty to always write).
@@ -322,6 +335,13 @@ and it is fixed. But `0` also skips **rotation**, so each write
 overwrites `handoff_current.md` in place and the outgoing curated
 handoff is gone with no archived copy (the pre-0.3.0 behavior).
 
+One exception protects curated content: the `SessionEnd`/`PreCompact`
+safety net (`--if-curated`) never overwrites a curated handoff when
+`HANDOFF_HISTORY_KEEP=0`, even one a later session would otherwise
+refresh as stale (issue #125). With nowhere to archive it, the stale
+curated doc is kept as is; only an explicit `/handoff` or manual run
+replaces it.
+
 If you want unlimited retention, set a large `N` — there is no value
 that means "never prune." If you want the tool to stop writing history
 for a one-off run, `0` does that, at the cost of the document it
@@ -442,6 +462,21 @@ hook re-emits it right after compaction (it branches on the hook
 payload's `source` field; older Claude Code versions without the field
 just get the normal full load). Both re-checks verify provenance again
 on every fire.
+
+**Fences survive a session that didn't curate.** When a later session
+ends without `/handoff`, the safety net refreshes the stale curated doc
+(issue #125) and archives it into history, where it would load only as
+reference data through the history fallback. So that refresh carries
+the old doc's `## Rules` fences into the new doc's `## Rules` block,
+behind a one-line `HANDOFF_RULES_CARRIED` comment naming the source,
+and the new doc is signed like any write, so the fences keep binding.
+It does this only when the old doc passes the same provenance check the
+loader uses (untracked, balanced markers, valid HMAC); an unsigned,
+tampered, planted, or tracked doc carries nothing, so an unverified
+doc's fences can never end up in a signed doc's binding tier. The Notes
+are not carried: they stay in history and load through the fallback as
+data. The pin needs no carrying, since every write re-reads it from
+`handoff_pinned.md`.
 
 One consequence to know about: the `/handoff` skill *edits* the doc
 after it's written (that's the curation step), which invalidates the

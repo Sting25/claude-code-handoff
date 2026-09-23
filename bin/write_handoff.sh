@@ -311,6 +311,51 @@ handoff_is_unedited_placeholder() {
   ' "$path"
 }
 
+# ----- HANDOFF_WRITER marker / origin-epoch helpers (issue #63, #125) -------
+# Shared by the cross-session overwrite guard below and the --if-curated
+# staleness check (#125): both need "who wrote this doc, and when did THIS
+# session first show up here" to compare against a doc's write time.
+
+# Parse the trailing HANDOFF_WRITER marker out of <path>, taking the LAST
+# matching line (a restamp or a concurrent write could leave more than one).
+# Sets doc_author_id and doc_write_epoch (both cleared first); either is left
+# empty if the marker is absent or fails charset revalidation: a value that
+# doesn't survive round-tripping through the regex counts as no marker at all,
+# not a partial one.
+handoff_parse_writer_marker() {  # <path>
+  local path="$1" marker_line
+  doc_author_id=""
+  doc_write_epoch=""
+  marker_line="$(LC_ALL=C grep -E '^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=[0-9]+ -->[[:space:]]*$' \
+    "$path" 2>/dev/null | tail -n 1 || true)"
+  doc_author_id="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=([A-Za-z0-9_-]+) t=[0-9]+ -->.*/\1/')"
+  doc_write_epoch="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=([0-9]+) -->.*/\1/')"
+  [[ "$doc_author_id" =~ ^[A-Za-z0-9_-]+$ ]] || doc_author_id=""
+  [[ "$doc_write_epoch" =~ ^[0-9]+$ ]] || doc_write_epoch=""
+  [[ -n "$doc_author_id" && -n "$doc_write_epoch" ]] || { doc_author_id=""; doc_write_epoch=""; }
+}
+
+# Origin epoch for <sid>: when THIS session id was first seen in <backup_dir>
+# (handoff_session_start.sh writes the sidecar create-once). Sidecar content
+# if a plain integer, else its mtime. Sets origin_epoch, left empty (fail
+# open) if <backup_dir> or the sidecar is a symlink, the sidecar is missing,
+# or nothing parses.
+handoff_origin_epoch_for_sid() {  # <sid> <backup_dir>
+  local sid="$1" backup_dir="$2" origin_sidecar origin_raw
+  origin_epoch=""
+  [[ -n "$sid" && ! -L "$backup_dir" ]] || return 0
+  origin_sidecar="$backup_dir/.session_started_${sid}"
+  if [[ -f "$origin_sidecar" && ! -L "$origin_sidecar" ]]; then
+    origin_raw="$(cat "$origin_sidecar" 2>/dev/null || true)"
+    if [[ "$origin_raw" =~ ^[0-9]+$ ]]; then
+      origin_epoch="$origin_raw"
+    else
+      origin_epoch="$(stat -c %Y "$origin_sidecar" 2>/dev/null || stat -f %m "$origin_sidecar" 2>/dev/null || true)"
+      [[ "$origin_epoch" =~ ^[0-9]+$ ]] || origin_epoch=""
+    fi
+  fi
+}
+
 # ----- Config (override via env in your shell rc) -----
 #
 # HANDOFF_INFLIGHT_DIRS — space-separated subdirs to scan for untracked /
@@ -804,6 +849,60 @@ fi
 # clobber the fences. Matched anywhere (a curated file simply won't contain the
 # token; the worst case is a false "not curated" that the Notes check covers).
 HANDOFF_RULES_PLACEHOLDER_TOKEN="HANDOFF_RULES_PLACEHOLDER"
+
+# Rules were curated iff the doc HAS a bind region (new-format write) AND the
+# rules-placeholder token is gone. Requiring the marker avoids a false
+# "curated" on old-format docs (no Rules section) and on raw safety-net
+# writes, which contain neither the marker nor the token: those must still
+# fall through to the Notes-placeholder check. ONE definition, shared by the
+# --if-curated preserve decision below and by rotate_existing_handoff's
+# delete-vs-archive decision: the two used to disagree (rotation looked at
+# Notes only), so a rules-only curated doc that the stale refresh (#125) let
+# through was deleted by rotation with no history copy.
+handoff_rules_curated() {  # <path>
+  grep -qF "$HANDOFF_BIND_BEGIN" "$1" 2>/dev/null \
+    && ! grep -qF "$HANDOFF_RULES_PLACEHOLDER_TOKEN" "$1" 2>/dev/null
+}
+
+# Carry-forward marker for Rules fences copied out of a stale doc (#125): a
+# single-line HTML comment, so handoff_bind_content strips it from the binding
+# output and it never reads as a rule. Stripped from an extracted body before
+# re-emission so repeated carries don't stack copies of it.
+HANDOFF_RULES_CARRIED_PREFIX="<!-- HANDOFF_RULES_CARRIED: "
+
+# Print the body of <path>'s writer Rules region: the lines between the
+# `BIND_BEGIN` + Rules-heading pair and the next `BIND_END`, minus the heading,
+# single-line HTML comments (placeholder / carried marker scaffolding) and
+# leading/trailing blank lines. Only the FIRST such region is taken: a doc that
+# passed provenance was built by this writer (one Rules region) and any later
+# --restamp refused structural changes via the skeleton stamp. Returns awk's
+# status so a failed filter reads as "nothing to carry", never a partial body.
+handoff_extract_rules_body() {  # <path>
+  LC_ALL=C awk \
+    -v begin_m="$HANDOFF_BIND_BEGIN" \
+    -v end_m="$HANDOFF_BIND_END" \
+    -v rules_h="$HANDOFF_RULES_HEADING" '
+    done_ { next }
+    held { held = 0; if ($0 == rules_h) { inside = 1; next } }
+    inside {
+      if ($0 == end_m) { inside = 0; done_ = 1; next }
+      if ($0 ~ /^<!--.*-->[[:space:]]*$/) next
+      if ($0 ~ /^[[:space:]]*$/) { if (n) blanks++; next }
+      while (blanks > 0) { print ""; blanks-- }
+      print; n++
+      next
+    }
+    $0 == begin_m { held = 1 }
+  ' "$1"
+}
+
+# Shared by the staleness check below and the #63 overwrite guard just after it.
+backup_dir="$handoff_dir/handoff_backups"
+# Rules fences carried from a stale, provenance-verified doc into this write
+# (#125); empty = emit the normal Rules placeholder. Set ONLY by the
+# --if-curated stale-refresh path below.
+carried_rules=""
+carried_from=""
 if (( IF_CURATED )); then
   # Reason-aware skip (safety net only — never on curated /handoff or manual
   # runs, which don't pass --if-curated). A reason in the skip list means
@@ -821,21 +920,83 @@ if (( IF_CURATED )); then
     done
   fi
   if [[ -f "$handoff_path" ]]; then
-    # Rules were curated iff the doc HAS a bind region (new-format write) AND
-    # the rules-placeholder token is gone. Requiring the marker avoids a false
-    # "curated" on old-format docs (no Rules section) and on raw safety-net
-    # writes, which contain neither the marker nor the token — those must still
-    # fall through to the Notes-placeholder check and be overwritten.
+    # See handoff_rules_curated above for the definition.
     rules_curated=0
-    if grep -qF "$HANDOFF_BIND_BEGIN" "$handoff_path" 2>/dev/null \
-       && ! grep -qF "$HANDOFF_RULES_PLACEHOLDER_TOKEN" "$handoff_path" 2>/dev/null; then
+    if handoff_rules_curated "$handoff_path"; then
       rules_curated=1
     fi
     if ! handoff_is_unedited_placeholder "$handoff_path" || (( rules_curated )); then
-      # Notes OR Rules were curated (or the file is otherwise non-placeholder).
-      # Preserve it rather than clobber with a fresh mechanical snapshot.
-      echo "$handoff_path"
-      exit 0
+      # Notes OR Rules were curated, but a curated doc can also just be
+      # STALE (issue #125): once any session runs /handoff, every later
+      # session that ends WITHOUT running /handoff hits this branch and,
+      # pre-#125, preserved that same curated doc forever: nothing ever
+      # refreshed it again. Distinguish "still current" from "stale" by
+      # asking whether the doc predates THIS session: if its HANDOFF_WRITER
+      # marker names an earlier session that finished before this one even
+      # started, this session never curated it (there was nothing to
+      # preserve from this session's own work) and it's safe to fall
+      # through to a normal write, which rotates the stale curated doc into
+      # handoff_history/ rather than deleting it.
+      #
+      # All of the following must be known and unambiguous, or we keep
+      # today's behavior (preserve): an unreadable signal must fail open
+      # toward NOT overwriting curated content, same direction as the #63
+      # guard. Doc newer than this session's origin (a concurrent session
+      # curated it during this session's lifetime) must still be preserved
+      # (that's "doc_write_epoch < origin_epoch", not "!=").
+      #
+      # HANDOFF_HISTORY_KEEP=0 disables archiving, so a refresh there would
+      # overwrite the curated doc with no history copy at all. The refresh
+      # must never destroy curated content, so with archiving disabled we
+      # keep the pre-#125 behavior (preserve), matching "retention disabled
+      # means existing content is never touched".
+      stale_curated=0
+      if [[ -n "$writer_session_id" && "$HISTORY_KEEP" -gt 0 ]]; then
+        handoff_parse_writer_marker "$handoff_path"
+        if [[ -n "$doc_author_id" && "$doc_author_id" != "$writer_session_id" \
+              && -n "$doc_write_epoch" ]]; then
+          handoff_origin_epoch_for_sid "$writer_session_id" "$backup_dir"
+          if [[ -n "$origin_epoch" ]] && (( doc_write_epoch < origin_epoch )); then
+            stale_curated=1
+          fi
+        fi
+      fi
+      if (( ! stale_curated )); then
+        # Still current (or staleness couldn't be established): preserve it
+        # rather than clobber with a fresh mechanical snapshot.
+        echo "$handoff_path"
+        exit 0
+      fi
+      # Stale: fall through to the normal write path below, which rotates
+      # this doc into handoff_history/ before writing the fresh snapshot.
+      #
+      # Carry its binding Rules forward. Without this, one non-curating
+      # session demotes the previous session's fences to history, where
+      # they load only as untrusted DATA through the fallback: standing
+      # rules silently stop binding. Carry ONLY when the stale doc passes
+      # the same provenance gate the SessionStart loader uses to grant
+      # binding status (untracked + balanced BIND markers + valid HMAC over
+      # the whole doc, via the provenance lib). Anything less (no lib, no
+      # openssl, no secret, tracked, tampered, planted, trust disabled)
+      # carries nothing: copying an unverified doc's fences into a doc this
+      # run is about to SIGN would launder them into the binding tier. The
+      # Notes are never carried: they stay in history and load via the
+      # fallback as data. Also requires can_sign: an unsigned new doc could
+      # not make them bind anyway.
+      if (( rules_curated )) && can_sign \
+         && type handoff_provenance_ok >/dev/null 2>&1 \
+         && handoff_provenance_ok "$handoff_path" "$repo_root" "$handoff_relpath"; then
+        if carried_rules="$(handoff_extract_rules_body "$handoff_path")"; then
+          # Same marker-shape defang the pin body gets: only the writer may
+          # open or close a bind region, even inside carried content.
+          if [[ -n "$carried_rules" ]] && type handoff_sanitize_markers >/dev/null 2>&1; then
+            carried_rules="$(printf '%s\n' "$carried_rules" | handoff_sanitize_markers)"
+          fi
+          carried_from="sid=${doc_author_id} t=${doc_write_epoch}"
+        else
+          carried_rules=""
+        fi
+      fi
     fi
   fi
 fi
@@ -847,15 +1008,7 @@ case "$overwrite_guard_mode" in block | warn | off) ;; *) overwrite_guard_mode=b
 overwrite_guard_fired=0
 if (( ! IF_CURATED )) && [[ "$overwrite_guard_mode" != off && -n "$writer_session_id" \
       && -f "$handoff_path" ]]; then
-  marker_line="$(LC_ALL=C grep -E '^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=[0-9]+ -->[[:space:]]*$' \
-    "$handoff_path" 2>/dev/null | tail -n 1 || true)"
-  doc_author_id="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=([A-Za-z0-9_-]+) t=[0-9]+ -->.*/\1/')"
-  doc_write_epoch="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=([0-9]+) -->.*/\1/')"
-  # Re-validate charset (a non-matching line leaves sed's input unchanged) —
-  # a value that fails validation counts as an absent marker.
-  [[ "$doc_author_id" =~ ^[A-Za-z0-9_-]+$ ]] || doc_author_id=""
-  [[ "$doc_write_epoch" =~ ^[0-9]+$ ]] || doc_write_epoch=""
-  [[ -n "$doc_author_id" && -n "$doc_write_epoch" ]] || { doc_author_id=""; doc_write_epoch=""; }
+  handoff_parse_writer_marker "$handoff_path"
   # Clock skew: a stamp too far in the future can't be trusted against a
   # local origin timestamp — fail open.
   if [[ -n "$doc_write_epoch" ]]; then
@@ -869,18 +1022,8 @@ if (( ! IF_CURATED )) && [[ "$overwrite_guard_mode" != off && -n "$writer_sessio
   # create-once). Sidecar content if a plain integer, else its mtime, else no
   # origin (fail open, same as a symlinked handoff_backups).
   origin_epoch=""
-  backup_dir="$handoff_dir/handoff_backups"
-  if [[ -n "$doc_author_id" && "$doc_author_id" != "$writer_session_id" && ! -L "$backup_dir" ]]; then
-    origin_sidecar="$backup_dir/.session_started_${writer_session_id}"
-    if [[ -f "$origin_sidecar" && ! -L "$origin_sidecar" ]]; then
-      origin_raw="$(cat "$origin_sidecar" 2>/dev/null || true)"
-      if [[ "$origin_raw" =~ ^[0-9]+$ ]]; then
-        origin_epoch="$origin_raw"
-      else
-        origin_epoch="$(stat -c %Y "$origin_sidecar" 2>/dev/null || stat -f %m "$origin_sidecar" 2>/dev/null || true)"
-        [[ "$origin_epoch" =~ ^[0-9]+$ ]] || origin_epoch=""
-      fi
-    fi
+  if [[ -n "$doc_author_id" && "$doc_author_id" != "$writer_session_id" ]]; then
+    handoff_origin_epoch_for_sid "$writer_session_id" "$backup_dir"
   fi
   if [[ -n "$origin_epoch" ]] && (( doc_write_epoch > origin_epoch )); then
     overwrite_guard_fired=1
@@ -907,7 +1050,7 @@ if (( overwrite_guard_fired )); then
     # rotate_existing_handoff DELETES an outgoing unedited placeholder rather
     # than archiving it (it carries no curated prose to preserve) — the
     # "will be archived" wording below must not claim otherwise for that case.
-    if handoff_is_unedited_placeholder "$handoff_path"; then
+    if handoff_is_unedited_placeholder "$handoff_path" && ! handoff_rules_curated "$handoff_path"; then
       echo "  the fresher $handoff_relpath is an uncurated placeholder (no curated prose) and will be DISCARDED, not archived." >&2
     elif [[ "$HISTORY_KEEP" -gt 0 ]]; then
       to_mtime="$(stat -c %Y "$handoff_path" 2>/dev/null || stat -f %m "$handoff_path" 2>/dev/null || true)"
@@ -1047,8 +1190,13 @@ rotate_existing_handoff() {
   # archiving placeholders also means handoff_session_start's history
   # fallback lands on CURATED files more often. Detection reuses the same
   # position-scoped check as --if-curated, so a curated file that merely
-  # quotes the sentinel is still archived normally.
-  if handoff_is_unedited_placeholder "$handoff_path"; then
+  # quotes the sentinel is still archived normally. A doc whose RULES were
+  # curated is archived even when its Notes are the placeholder (#125): the
+  # fences are curated content too, and the stale-refresh path now lets such
+  # a doc through to this rotation. Same handoff_rules_curated definition the
+  # --if-curated preserve decision uses.
+  if handoff_is_unedited_placeholder "$handoff_path" \
+     && ! handoff_rules_curated "$handoff_path"; then
     rm -f "$handoff_path"
     return 0
   fi
@@ -1172,13 +1320,34 @@ prune_history() {
   # collation (measured on macOS en_US.UTF-8) — an at-the-retention-boundary
   # prune would then delete the newer sibling and keep the older one. Same
   # fix as handoff_session_start.sh's newest-first pick; keep them in sync.
-  local f
-  find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
+  local f sorted newest_curated=""
+  sorted="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
     | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
-    | LC_ALL=C sort -r \
+    | LC_ALL=C sort -r || true)"
+  # Never prune the newest CURATED snapshot (#125), even when it falls past
+  # the retention cutoff below: a run of uncurated safety-net rotations
+  # (each one just mechanical git state) would otherwise age the one
+  # snapshot worth keeping out of history before anything ever reads it.
+  # "Curated" means Notes curated OR Rules curated (same OR the --if-curated
+  # preserve decision and rotate_existing_handoff's delete-vs-archive
+  # decision both use, via handoff_rules_curated): a rules-only curated
+  # snapshot (placeholder Notes, curated Rules fence) is real curated
+  # content too, and used to be indistinguishable here from an ordinary
+  # uncurated safety-net rotation, so it could be pruned like any other
+  # stale file.
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    if ! handoff_is_unedited_placeholder "$f" || handoff_rules_curated "$f"; then
+      newest_curated="$f"
+      break
+    fi
+  done <<<"$sorted"
+  printf '%s\n' "$sorted" \
     | tail -n +$((HISTORY_KEEP + 1)) \
     | while IFS= read -r f; do
-        [[ -n "$f" ]] && rm -f -- "$f"
+        [[ -n "$f" ]] || continue
+        [[ -n "$newest_curated" && "$f" == "$newest_curated" ]] && continue
+        rm -f -- "$f"
       done
   # `grep` exiting 1 (nothing ours to consider) must not fail the pipeline under
   # pipefail — the caller already guards with `|| true`, but be explicit.
@@ -1507,9 +1676,20 @@ EOF
   # loads with binding framing — model-authored Notes below never do, so a
   # stray "next session should..." sentence can't become law — and even
   # marked content binds only when the document's provenance verifies.
+  #
+  # carried_rules (#125) is set only by the --if-curated stale-refresh path,
+  # and only from a doc whose provenance verified; see that block. It is
+  # emitted in place of the placeholder so this freshly signed doc keeps the
+  # fences binding, preceded by a single-line comment naming the source doc
+  # (stripped from the binding output like every HTML comment).
   printf '%s\n' "$HANDOFF_BIND_BEGIN"
   printf '%s\n\n' "$HANDOFF_RULES_HEADING"
-  printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
+  if [[ -n "$carried_rules" ]]; then
+    printf '%s%s -->\n' "$HANDOFF_RULES_CARRIED_PREFIX" "carried forward from the verified handoff $carried_from, whose Notes are in handoff_history/"
+    printf '%s\n' "$carried_rules"
+  else
+    printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
+  fi
   printf '%s\n' "$HANDOFF_BIND_END"
   printf '\n'
   echo '---'
