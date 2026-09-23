@@ -136,11 +136,15 @@ else
   check "signed -> within budget"          yes "$(le "$(bytes "$out")" 9000)"
   check "signed -> narrative was trimmed"  yes "$(has "$out" 'trimmed')"
   check "signed -> notes head survives"    yes "$(has "$out" BIG_NOTE_HEAD)"
-  # Notes must precede the git snapshot (or the snapshot must be gone) so the
-  # trim eats mechanical state first. Guards the verified path's own hoist.
-  repo_ln="$(line_of "$out" '## Repo:')"
-  check "signed -> notes ahead of snapshot" yes \
-    "$([ "$repo_ln" -eq 0 ] || [ "$(line_of "$out" BIG_NOTE_HEAD)" -lt "$repo_ln" ] && echo yes || echo no)"
+  # Issue #131: the current doc's short git-state head (its own "## Repo:"
+  # line, HEAD, Branch, first commits) is now pulled into its own protected
+  # region ahead of Notes on purpose, so it survives trimming; that ONE
+  # "## Repo:" line is expected before Notes. What must still hold is that
+  # the main narrative's copy of the SAME heading was not also kept (no
+  # duplicate git snapshot), i.e. "## Repo:" appears at most once overall.
+  repo_count="$(printf '%s\n' "$out" | grep -c '^## Repo: ')"
+  check "signed -> git snapshot appears at most once (protected head, no duplicate)" yes \
+    "$([ "$repo_count" -le 1 ] && echo yes || echo no)"
   check "signed -> pin intact in binding tier" yes "$(has "$after" PIN_MARKER)"
   check "signed -> verify step in binding tier" yes "$(has "$after" 'Verify state matches reality')"
 fi

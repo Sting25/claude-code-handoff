@@ -12,7 +12,20 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Fixed
+- **A trimmed fallback load could hide the current doc's git state
+  entirely.** When a placeholder current doc (no curated Notes) triggered
+  the `SessionStart` history fallback, the fallback's curated snapshot
+  always outranked the current doc's own region in the output-budget
+  trimmer, so on a tight budget the current doc's whole region, including
+  HEAD, branch, and recent commits, could be trimmed away before the
+  fallback lost a single byte. The loader now pulls a short, capped
+  git-state head (the `## Repo:` line, HEAD, Branch, and up to 5 recent
+  commits) out of the current doc into its own region with the highest
+  trim priority, so it survives even a trimmed fallback load (#131).
 
 ## [0.18.5] - 2026-09-23
 

@@ -758,8 +758,11 @@ output into context only up to about 10,000 characters. Past that, the
 model gets a 2 KB preview of the head and nothing else. To stay under the
 limit, the loader puts the Notes ahead of the git snapshot and trims the
 narrative and fallback sections from their ends, never the trusted rules.
-When it trims, it says so on the first line and names the full file to
-read. The default sits just under the largest load measured arriving
+The current doc's short git-state head (its `## Repo:` line, HEAD, Branch,
+and up to 5 recent commits) is pulled into its own small region and trimmed
+last of everything narrative, so it survives even a trimmed fallback load
+that would otherwise have outranked the rest of the current doc. When it
+trims, it says so on the first line and names the full file to read. The default sits just under the largest load measured arriving
 inline (9,017 bytes); lower it if you ever see a preview anyway. A single
 line that does not fit what is left of a section's allowance, when at
 least 1 KB of that allowance is still unused, is replaced with a
