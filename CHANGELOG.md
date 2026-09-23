@@ -12,7 +12,28 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Fixed
+- **Five low-severity issues found in review.** `SessionStart` output
+  trimming could waste most of the byte budget and lose the Notes and git
+  snapshot when a single line was far bigger than a section's remaining
+  allowance: it now replaces that one line with a placeholder and keeps
+  trimming the rest normally. A CRLF-terminated handoff document was not
+  hoisting its Notes ahead of the git snapshot, so trimming could cut them
+  off. If the loader could not create its temp buffer (for example
+  `TMPDIR` pointing at a missing directory), trimming silently turned off;
+  it now says so on the first line. The context-check hook could report an
+  impossible percentage (over 100%) from a stale status-line cache; values
+  above 100 are now rejected and the hook falls back to its own computed
+  figure. The context reminder's note about how the token window was
+  chosen could misname the source (always claiming "inferred from the
+  model id", even when it actually came from `~/.claude.json`, the
+  >200k-token ratchet, or no evidence at all) and, when the status-line
+  cache held a percentage but no window size, showed a bogus "~0%
+  (estimated)" instead of the real cached figure; both now report
+  accurately.
 
 ## [0.18.4] - 2026-09-22
 
