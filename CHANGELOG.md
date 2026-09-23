@@ -30,8 +30,17 @@ No hook-command or permission-entry changes: nothing to re-patch in
   session never curated it, and the write falls through to a normal
   refresh, archiving the stale doc into `.claude/handoff_history/`
   rather than deleting it. A doc written during this session's own
-  lifetime (concurrent curation) is still preserved untouched.
-  `prune_history()` now also never deletes the newest curated history
+  lifetime (concurrent curation) is still preserved untouched. The
+  refresh never destroys curated content: a doc whose Notes OR Rules
+  fences were curated is archived (rotation used to delete a doc with
+  placeholder Notes even when its fences were curated), and with
+  `HANDOFF_HISTORY_KEEP=0` (archiving disabled) the stale curated doc
+  is preserved as before. When the stale doc's provenance verifies
+  (untracked + valid HMAC, the same check the loader uses to grant
+  binding status), its `## Rules` fences are carried into the fresh,
+  signed doc so standing rules keep binding after a session that didn't
+  run /handoff; an unverified doc carries nothing, and Notes are never
+  carried (they stay in history). `prune_history()` now also never deletes the newest curated history
   snapshot, so a run of uncurated safety-net rotations after a
   stale-refresh can't prune it away, and
   `handoff_session_start.sh`'s placeholder fallback now looks for the
