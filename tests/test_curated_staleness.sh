@@ -124,6 +124,53 @@ check "1: stale refresh -> old curated doc archived to history" yes \
 check "1: stale refresh -> history grew by one" $((before_hist + 1)) "$(hist_count "$repo")"
 rm -rf "$repo"
 
+# --- 1b (issue #128): a CRLF doc that IS an unedited placeholder is still --
+#         recognized as one. handoff_is_unedited_placeholder()'s byte-exact
+#         "==" match against "## Notes from this session" (and against the
+#         sentinel) never fired on a \r-terminated line, so a genuinely
+#         untouched CRLF placeholder read as "curated" and --if-curated
+#         preserved it forever instead of refreshing it. -------------------
+repo="$(mk_repo_gitignored)"
+mkdir -p "$repo/.claude"
+{
+  printf '# handoff\r\n'
+  printf '\r\n'
+  printf 'MARKERCRLFPLACEHOLDER\r\n'
+  printf '\r\n'
+  printf '## Notes from this session\r\n'
+  printf '\r\n'
+  printf '%s\r\n' "$SENTINEL"
+} > "$repo/.claude/handoff_current.md"
+rc=0
+out="$( cd "$repo" && bash "$WH" --if-curated --session-id sidCRLF1b 2>/dev/null )"; rc=$?
+check "1b: CRLF placeholder -> exit 0" 0 "$rc"
+check "1b: CRLF placeholder -> refreshed, not preserved" no \
+  "$(has "$(cat "$repo/.claude/handoff_current.md")" "MARKERCRLFPLACEHOLDER")"
+check "1b: CRLF placeholder -> fresh placeholder written" yes \
+  "$(has "$(cat "$repo/.claude/handoff_current.md")" "$SENTINEL")"
+rm -rf "$repo"
+
+# --- 1c (issue #128): a CRLF doc with genuinely CURATED Notes is still -----
+#         recognized as curated (companion to 1b, proves the fix does not
+#         overcorrect into treating every CRLF doc as a placeholder). ------
+repo="$(mk_repo_gitignored)"
+mkdir -p "$repo/.claude"
+{
+  printf '# handoff\r\n'
+  printf '\r\n'
+  printf 'MARKERCRLFCURATED\r\n'
+  printf '\r\n'
+  printf '## Notes from this session\r\n'
+  printf '\r\n'
+  printf 'curated prose, not the placeholder\r\n'
+} > "$repo/.claude/handoff_current.md"
+before="$(cat "$repo/.claude/handoff_current.md")"
+rc=0
+out="$( cd "$repo" && bash "$WH" --if-curated --session-id sidCRLF1c 2>/dev/null )"; rc=$?
+check "1c: CRLF curated -> exit 0" 0 "$rc"
+check "1c: CRLF curated -> doc untouched (byte-for-byte)" "$before" "$(cat "$repo/.claude/handoff_current.md")"
+rm -rf "$repo"
+
 # --- 2: concurrent (doc t > this session's origin) preserved byte-for-byte -
 #        a session that curated DURING this session's lifetime must never
 #        be clobbered by this session's own safety-net write. --------------
@@ -576,5 +623,69 @@ check "17: hand-curated rules-only -> fence carried" yes "$(has "$(cat "$doc17")
 check "17: hand-curated rules-only -> original archived" yes \
   "$(grep -rlq 'FENCE17' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
 rm -rf "$repo"
+
+# --- 18 (issue #132): the carried-from label stays accurate across a hop --
+#         where a session edits the fences by hand (Edit + --restamp,
+#         without removing the existing HANDOFF_RULES_CARRIED comment) ----
+#         instead of carrying them forward through --if-curated. -----------
+#         A curates fences (sidA132, real write+edit+restamp). B refreshes
+#         and carries (--if-curated as sidB132): current now says "carried
+#         forward from ... sid=sidA132 ..." and holds A's fence text. C then
+#         hand-edits the fence body in place (leaving the existing
+#         HANDOFF_RULES_CARRIED comment untouched) and restamps as sidC132:
+#         this is "the normal curated write" pattern the skill documents
+#         (edit inside the writer's Rules region, then --restamp to sign).
+#         D refreshes and carries (--if-curated as sidD132): the label in
+#         the resulting doc must name C (the session whose doc was actually
+#         carried, the immediate source), not A (the original curator) or
+#         B (the stale intermediate session), and must appear exactly once.
+#         Root cause: --restamp never updated the HANDOFF_WRITER marker, so
+#         after C's hand-edit+restamp the doc still credited B's write; the
+#         next --if-curated carry read that stale sid off the doc and
+#         mislabeled the comment with a session that never touched the
+#         content actually being carried. ---------------------------------
+if ! command -v openssl >/dev/null 2>&1; then
+  skip "18: openssl not installed, cannot build the signed-handoff controls for the carried-label chain"
+else
+  repo="$(mk_repo_gitignored)"
+  doc18="$repo/.claude/handoff_current.md"
+  # A: real write, curate the Rules fence and the Notes, restamp.
+  ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --session-id sidA132 >/dev/null 2>&1 )
+  sub_line "$doc18" 's/<!-- HANDOFF_RULES_PLACEHOLDER.*-->/- Do NOT deploy Friday. FENCE_A132/'
+  sub_line "$doc18" 's/^<!-- HANDOFF_PLACEHOLDER: .*-->$/NOTES_A132 curated by A/'
+  ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --restamp >/dev/null 2>&1 )
+
+  # B: uncurated session, --if-curated stale refresh carries A's fence.
+  tA="$(sed -nE 's/^<!-- HANDOFF_WRITER: sid=sidA132 t=([0-9]+) -->$/\1/p' "$doc18" | tail -n 1)"
+  plant_origin "$repo" sidB132 "$(( ${tA:-0} + 1000 ))"
+  ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --if-curated --session-id sidB132 >/dev/null 2>&1 )
+  check "18: B refresh -> fence carried from A" yes "$(has "$(cat "$doc18")" FENCE_A132)"
+  check "18: B refresh -> label names A" yes "$(has "$(cat "$doc18")" "sid=sidA132")"
+
+  # C: hand-edits the fence body ONLY (the sanctioned edit zone), leaving the
+  # existing HANDOFF_RULES_CARRIED comment line untouched, then restamps
+  # under its own session id, the "normal curated write and restamp"
+  # pattern: an Edit call followed by `write_handoff.sh --restamp`.
+  sub_line "$doc18" 's/FENCE_A132/FENCE_C132_EDITED/'
+  check "18: C edit -> stale HANDOFF_RULES_CARRIED comment still present pre-restamp" yes \
+    "$(has "$(cat "$doc18")" "HANDOFF_RULES_CARRIED: carried forward from the verified handoff sid=sidA132")"
+  ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --restamp --session-id sidC132 >/dev/null 2>&1 )
+  check "18: C restamp -> doc now credited to sidC132" yes "$(has "$(cat "$doc18")" "HANDOFF_WRITER: sid=sidC132")"
+
+  # D: uncurated session, --if-curated stale refresh carries C's edited fence.
+  tC="$(sed -nE 's/^<!-- HANDOFF_WRITER: sid=sidC132 t=([0-9]+) -->$/\1/p' "$doc18" | tail -n 1)"
+  plant_origin "$repo" sidD132 "$(( ${tC:-0} + 1000 ))"
+  ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --if-curated --session-id sidD132 >/dev/null 2>&1 )
+  cur18="$(cat "$doc18")"
+  check "18: D refresh -> carries C's edited fence body" yes "$(has "$cur18" FENCE_C132_EDITED)"
+  check "18: D refresh -> label names C (the immediate source)" yes "$(has "$cur18" "sid=sidC132")"
+  check "18: D refresh -> label does not name the stale intermediate B" no "$(has "$cur18" "sid=sidB132")"
+  check "18: D refresh -> label does not name the original curator A" no "$(has "$cur18" "sid=sidA132")"
+  check "18: D refresh -> exactly one carried-from label" 1 \
+    "$(grep -c '^<!-- HANDOFF_RULES_CARRIED: ' "$doc18" || true)"
+  out18="$(run_ss_in "$repo")"
+  check "18: D start -> fence still verifies as binding" yes "$(in_binding_tier "$out18" FENCE_C132_EDITED)"
+  rm -rf "$repo"
+fi
 
 finish

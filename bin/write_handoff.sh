@@ -302,9 +302,16 @@ handoff_is_unedited_placeholder() {
   # in the file; the sentinel comparison is byte-exact ASCII, so C is equivalent.
   LC_ALL=C awk -v sentinel="$HANDOFF_PLACEHOLDER_SENTINEL" '
     # Skip everything until the Notes header (the snapshot lives above it).
-    !seen { if ($0 == "## Notes from this session") seen = 1; next }
+    # Optional trailing \r: same CRLF tolerance as hoist_notes() in
+    # bin/handoff_session_start.sh (issue #128) so a Windows-authored or
+    # round-tripped CRLF doc is not misread as curated.
+    !seen { if ($0 ~ /^## Notes from this session\r?$/) seen = 1; next }
     /^[[:space:]]*$/ { next }                     # skip blank lines after header
-    { result = ($0 == sentinel) ? 0 : 1; found = 1; exit }  # first content line decides
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      result = (line == sentinel) ? 0 : 1; found = 1; exit  # first content line decides
+    }
     # exit jumps here; END owns the final status so the rule-level exit code
     # is not clobbered. No content line (header-only or no header) => not placeholder.
     END { exit found ? result : 1 }
@@ -798,6 +805,35 @@ if (( RESTAMP )); then
   fi
   rm -f "$restamp_src"; restamp_src=""
   chmod 600 "$restamp_tmp" 2>/dev/null || true
+  # Refresh the HANDOFF_WRITER marker to this restamping session (issue #132):
+  # a restamp is how a session curates fences in place (edit the Rules body,
+  # then --restamp to sign), and until now that edit never updated WRITER, so
+  # the doc kept crediting whichever earlier session did its last FULL write.
+  # A later --if-curated carry then read that stale sid off the doc and
+  # mislabeled its "carried forward from" comment with a session that didn't
+  # actually author the content being carried. Rewriting the marker in place
+  # (same line, same position; added only if a session id is known and a
+  # marker already exists, never newly inserted) keeps doc_author_id an
+  # accurate "who last touched this doc" signal for that carry logic, with no
+  # effect on the HMAC/skeleton mechanics themselves: both are recomputed
+  # below over whatever bytes are in restamp_tmp at that point, same as any
+  # other restamp edit.
+  if [[ -n "$writer_session_id" ]] \
+     && LC_ALL=C grep -qE '^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=[0-9]+ -->[[:space:]]*$' "$restamp_tmp"; then
+    restamp_writer_epoch="$(date +%s)"
+    if LC_ALL=C awk -v sid="$writer_session_id" -v t="$restamp_writer_epoch" '
+        /^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=[0-9]+ -->[[:space:]]*$/ {
+          print "<!-- HANDOFF_WRITER: sid=" sid " t=" t " -->"
+          next
+        }
+        { print }
+      ' "$restamp_tmp" > "$restamp_tmp.wr" 2>/dev/null; then
+      mv -f "$restamp_tmp.wr" "$restamp_tmp"
+      chmod 600 "$restamp_tmp" 2>/dev/null || true
+    else
+      rm -f "$restamp_tmp.wr" 2>/dev/null || true
+    fi
+  fi
   restamp_signed=0
   # Re-emit the skeleton stamp (structure verified intact above, so this equals
   # the recorded one) BEFORE the main HMAC, which then covers it — the same
@@ -1517,7 +1553,11 @@ handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
   printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n' "$repo_root" "$in_git"
   # Writer marker (issue #63), read by the guard above on the NEXT write.
   # Right after HANDOFF_ROOT so it sits in the verbatim preamble both HMACs
-  # cover, and --restamp (never regenerates the preamble) leaves it intact.
+  # cover. --restamp never regenerates the preamble, but since #132 it does
+  # rewrite this one line to the restamping session (when a session id is
+  # known and a marker exists), so the doc is credited to whoever last
+  # curated it. Consequence for the guard: a doc restamped by another
+  # session counts as that session's write.
   # Absent when no session id resolved -> the guard is inert on this doc.
   if [[ -n "$writer_session_id" ]]; then
     printf '<!-- HANDOFF_WRITER: sid=%s t=%s -->\n' "$writer_session_id" "$write_epoch"
