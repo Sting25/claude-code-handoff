@@ -208,4 +208,36 @@ check "8: KEEP=0 stale -> doc untouched (byte-for-byte)" "$before" "$(cat "$repo
 check "8: KEEP=0 stale -> nothing written to history" 0 "$(hist_count "$repo")"
 rm -rf "$repo"
 
+# --- 9 (F2): Rules curated, Notes still the placeholder, stale -> archived -
+#        rotate_existing_handoff used to delete any doc whose NOTES were the
+#        placeholder, so a rules-only curated doc reached by the stale
+#        refresh was rm'd: the fences were lost with no history copy. -----
+BIND_B='<!-- HANDOFF_BIND_BEGIN -->'
+BIND_E='<!-- HANDOFF_BIND_END -->'
+RULES_H='## Rules (fences — carried into the next session)'
+plant_rules_only() {  # <repo> <marker_line> <fence_text>
+  mkdir -p "$1/.claude"
+  {
+    printf '# handoff\n\n%s\n\n' "$2"
+    printf '%s\n%s\n\n- %s\n%s\n\n' "$BIND_B" "$RULES_H" "$3" "$BIND_E"
+    printf '## Notes from this session\n\n%s\n' "$SENTINEL"
+  } > "$1/.claude/handoff_current.md"
+}
+repo="$(mk_repo_gitignored)"
+plant_rules_only "$repo" "$(writer_marker sidB 100)" "Do NOT ship Friday. RULESONLYFENCE"
+plant_origin "$repo" sidA 5000
+rc=0
+out="$( cd "$repo" && bash "$WH" --if-curated --session-id sidA 2>/dev/null )"; rc=$?
+check "9: rules-only stale -> exit 0" 0 "$rc"
+check "9: rules-only stale -> refreshed (fresh Notes placeholder, new author)" yes \
+  "$(has "$(cat "$repo/.claude/handoff_current.md")" "sid=sidA")"
+check "9: rules-only stale -> archived to history, not deleted" yes \
+  "$(grep -rq 'RULESONLYFENCE' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
+check "9: rules-only stale -> history grew by one" 1 "$(hist_count "$repo")"
+# Unsigned planted doc: its fences must NOT be carried into the new doc (F3's
+# provenance gate), so the only copy is the history one asserted above.
+check "9: rules-only stale, unsigned -> fences not carried into current" no \
+  "$(has "$(cat "$repo/.claude/handoff_current.md")" "RULESONLYFENCE")"
+rm -rf "$repo"
+
 finish

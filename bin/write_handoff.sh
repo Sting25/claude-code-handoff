@@ -849,6 +849,21 @@ fi
 # clobber the fences. Matched anywhere (a curated file simply won't contain the
 # token; the worst case is a false "not curated" that the Notes check covers).
 HANDOFF_RULES_PLACEHOLDER_TOKEN="HANDOFF_RULES_PLACEHOLDER"
+
+# Rules were curated iff the doc HAS a bind region (new-format write) AND the
+# rules-placeholder token is gone. Requiring the marker avoids a false
+# "curated" on old-format docs (no Rules section) and on raw safety-net
+# writes, which contain neither the marker nor the token: those must still
+# fall through to the Notes-placeholder check. ONE definition, shared by the
+# --if-curated preserve decision below and by rotate_existing_handoff's
+# delete-vs-archive decision: the two used to disagree (rotation looked at
+# Notes only), so a rules-only curated doc that the stale refresh (#125) let
+# through was deleted by rotation with no history copy.
+handoff_rules_curated() {  # <path>
+  grep -qF "$HANDOFF_BIND_BEGIN" "$1" 2>/dev/null \
+    && ! grep -qF "$HANDOFF_RULES_PLACEHOLDER_TOKEN" "$1" 2>/dev/null
+}
+
 # Shared by the staleness check below and the #63 overwrite guard just after it.
 backup_dir="$handoff_dir/handoff_backups"
 if (( IF_CURATED )); then
@@ -868,14 +883,9 @@ if (( IF_CURATED )); then
     done
   fi
   if [[ -f "$handoff_path" ]]; then
-    # Rules were curated iff the doc HAS a bind region (new-format write) AND
-    # the rules-placeholder token is gone. Requiring the marker avoids a false
-    # "curated" on old-format docs (no Rules section) and on raw safety-net
-    # writes, which contain neither the marker nor the token — those must still
-    # fall through to the Notes-placeholder check and be overwritten.
+    # See handoff_rules_curated above for the definition.
     rules_curated=0
-    if grep -qF "$HANDOFF_BIND_BEGIN" "$handoff_path" 2>/dev/null \
-       && ! grep -qF "$HANDOFF_RULES_PLACEHOLDER_TOKEN" "$handoff_path" 2>/dev/null; then
+    if handoff_rules_curated "$handoff_path"; then
       rules_curated=1
     fi
     if ! handoff_is_unedited_placeholder "$handoff_path" || (( rules_curated )); then
@@ -975,7 +985,7 @@ if (( overwrite_guard_fired )); then
     # rotate_existing_handoff DELETES an outgoing unedited placeholder rather
     # than archiving it (it carries no curated prose to preserve) — the
     # "will be archived" wording below must not claim otherwise for that case.
-    if handoff_is_unedited_placeholder "$handoff_path"; then
+    if handoff_is_unedited_placeholder "$handoff_path" && ! handoff_rules_curated "$handoff_path"; then
       echo "  the fresher $handoff_relpath is an uncurated placeholder (no curated prose) and will be DISCARDED, not archived." >&2
     elif [[ "$HISTORY_KEEP" -gt 0 ]]; then
       to_mtime="$(stat -c %Y "$handoff_path" 2>/dev/null || stat -f %m "$handoff_path" 2>/dev/null || true)"
@@ -1115,8 +1125,13 @@ rotate_existing_handoff() {
   # archiving placeholders also means handoff_session_start's history
   # fallback lands on CURATED files more often. Detection reuses the same
   # position-scoped check as --if-curated, so a curated file that merely
-  # quotes the sentinel is still archived normally.
-  if handoff_is_unedited_placeholder "$handoff_path"; then
+  # quotes the sentinel is still archived normally. A doc whose RULES were
+  # curated is archived even when its Notes are the placeholder (#125): the
+  # fences are curated content too, and the stale-refresh path now lets such
+  # a doc through to this rotation. Same handoff_rules_curated definition the
+  # --if-curated preserve decision uses.
+  if handoff_is_unedited_placeholder "$handoff_path" \
+     && ! handoff_rules_curated "$handoff_path"; then
     rm -f "$handoff_path"
     return 0
   fi
