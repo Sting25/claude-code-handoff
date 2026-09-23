@@ -145,4 +145,164 @@ else
   check "signed -> verify step in binding tier" yes "$(has "$after" 'Verify state matches reality')"
 fi
 
+ge() { [ "$1" -ge "$2" ] && echo yes || echo no; }
+
+# --- 7. One outlier line far bigger than the remaining allowance must not ---
+#     sink the whole trimmed region (review finding F1). Before the fix, the
+#     contiguous "cut from here to the end" logic treated a single 20 KB line
+#     inside Notes the same as a genuine overrun: it dropped every line after
+#     it too, even though most of the region's allowance was still unused
+#     (measured: 871 bytes of output, ~8 KB of the 9000-byte budget unused,
+#     NOTE_TAIL and the git snapshot both gone).
+p7="$(mk_repo)" || exit 1
+cleanup_on_exit "$p7"
+bigline="$p7/bigline.txt"
+must printf '%*s\n' 20000 '' > "$bigline"
+must sed -i.bak 's/ /X/g' "$bigline" && rm -f "$bigline.bak"
+# A large snapshot too, so there is real content available to fill the
+# allowance the outlier line would otherwise have wasted: if the fix regresses
+# to the old contiguous cut, that content (and NOTE_TAIL) disappears again.
+must mk_doc "$p7" 300 "$bigline"
+out="$(run_ss "$p7")"
+check "big line -> within budget"          yes "$(le "$(bytes "$out")" 9000)"
+check "big line -> notes tail survives"    yes "$(has "$out" NOTE_TAIL)"
+check "big line -> some snapshot survives" yes "$(has "$out" 'SNAP_LINE 1:')"
+check "big line -> placeholder note shown" yes "$(has "$out" 'byte line omitted')"
+check "big line -> most of the budget used (not wasted)" yes "$(ge "$(bytes "$out")" 6000)"
+
+# --- 8. CRLF document: the Notes heading is still recognized (review finding
+#     F2). Before the fix, hoist_notes()'s byte-exact "==" match against
+#     "## Notes from this session" never fired on a \r-terminated line, so
+#     the Notes stayed at the END of the emitted text (their natural
+#     position in the doc) instead of being hoisted to the front, and the
+#     region-wide "cut from the end" trim then ate them along with the
+#     oversized snapshot.
+p8="$(mk_repo)" || exit 1
+cleanup_on_exit "$p8"
+must mkdir -p "$p8/.claude"
+{
+  printf '# handoff: session handoff (auto-generated)\r\n'
+  printf '\r\n'
+  printf '**Generated:** 2026-09-22 12:00 UTC\r\n'
+  printf '\r\n'
+  printf -- '---\r\n'
+  printf '\r\n'
+  printf '## Repo: fixture\r\n'
+  printf '\r\n'
+  for ((i = 1; i <= 300; i++)); do
+    printf 'SNAP_LINE %d: mechanical git snapshot filler that the loader may trim\r\n' "$i"
+  done
+  printf '\r\n'
+  printf '## Notes from this session\r\n'
+  printf '\r\n'
+  printf 'NOTE_HEAD curated prose starts here.\r\n'
+  printf 'NOTE_TAIL curated prose ends here.\r\n'
+} > "$p8/.claude/handoff_current.md"
+out="$(run_ss "$p8")"
+check "crlf -> notes head survives"           yes "$(has "$out" NOTE_HEAD)"
+check "crlf -> notes tail survives"           yes "$(has "$out" NOTE_TAIL)"
+check "crlf -> notes hoisted above snapshot"  yes \
+  "$([ "$(line_of "$out" NOTE_HEAD)" -lt "$(line_of "$out" 'SNAP_LINE 1:')" ] && echo yes || echo no)"
+
+# --- 9. mktemp failure is no longer silent (review finding F3) --------------
+# TMPDIR pointed at a directory that does not exist makes mktemp fail, which
+# used to disable buffering (and with it, all trimming and its notices)
+# without a word. The loader must now say so, as the very first line, and
+# still emit the rest of the (now-unbuffered, untrimmed) output.
+p9="$(mk_repo)" || exit 1
+cleanup_on_exit "$p9"
+must mk_doc "$p9" 5
+out="$( cd "$p9" && env CLAUDE_PROJECT_DIR="$p9" HANDOFF_SECRET_FILE="$p9/.secret" \
+    HANDOFF_NO_HEALTH_WARN=1 TMPDIR="$p9/no-such-tmp-dir" bash "$SS" </dev/null 2>/dev/null )"
+check "mktemp fail -> warning emitted"    yes "$(has "$out" 'could not create a temp buffer')"
+check "mktemp fail -> warning is line 1"  1   "$(line_of "$out" 'could not create a temp buffer')"
+check "mktemp fail -> notes still load"   yes "$(has "$out" NOTE_TAIL)"
+
+# --- 10a. U2 + U3: a mid-region omitted line that opens a ``` fence, with a
+#     real closer and NOTE_TAIL both surviving after it (this region is never
+#     cut at the end). Before the fix: (U2) the trim note always said
+#     "trimmed N of M bytes from the END of this section" even though only a
+#     mid-region line was omitted here, never anything cut from the end; and
+#     (U3) the omitted line's leading ``` never toggled the internal fence
+#     tracker, so the real closer that follows toggled it from 0 -> 1
+#     instead of 1 -> 0, leaving the region's fence-tracking believe a block
+#     was still open at the true end and auto-inserting a second, spurious
+#     closing ``` right before the trim note (two ``` lines in the output
+#     for one real fence, i.e. unbalanced).
+p10a="$(mk_repo)" || exit 1
+cleanup_on_exit "$p10a"
+must mkdir -p "$p10a/.claude"
+{
+  echo "# handoff: session handoff (auto-generated)"
+  echo
+  echo "**Generated:** 2026-09-22 12:00 UTC"
+  echo
+  echo "---"
+  echo
+  echo "## Repo: fixture"
+  echo
+  for ((i = 1; i <= 5; i++)); do
+    echo "SNAP_LINE $i: mechanical git snapshot filler that the loader may trim"
+  done
+  echo
+  echo "## Notes from this session"
+  echo
+  echo "NOTE_HEAD curated prose starts here."
+  must printf '```'
+  must printf '%*s\n' 10000 '' | tr ' ' 'X'
+  echo '```'
+  echo "NOTE_TAIL curated prose ends here."
+} > "$p10a/.claude/handoff_current.md"
+out="$(run_ss "$p10a")"
+check "u2/u3 -> placeholder shown"           yes "$(has "$out" 'byte line omitted')"
+check "u2/u3 -> notes tail survives"         yes "$(has "$out" NOTE_TAIL)"
+check "u2/u3 -> snapshot survives"           yes "$(has "$out" 'SNAP_LINE 5:')"
+check "u2/u3 -> note is not end-cut wording" no  "$(has "$out" 'from the end of this section')"
+check "u2/u3 -> note says from this section" yes "$(has "$out" 'from this section to fit')"
+check "u2/u3 -> fence balanced (no spurious closer)" 1 \
+  "$(printf '%s\n' "$out" | grep -c '^```$')"
+
+# --- 10b. U1: the oversized-line placeholder must fire once a line does not
+#     fit what is left of the region's allowance (remaining), not only once it
+#     exceeds the region's WHOLE allowance (keep[cur]). This fixture spends
+#     most of the allowance on small filler lines FIRST, so by the time the
+#     4 KB fenced line arrives it easily fits inside keep[cur] but no longer
+#     fits remaining. Before the fix the old gate (b > keep[cur]) missed this
+#     case entirely and fell through to the contiguous "cut from here to the
+#     end" path, dropping NOTE_TAIL and most of the snapshot while leaving a
+#     meaningful share of the budget unused.
+p10b="$(mk_repo)" || exit 1
+cleanup_on_exit "$p10b"
+must mkdir -p "$p10b/.claude"
+{
+  echo "# handoff: session handoff (auto-generated)"
+  echo
+  echo "**Generated:** 2026-09-22 12:00 UTC"
+  echo
+  echo "---"
+  echo
+  echo "## Repo: fixture"
+  echo
+  for ((i = 1; i <= 300; i++)); do
+    echo "SNAP_LINE $i: mechanical git snapshot filler that the loader may trim"
+  done
+  echo
+  echo "## Notes from this session"
+  echo
+  echo "NOTE_HEAD curated prose starts here."
+  for ((i = 1; i <= 80; i++)); do
+    must printf '%*s\n' 60 '' | tr ' ' 'F'
+  done
+  must printf '```'
+  must printf '%*s\n' 4000 '' | tr ' ' 'X'
+  echo '```'
+  echo "NOTE_TAIL curated prose ends here."
+} > "$p10b/.claude/handoff_current.md"
+out="$(run_ss "$p10b")"
+check "u1 -> placeholder shown"        yes "$(has "$out" 'byte line omitted')"
+check "u1 -> notes tail survives"      yes "$(has "$out" NOTE_TAIL)"
+check "u1 -> snapshot head survives"   yes "$(has "$out" 'SNAP_LINE 1:')"
+check "u1 -> most of the budget used (not wasted)" yes "$(ge "$(bytes "$out")" 8000)"
+check "u1 -> fence balanced"           1 "$(printf '%s\n' "$out" | grep -c '^```$')"
+
 finish

@@ -81,6 +81,14 @@ if [ "$ss_budget" -gt 0 ]; then
   ss_nonce="$(LC_ALL=C od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)"
   [ -n "$ss_nonce" ] || ss_nonce="$$${RANDOM}${RANDOM}"
   ss_buf="$(mktemp "${TMPDIR:-/tmp}/handoff_ss.XXXXXX" 2>/dev/null || true)"
+  # mktemp can fail (e.g. TMPDIR pointing at a nonexistent or unwritable
+  # dir). That silently disabled buffering, and with it all trimming: an
+  # over-budget load would then get cut to a preview with no notice at all.
+  # Say so, in the clear (nothing is buffered yet, so this reaches stdout
+  # directly), and keep going unbuffered.
+  if [ -z "$ss_buf" ]; then
+    printf '⚠️  handoff: could not create a temp buffer, so this output was not trimmed to the hook-output limit; if it arrives as a preview, read .claude/handoff_current.md directly.\n\n'
+  fi
 fi
 # Region markers carry the per-run nonce: handoff content is attacker-
 # influenced (a cloned repo can plant it), and must not be able to forge or
@@ -131,20 +139,60 @@ FNR == 1 {
   cur = 0; m = 0
 }
 {
-  if (isb($0)) { cur = ++m; used = 0; cutb = 0; fence = 0; next }
+  if (isb($0)) { cur = ++m; used = 0; cutb = 0; endcutb = 0; fence = 0; permacut = 0; next }
   if (ise($0)) {
     # A cut inside a ``` block would leave it open and swallow the note.
     if (cur && cutb > 0 && fence) print "```"
-    if (cur && cutb > 0)
-      printf "\n> _[handoff: trimmed %d of %d bytes from the end of this section to fit the hook-output limit. Full text: `%s`]_\n", cutb, size[cur], path[cur]
+    if (cur && cutb > 0) {
+      # "from the end" is only true when the region was actually cut there
+      # (permacut fired). A region that only lost one or more mid-region
+      # lines to the omitted-line placeholder below was never cut at the
+      # end, so say so plainly instead of the (false) end-cut framing.
+      if (endcutb > 0)
+        printf "\n> _[handoff: trimmed %d of %d bytes from the end of this section to fit the hook-output limit. Full text: `%s`]_\n", cutb, size[cur], path[cur]
+      else
+        printf "\n> _[handoff: trimmed %d of %d bytes from this section to fit the hook-output limit. Full text: `%s`]_\n", cutb, size[cur], path[cur]
+    }
     cur = 0; next
   }
   b = length($0) + 1
   if (cur && trimmed[cur]) {
-    if (cutb == 0 && used + b <= keep[cur]) {
-      used += b; print
-      if ($0 ~ /^[ \t]*```/) fence = !fence
-    } else cutb += b
+    if (!permacut) {
+      remaining = keep[cur] - used
+      if (b <= remaining) {
+        used += b; print
+        if ($0 ~ /^[ \t]*```/) fence = !fence
+        next
+      }
+      # Trimming is otherwise contiguous-from-here (permacut below): once a
+      # line does not fit, the rest of the region is cut too. That breaks
+      # badly whenever a single line does not fit what is left of the
+      # allowance while a MEANINGFUL share of that allowance (at least
+      # 1 KB) is still unused: cutting from here forward would waste it.
+      # In that case, replace just this line with a placeholder (charged
+      # against the allowance, so accounting stays conservative) and keep
+      # evaluating later lines against the same allowance instead of
+      # cutting the rest. A placeholder line that itself opens/closes a
+      # fenced code block toggles fence parity the same as a printed line
+      # would, so a later real closer does not open a stray code block.
+      if (remaining >= 1024) {
+        ph = sprintf("[handoff: one %d-byte line omitted to fit the hook-output limit]", length($0))
+        phb = length(ph) + 1
+        if (phb <= remaining) {
+          print ph
+          used += phb
+          cutb += b
+          if ($0 ~ /^[ \t]*```/) fence = !fence
+          next
+        }
+      }
+      permacut = 1
+      cutb += b
+      endcutb += b
+      next
+    }
+    cutb += b
+    endcutb += b
     next
   }
   print
@@ -177,10 +225,15 @@ fi
 # go first and the curated prose last. Identity on docs without that heading
 # (raw dumps, old formats). stdin -> stdout.
 hoist_notes() {
+  # Match with an optional trailing \r: a CRLF document (Windows-authored,
+  # or round-tripped through a tool that normalizes line endings) missed the
+  # byte-exact "==" match, so the heading was never found, hoisting was
+  # skipped, and trimming then cut the Notes off the end like any other
+  # narrative region instead of protecting them.
   LC_ALL=C awk '
     { line[NR] = $0 }
-    !n && $0 == "## Notes from this session" { n = NR }
-    !g && /^\*\*Generated:\*\*/ { g = NR }
+    !n && $0 ~ /^## Notes from this session\r?$/ { n = NR }
+    !g && /^\*\*Generated:\*\*.*\r?$/ { g = NR }
     END {
       if (!n) { for (i = 1; i <= NR; i++) print line[i]; exit }
       if (g && g < n) { print line[g]; print "" }

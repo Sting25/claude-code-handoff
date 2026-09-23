@@ -170,4 +170,75 @@ out="$(run_cc "$repo" PINNED)"
 check "env-pinned window -> no estimate label" no "$(has "$out" "estimated")"
 rm -rf "$repo"
 
+# --- F4: a used_percentage above 100 is not a real reading -> rejected ------
+# The cache can carry a stale/malformed pct (e.g. pct=150.9); it must be
+# treated as absent so the computed fallback takes over, instead of reporting
+# an impossible ~150%.
+repo="$(mk_repo)"; seed "$repo" PCTOVER 4000 600
+seed_sl "$repo" PCTOVER "window=1000" "tokens=600" "pct=150.9"
+out="$(run_cc_auto "$repo" PCTOVER)"
+check "pct>100 rejected -> falls back to computed 60%" yes "$(has "$out" "~60% of a 1000-token window")"
+check "pct>100 rejected -> no impossible 150% shown"   no  "$(has "$out" "150")"
+rm -rf "$repo"
+
+# Boundary: pct exactly 100 (any zero-padded decimal form) is still valid.
+repo="$(mk_repo)"; seed "$repo" PCT100 4000 600
+seed_sl "$repo" PCT100 "window=1000" "tokens=600" "pct=100.00"
+out="$(run_cc_auto "$repo" PCT100)"
+check "pct=100.00 accepted" yes "$(has "$out" "~100% of a 1000-token window")"
+rm -rf "$repo"
+
+# --- F5: window_note names the SOURCE that actually decided the window ------
+# (a) Widened by the >200k-token ratchet: no model file, no ~/.claude.json,
+#     but measured usage exceeds 200k. Before the fix this still said
+#     "inferred from the model id (not recorded)", which is not what decided
+#     the 1M window here.
+repo="$(mk_repo)"; seed "$repo" RATCHNOTE 4000 250000
+out="$(run_cc_auto "$repo" RATCHNOTE HANDOFF_CTX_THRESHOLD_PCT=10)"
+check "ratchet window -> 1M"                     yes "$(has "$out" "1000000-token window")"
+check "ratchet window -> note names the ratchet" yes "$(has "$out" "widened")"
+check "ratchet window -> not the model-id wording" no "$(has "$out" "inferred from the model id (not recorded)")"
+rm -rf "$repo"
+
+# (b) Decided from ~/.claude.json lastModelUsage (no session model file).
+# Before the fix this also said "inferred from the model id (not recorded)",
+# even though no model id file existed for this session at all.
+repo="$(mk_repo)"; seed "$repo" CJSONNOTE 4000 90000
+must printf '%s' '{"projects":{"/elsewhere":{"lastModelUsage":{"claude-fable-5":{"count":1}}}}}' \
+  > "$repo/.claude.json"
+out="$(run_cc_auto "$repo" CJSONNOTE HANDOFF_CTX_THRESHOLD_PCT=5)"
+check "claude.json window -> 1M"                  yes "$(has "$out" "1000000-token window")"
+check "claude.json window -> note names claude.json" yes \
+  "$(has "$out" "recorded for this project in ~/.claude.json")"
+check "claude.json window -> not the model-id wording" no "$(has "$out" "inferred from the model id (not recorded)")"
+rm -rf "$repo"
+
+# (c) Regression guard: the session-model-file case keeps its original wording
+# byte-for-byte (already covered by the "guessed window" case above); no new
+# assertion needed here beyond that existing pass.
+
+# (d) U4: ratchet fired AFTER a session-model-file detection (claude-sonnet-4-5
+# -> 200k, then measured usage of 250000 ratchets to 1M). Before the fix the
+# note claimed "widened from the 200k default" even though the pre-ratchet
+# 200k came from the session's own recorded model id, not from having no
+# evidence at all. The wording must not claim "default" here.
+repo="$(mk_repo)"; seed "$repo" RATCHMODEL 4000 250000
+printf 'claude-sonnet-4-5\n' > "$repo/.claude/handoff_backups/.ctx_model_RATCHMODEL"
+out="$(run_cc_auto "$repo" RATCHMODEL HANDOFF_CTX_THRESHOLD_PCT=10)"
+check "ratchet after model-id -> 1M"                yes "$(has "$out" "1000000-token window")"
+check "ratchet after model-id -> note names widened" yes "$(has "$out" "widened")"
+check "ratchet after model-id -> not mislabeled default" no "$(has "$out" "200k default")"
+rm -rf "$repo"
+
+# (d) Cache has pct= but no window=: the cached pct must still be used (no
+# "~0% (estimated)" and no false claim that used_percentage has not reached
+# the hook, since it plainly has).
+repo="$(mk_repo)"; seed "$repo" PCTNOWIN 4000 100
+seed_sl "$repo" PCTNOWIN "tokens=90000" "pct=42"
+out="$(run_cc_auto "$repo" PCTNOWIN HANDOFF_CTX_THRESHOLD_PCT=10)"
+check "pct without window -> uses cached 42%" yes "$(has "$out" "~42%")"
+check "pct without window -> not labelled estimated" no "$(has "$out" "estimated")"
+check "pct without window -> not the bogus ~0%" no "$(has "$out" "~0%")"
+rm -rf "$repo"
+
 finish

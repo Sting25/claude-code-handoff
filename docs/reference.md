@@ -145,13 +145,17 @@ pin `HANDOFF_CTX_WINDOW_TOKENS` still overrides everything, and
 `HANDOFF_CTX_NO_STATUSLINE=1` restores the regex-only chain.
 
 The percentage in the reminder is Claude Code's own
-`context_window.used_percentage` whenever the status line has cached it
-(and no `HANDOFF_CTX_WINDOW_TOKENS` pin is set). Without it, the hook
-computes tokens / window, and if that window was only inferred from the
-model id, the reminder labels the figure "(estimated)" and names the
-model it came from. The desktop app is the usual case: it does not run
-the status line, and Claude Code exposes `context_window` to hooks only
-through it, so there the percentage is always an estimate.
+`context_window.used_percentage` whenever the status line has cached a
+valid reading (0-100; a stale or malformed value above 100 is treated as
+absent) and no `HANDOFF_CTX_WINDOW_TOKENS` pin is set: this applies even
+when the cache has a percentage but no window size. Without a cached
+percentage, the hook computes tokens / window, and if that window was
+only auto-detected (from the session's model id, from `~/.claude.json`,
+or widened by the >200k-token ratchet), the reminder labels the figure
+"(estimated)" and names the actual source it came from. The desktop app
+is the usual case: it does not run the status line, and Claude Code
+exposes `context_window` to hooks only through it, so there the
+percentage is always an estimate.
 
 The nudge needs a growth measure to space its reminders, and until
 0.14.2 that could only be the Stop hook's transcript byte count
@@ -740,7 +744,16 @@ limit, the loader puts the Notes ahead of the git snapshot and trims the
 narrative and fallback sections from their ends, never the trusted rules.
 When it trims, it says so on the first line and names the full file to
 read. The default sits just under the largest load measured arriving
-inline (9,017 bytes); lower it if you ever see a preview anyway.
+inline (9,017 bytes); lower it if you ever see a preview anyway. A single
+line that does not fit what is left of a section's allowance, when at
+least 1 KB of that allowance is still unused, is replaced with a
+one-line placeholder (naming its byte count) rather than dropping every
+line after it, so the rest of that section still comes through; the
+end-of-section note then says whether bytes were actually trimmed off
+the end, or only omitted mid-section like this. If the loader cannot
+create a temp buffer to trim into (e.g. `TMPDIR` points at a missing
+directory), it says so on the first line and falls back to untrimmed
+output instead of silently disabling trimming.
 
 ### Test/debug overrides
 

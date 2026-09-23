@@ -405,7 +405,20 @@ if [[ "${HANDOFF_CTX_NO_STATUSLINE:-0}" != "1" && -f "$sl_file" ]]; then
     case "$sl_k" in
       window) [[ "$sl_v" =~ ^[0-9]+$ ]] && sl_window="$sl_v" ;;
       tokens) [[ "$sl_v" =~ ^[0-9]+$ ]] && sl_tokens="$sl_v" ;;
-      pct) [[ "$sl_v" =~ ^[0-9]+(\.[0-9]+)?$ ]] && sl_pct="$sl_v" ;;
+      # A used_percentage above 100 is not a real reading (the cache can carry
+      # a stale or malformed value, e.g. pct=150.9) and must be treated as
+      # absent so the computed fallback below takes over instead of reporting
+      # an impossible ~150%.
+      pct)
+        if [[ "$sl_v" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+          sl_p_whole="${sl_v%%.*}"
+          sl_p_frac="${sl_v#*.}"
+          [[ "$sl_p_frac" == "$sl_v" ]] && sl_p_frac=""
+          if (( sl_p_whole < 100 )) || { (( sl_p_whole == 100 )) && [[ -z "${sl_p_frac//0/}" ]]; }; then
+            sl_pct="$sl_v"
+          fi
+        fi
+        ;;
     esac
   done < "$sl_file" 2>/dev/null || true
   # Freshness guard: adopt the statusline TOKEN count only while the sl cache
@@ -627,6 +640,11 @@ window_source="env"
 if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
   window_source="auto"
   window_tokens=200000
+  # window_detail records WHICH auto-detection step actually decided the
+  # window, so the emitted note can name its real source instead of always
+  # claiming "inferred from the model id" (issue: wrong wording off the
+  # happy path for claude.json / ratchet / no-evidence-at-all cases).
+  window_detail="default"
   # Step 1.5: CC's OWN window from the statusline cache. This is authority,
   # not inference — Claude Code reported context_window_size itself — so when
   # present it wins over every probe below (which are all guesses from model
@@ -648,10 +666,12 @@ if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
       [[ "$session_model" =~ $model_charset_re ]] || session_model=""
     fi
     if [[ -n "$session_model" ]]; then
+      window_detail="session_model"
       if [[ "$session_model" =~ $ONE_M_MODEL_RE ]]; then
         window_tokens=1000000
       fi
     elif [[ -f "$HOME/.claude.json" ]]; then
+      window_detail="claude_json"
       # ~/.claude.json's .projects map is keyed by the LAUNCH cwd — the dir
       # Claude Code was started from — not by the git toplevel this script
       # resolves, so indexing with $repo_root missed the entry whenever the
@@ -742,6 +762,9 @@ if [[ "$window_source" == "auto" ]] \
    && [[ "$token_source" == "measured" || "$token_source" == "statusline" ]] \
    && (( est_tokens > 200000 && WINDOW_TOKENS < 1000000 )); then
   WINDOW_TOKENS=1000000
+  # The ratchet is what actually decided the window here, not the model-id
+  # guess that picked the pre-ratchet value: name it accurately below.
+  window_detail="ratchet"
 fi
 
 # --- Threshold check: first gate reached wins (issue #119) ---
@@ -781,22 +804,53 @@ fi
 
 # --- Compose and emit the system-reminder ---
 # Which percentage to report. Claude Code's own used_percentage is the ground
-# truth, so it wins whenever it is fresh AND the window is CC's too (an env pin
-# means the user chose a different budget, so CC's pct would contradict it).
+# truth, so it wins whenever it is fresh AND the window was not pinned by the
+# user (window_source != "env": both "auto" and "statusline" defer to it). An
+# env pin means the user chose a different budget, so CC's pct would
+# contradict it.
 # Otherwise we compute tokens/window; when that window was merely INFERRED from
 # the model id, the reminder says so. That is the normal case in the desktop
 # app: it does not run the statusLine, the only place Claude Code exposes
 # context_window to scripts, and a stale model list there once made a 1M
 # session report 47% at 94,637 tokens. A guess must never read as a measurement.
+# window_reason names the actual auto-detection source recorded above
+# (window_detail), so the note below never claims "inferred from the model
+# id" for a window that really came from ~/.claude.json, the >200k ratchet,
+# or no evidence at all.
+window_reason=""
+case "${window_detail:-default}" in
+  session_model)
+    window_reason="inferred from the model id (${session_model:-not recorded})" ;;
+  claude_json)
+    window_reason="inferred from the model recorded for this project in ~/.claude.json (lastModelUsage), because no model id was recorded for this session" ;;
+  ratchet)
+    # Pre-ratchet WINDOW_TOKENS is always 200000 in the auto path (every
+    # non-1M detection step, including the model-id and claude.json steps,
+    # picks that same value) but NOT always because no model id was found:
+    # say "the 200k window auto-detection had picked", never "default" -
+    # the pre-ratchet source may have been the session's own model id.
+    window_reason="widened from the 200k window auto-detection had picked, because measured usage exceeded 200,000 tokens, which a 200k window cannot fit (a 1M-native model auto-detection did not otherwise recognize)" ;;
+  *)
+    window_reason="a default (no model id was recorded for this session and ~/.claude.json had no usable lastModelUsage)" ;;
+esac
 pct_label=""
 window_note=""
-if [[ "$window_source" == "statusline" && -n "$sl_pct" ]]; then
+# The cached pct is Claude Code's own context_window.used_percentage: use it
+# whenever it is fresh and valid, even when the cache carries no window= (a
+# pct-only cache previously fell through to a computed "~0% (estimated)" and
+# wrongly claimed used_percentage had not reached the hook). Only an explicit
+# HANDOFF_CTX_WINDOW_TOKENS pin (window_source == "env") overrides it, per the
+# documented contract that the env override always wins.
+if [[ "$window_source" != "env" && -n "$sl_pct" ]]; then
   pct="${sl_pct%%.*}"
+  if [[ "$window_source" == "auto" ]]; then
+    window_note=" NOTE: the ${WINDOW_TOKENS}-token window was ${window_reason}. The percentage above is Claude Code's own context_window.used_percentage, not an estimate."
+  fi
 else
   pct=$((est_tokens * 100 / WINDOW_TOKENS))
   if [[ "$window_source" == "auto" ]]; then
     pct_label=" (estimated)"
-    window_note=" NOTE: this percentage is an ESTIMATE: the ${WINDOW_TOKENS}-token window was inferred from the model id (${session_model:-not recorded}), because Claude Code's own context_window.used_percentage has not reached this hook (the status line, its only source for hooks, has not reported for this session; the desktop app does not run it). Say it is an estimate when you mention it."
+    window_note=" NOTE: this percentage is an ESTIMATE: the ${WINDOW_TOKENS}-token window was ${window_reason}, because Claude Code's own context_window.used_percentage has not reached this hook (the status line, its only source for hooks, has not reported for this session; the desktop app does not run it). Say it is an estimate when you mention it."
   fi
 fi
 

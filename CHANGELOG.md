@@ -16,6 +16,44 @@ No hook-command or permission-entry changes: nothing to re-patch in
 `~/.claude/settings.json`.
 
 ### Fixed
+- **Five low-severity issues found in review.** `SessionStart` output
+  trimming could waste most of the byte budget and lose the Notes and git
+  snapshot when a single line was far bigger than a section's remaining
+  allowance: it now replaces that one line with a placeholder and keeps
+  trimming the rest normally. A CRLF-terminated handoff document was not
+  hoisting its Notes ahead of the git snapshot, so trimming could cut them
+  off. If the loader could not create its temp buffer (for example
+  `TMPDIR` pointing at a missing directory), trimming silently turned off;
+  it now says so on the first line. The context-check hook could report an
+  impossible percentage (over 100%) from a stale status-line cache; values
+  above 100 are now rejected and the hook falls back to its own computed
+  figure. The context reminder's note about how the token window was
+  chosen could misname the source (always claiming "inferred from the
+  model id", even when it actually came from `~/.claude.json`, the
+  >200k-token ratchet, or no evidence at all) and, when the status-line
+  cache held a percentage but no window size, showed a bogus "~0%
+  (estimated)" instead of the real cached figure; both now report
+  accurately.
+- **Five more low-severity issues found in a follow-up review of the fixes
+  above.** The oversized-line placeholder only fired when a line exceeded
+  a section's WHOLE allowance, not merely what was left of it (remaining),
+  so a line that easily fit the whole allowance but not the remainder
+  still sank the rest of the section; it now fires off the remaining
+  allowance, as the paragraph above and this changelog always described.
+  The end-of-section trim note always said "from the end of this section"
+  even when the only thing trimmed was a mid-section placeholder line; it
+  now says so only when bytes were actually cut from the end. An omitted
+  line that opened a ` ``` ` fence did not toggle the loader's internal
+  fence tracking, so a real closing fence later in the same section could
+  make the loader append a second, spurious closing fence; omitted fence
+  lines now toggle the same as printed ones. The context reminder's
+  "widened from the 200k default" wording implied the pre-ratchet window
+  always came from having no model evidence at all, even when it actually
+  came from the session's own recorded model id; it no longer claims
+  "default" for that case. A comment about when the cached
+  `used_percentage` wins said "the window is CC's too", but the code uses
+  it for any non-pinned window, not only a status-line-reported one; the
+  comment now matches.
 - **A curated handoff never refreshed again, once curated (#125).**
   SessionEnd and PreCompact run `write_handoff.sh --if-curated`, and that
   path preserved handoff_current.md any time it held curated Notes or
