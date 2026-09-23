@@ -1143,30 +1143,38 @@ handoff_rules_curated() {  # <file> -> exit 0 if the Rules block was curated
 }
 
 # Newest CURATED history snapshot (#125): same rotation-shape filter and
-# newest-first sort as handoff_newest_history_snapshot above, but walks the
-# list skipping any snapshot whose Notes are still the unedited placeholder
-# (or, for pre-0.5.0 archives, carry the legacy placeholder sentence) AND
-# whose Rules were not curated either (handoff_rules_curated above): a
-# rules-only curated snapshot (placeholder Notes, curated Rules fence) is
-# real curated content too, so a run of uncurated safety-net rotations
-# between two /handoff sessions must not surface a placeholder-only file
-# here while skipping past a rules-only curated one. The missing/corrupted
-# auto-rebuild path above keeps using handoff_newest_history_snapshot
-# (newest regardless of curation): that path already labels its output
-# "best-effort, not curated," so newest is the right choice there.
+# newest-first sort as handoff_newest_history_snapshot above. Two tiers:
+#   1. the newest snapshot whose NOTES are curated (not the unedited
+#      placeholder and, for pre-0.5.0 archives, not the legacy placeholder
+#      sentence). Curated Notes are what this fallback exists to recover.
+#   2. only if no snapshot has curated Notes, the newest snapshot whose
+#      RULES were curated (handoff_rules_curated above), so a rules-only
+#      curated snapshot (placeholder Notes, curated Rules fence) is still
+#      found behind a run of uncurated safety-net rotations.
+# A single "Notes OR Rules" pick was wrong: the stale refresh carries a
+# verified doc's Rules into the next doc (placeholder Notes), and once such a
+# carried-rules doc reached history it was the newest "curated" snapshot, so
+# the fallback loaded it (no prose) and never reached the older snapshot with
+# the real curated Notes. The missing/corrupted auto-rebuild path above keeps
+# using handoff_newest_history_snapshot (newest regardless of curation): that
+# path already labels its output "best-effort, not curated," so newest is the
+# right choice there.
 handoff_newest_curated_history_snapshot() {  # <history_dir>
-  local f
+  local f rules_pick=""
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    if { ! handoff_is_unedited_placeholder "$f" \
-         && ! grep -qF "$placeholder_marker_legacy" "$f" 2>/dev/null; } \
-       || handoff_rules_curated "$f"; then
+    if ! handoff_is_unedited_placeholder "$f" \
+       && ! grep -qF "$placeholder_marker_legacy" "$f" 2>/dev/null; then
       printf '%s\n' "$f"
       return 0
+    fi
+    if [ -z "$rules_pick" ] && handoff_rules_curated "$f"; then
+      rules_pick="$f"
     fi
   done < <(find "$1" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
     | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
     | LC_ALL=C sort -r)
+  [ -z "$rules_pick" ] || printf '%s\n' "$rules_pick"
   return 0
 }
 
