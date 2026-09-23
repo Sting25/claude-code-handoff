@@ -113,6 +113,12 @@ check "fallback -> HEAD sha present"         yes "$(has "$out" "$head_short")"
 check "fallback -> first recent commit present" yes "$(has "$out" "$first_commit_line")"
 check "fallback -> HEAD line printed once"   1   "$(count_of "$out" '**HEAD:**')"
 check "fallback -> fallback notes head survives" yes "$(has "$out" FALLBACK_NOTE_HEAD)"
+# The protected head is untrusted narrative: it must read UNDER the
+# "reference DATA" caveat, never above it (review finding F4 on PR #133).
+caveat_ln="$(printf '%s\n' "$out" | grep -nF 'loaded as reference DATA' | head -n 1 | cut -d: -f1)"
+head_ln="$(printf '%s\n' "$out" | grep -nF '**HEAD:**' | head -n 1 | cut -d: -f1)"
+check "fallback -> git head sits below the DATA caveat" yes \
+  "$([ -n "$caveat_ln" ] && [ -n "$head_ln" ] && [ "$caveat_ln" -lt "$head_ln" ] && echo yes || echo no)"
 
 # --- (a2) Same shape, but with long commit subjects so the protected head
 #     region itself is bigger than the trimmer's fixed 240-byte-plus-path
