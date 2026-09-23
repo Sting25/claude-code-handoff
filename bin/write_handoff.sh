@@ -302,9 +302,16 @@ handoff_is_unedited_placeholder() {
   # in the file; the sentinel comparison is byte-exact ASCII, so C is equivalent.
   LC_ALL=C awk -v sentinel="$HANDOFF_PLACEHOLDER_SENTINEL" '
     # Skip everything until the Notes header (the snapshot lives above it).
-    !seen { if ($0 == "## Notes from this session") seen = 1; next }
+    # Optional trailing \r: same CRLF tolerance as hoist_notes() in
+    # bin/handoff_session_start.sh (issue #128) so a Windows-authored or
+    # round-tripped CRLF doc is not misread as curated.
+    !seen { if ($0 ~ /^## Notes from this session\r?$/) seen = 1; next }
     /^[[:space:]]*$/ { next }                     # skip blank lines after header
-    { result = ($0 == sentinel) ? 0 : 1; found = 1; exit }  # first content line decides
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      result = (line == sentinel) ? 0 : 1; found = 1; exit  # first content line decides
+    }
     # exit jumps here; END owns the final status so the rule-level exit code
     # is not clobbered. No content line (header-only or no header) => not placeholder.
     END { exit found ? result : 1 }

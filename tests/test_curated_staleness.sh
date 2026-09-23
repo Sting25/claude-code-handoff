@@ -124,6 +124,53 @@ check "1: stale refresh -> old curated doc archived to history" yes \
 check "1: stale refresh -> history grew by one" $((before_hist + 1)) "$(hist_count "$repo")"
 rm -rf "$repo"
 
+# --- 1b (issue #128): a CRLF doc that IS an unedited placeholder is still --
+#         recognized as one. handoff_is_unedited_placeholder()'s byte-exact
+#         "==" match against "## Notes from this session" (and against the
+#         sentinel) never fired on a \r-terminated line, so a genuinely
+#         untouched CRLF placeholder read as "curated" and --if-curated
+#         preserved it forever instead of refreshing it. -------------------
+repo="$(mk_repo_gitignored)"
+mkdir -p "$repo/.claude"
+{
+  printf '# handoff\r\n'
+  printf '\r\n'
+  printf 'MARKERCRLFPLACEHOLDER\r\n'
+  printf '\r\n'
+  printf '## Notes from this session\r\n'
+  printf '\r\n'
+  printf '%s\r\n' "$SENTINEL"
+} > "$repo/.claude/handoff_current.md"
+rc=0
+out="$( cd "$repo" && bash "$WH" --if-curated --session-id sidCRLF1b 2>/dev/null )"; rc=$?
+check "1b: CRLF placeholder -> exit 0" 0 "$rc"
+check "1b: CRLF placeholder -> refreshed, not preserved" no \
+  "$(has "$(cat "$repo/.claude/handoff_current.md")" "MARKERCRLFPLACEHOLDER")"
+check "1b: CRLF placeholder -> fresh placeholder written" yes \
+  "$(has "$(cat "$repo/.claude/handoff_current.md")" "$SENTINEL")"
+rm -rf "$repo"
+
+# --- 1c (issue #128): a CRLF doc with genuinely CURATED Notes is still -----
+#         recognized as curated (companion to 1b, proves the fix does not
+#         overcorrect into treating every CRLF doc as a placeholder). ------
+repo="$(mk_repo_gitignored)"
+mkdir -p "$repo/.claude"
+{
+  printf '# handoff\r\n'
+  printf '\r\n'
+  printf 'MARKERCRLFCURATED\r\n'
+  printf '\r\n'
+  printf '## Notes from this session\r\n'
+  printf '\r\n'
+  printf 'curated prose, not the placeholder\r\n'
+} > "$repo/.claude/handoff_current.md"
+before="$(cat "$repo/.claude/handoff_current.md")"
+rc=0
+out="$( cd "$repo" && bash "$WH" --if-curated --session-id sidCRLF1c 2>/dev/null )"; rc=$?
+check "1c: CRLF curated -> exit 0" 0 "$rc"
+check "1c: CRLF curated -> doc untouched (byte-for-byte)" "$before" "$(cat "$repo/.claude/handoff_current.md")"
+rm -rf "$repo"
+
 # --- 2: concurrent (doc t > this session's origin) preserved byte-for-byte -
 #        a session that curated DURING this session's lifetime must never
 #        be clobbered by this session's own safety-net write. --------------

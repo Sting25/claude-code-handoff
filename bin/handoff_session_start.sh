@@ -1124,10 +1124,17 @@ placeholder_sentinel='<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces thi
 # "ran without /handoff" recover banner over a perfectly good curated handoff.
 handoff_is_unedited_placeholder() {  # <file> -> exit 0 if unedited placeholder
   # LC_ALL=C for the same invalid-UTF-8 resilience as defang_untrusted above.
+  # Optional trailing \r: same CRLF tolerance as hoist_notes() above
+  # (issue #128) so a Windows-authored or round-tripped CRLF doc is not
+  # misread as curated.
   LC_ALL=C awk -v sentinel="$placeholder_sentinel" '
-    !seen { if ($0 == "## Notes from this session") seen = 1; next }
+    !seen { if ($0 ~ /^## Notes from this session\r?$/) seen = 1; next }
     /^[[:space:]]*$/ { next }
-    { result = ($0 == sentinel) ? 0 : 1; found = 1; exit }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      result = (line == sentinel) ? 0 : 1; found = 1; exit
+    }
     END { exit found ? result : 1 }
   ' "$1"
 }

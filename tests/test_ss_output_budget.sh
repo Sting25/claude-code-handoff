@@ -204,6 +204,48 @@ check "crlf -> notes tail survives"           yes "$(has "$out" NOTE_TAIL)"
 check "crlf -> notes hoisted above snapshot"  yes \
   "$([ "$(line_of "$out" NOTE_HEAD)" -lt "$(line_of "$out" 'SNAP_LINE 1:')" ] && echo yes || echo no)"
 
+# --- 8b (issue #128): a CRLF doc that IS an unedited placeholder is still
+#     recognized as one. handoff_is_unedited_placeholder()'s byte-exact "=="
+#     match against "## Notes from this session" (and against the sentinel)
+#     never fired on a \r-terminated line, so a genuinely untouched
+#     placeholder doc silently read as "curated": no /handoff-recover
+#     banner, no history fallback, even though the previous session never
+#     ran /handoff. Left out of #127 (which fixed the same byte-exact-match
+#     class in hoist_notes()) to keep that PR scoped to its own finding.
+p8b="$(mk_repo)" || exit 1
+cleanup_on_exit "$p8b"
+must mkdir -p "$p8b/.claude"
+{
+  printf '# handoff: session handoff (auto-generated)\r\n'
+  printf '\r\n'
+  printf '**Generated:** 2026-09-22 12:00 UTC\r\n'
+  printf '\r\n'
+  printf '## Notes from this session\r\n'
+  printf '\r\n'
+  printf '<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->\r\n'
+} > "$p8b/.claude/handoff_current.md"
+out="$(run_ss "$p8b")"
+check "crlf placeholder -> recover banner shown" yes "$(has "$out" "ACTION: RUN /handoff-recover")"
+
+# --- 8c (issue #128): a CRLF doc with genuinely CURATED Notes is still
+#     recognized as curated (companion to 8b, proves the fix does not
+#     overcorrect into treating every CRLF doc as a placeholder). ----------
+p8c="$(mk_repo)" || exit 1
+cleanup_on_exit "$p8c"
+must mkdir -p "$p8c/.claude"
+{
+  printf '# handoff: session handoff (auto-generated)\r\n'
+  printf '\r\n'
+  printf '**Generated:** 2026-09-22 12:00 UTC\r\n'
+  printf '\r\n'
+  printf '## Notes from this session\r\n'
+  printf '\r\n'
+  printf 'NOTE_CURATED_8C curated prose, not the placeholder.\r\n'
+} > "$p8c/.claude/handoff_current.md"
+out="$(run_ss "$p8c")"
+check "crlf curated -> no recover banner" no "$(has "$out" "ACTION: RUN /handoff-recover")"
+check "crlf curated -> notes loaded" yes "$(has "$out" "NOTE_CURATED_8C")"
+
 # --- 9. mktemp failure is no longer silent (review finding F3) --------------
 # TMPDIR pointed at a directory that does not exist makes mktemp fail, which
 # used to disable buffering (and with it, all trimming and its notices)
