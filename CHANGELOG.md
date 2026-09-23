@@ -26,6 +26,20 @@ No hook-command or permission-entry changes: nothing to re-patch in
   the git snapshot, trims narrative and fallback sections from their ends
   (never the trusted rules), and when it trims, says so on the first line
   and names the full file to read. Documented in docs/reference.md.
+- **Context % was about 5x too high on Opus 5 and Sonnet 5.** The
+  built-in list of 1M-window models only knew Fable and Mythos, so a
+  `claude-opus-5-5` session was measured against a 200,000-token window
+  and reported 47% at 94,637 tokens (really about 9.5% of 1M). This shows
+  up in the desktop app, which does not run the status line that would
+  otherwise supply the real window. The default
+  `HANDOFF_CTX_1M_MODEL_REGEX` now also matches Opus and Sonnet from
+  version 5 up; Claude 4 ids without `[1m]` still count as 200k.
+- **The context reminder now reports Claude Code's own percentage.** When
+  the status line has cached `context_window.used_percentage`, that exact
+  figure is reported instead of the hook's own tokens / window math. When
+  it is not available and the window was guessed from the model id (the
+  desktop app, which does not run the status line), the figure is
+  labelled "(estimated)" and the reminder names the model it came from.
 
 ## [0.18.3] - 2026-09-10
 

@@ -55,13 +55,18 @@
 #                               same regex.
 #   HANDOFF_CTX_1M_MODEL_REGEX  POSIX ERE matching model ids known to run a
 #                               1M-token context window. Default:
-#                                 \[1m\]|claude-(fable|mythos)-
+#                                 \[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])
 #                               i.e. the `[1m]` beta suffix, plus Claude 5
 #                               family ids which are 1M-native WITHOUT any
 #                               suffix (the pre-regex detection assumed
 #                               [1m]-or-200k and over-reported usage 5x on
-#                               those models). Extend it when new 1M models
-#                               ship.
+#                               those models). Opus/Sonnet match from major
+#                               version 5 up, so a new release does not
+#                               silently fall back to 200k: the fable-only
+#                               list did exactly that for claude-opus-5-5 in
+#                               the desktop app, where no statusline cache
+#                               exists to supply the real window. Claude 4
+#                               ids without [1m] stay 200k.
 #   HANDOFF_CTX_THRESHOLD_PCT   percent of window that triggers (default: 40).
 #                               Lower (e.g. 30) is recommended for projects
 #                               that opt into REMINDER_MODE=act below — the
@@ -392,11 +397,15 @@ fi
 #     to "not recorded" and the pre-statusline chain below takes over.
 sl_window=""
 sl_tokens=""
+# sl_pct: Claude Code's own context_window.used_percentage. When present (and
+# fresh) it is the number reported to the user, not our tokens/window math.
+sl_pct=""
 if [[ "${HANDOFF_CTX_NO_STATUSLINE:-0}" != "1" && -f "$sl_file" ]]; then
   while IFS='=' read -r sl_k sl_v; do
     case "$sl_k" in
       window) [[ "$sl_v" =~ ^[0-9]+$ ]] && sl_window="$sl_v" ;;
       tokens) [[ "$sl_v" =~ ^[0-9]+$ ]] && sl_tokens="$sl_v" ;;
+      pct) [[ "$sl_v" =~ ^[0-9]+(\.[0-9]+)?$ ]] && sl_pct="$sl_v" ;;
     esac
   done < "$sl_file" 2>/dev/null || true
   # Freshness guard: adopt the statusline TOKEN count only while the sl cache
@@ -404,12 +413,14 @@ if [[ "${HANDOFF_CTX_NO_STATUSLINE:-0}" != "1" && -f "$sl_file" ]]; then
   # unwires the statusLine mid-session — a stale cache would otherwise report
   # a frozen count forever while the Stop hook keeps measuring. If the tokens
   # file is absent, the sl cache wins outright. (Portable mtime: GNU stat -c
-  # with BSD stat -f fallback, same idiom as handoff_turn_append.sh.)
-  if [[ -n "$sl_tokens" && -f "$tokens_file" ]]; then
+  # with BSD stat -f fallback, same idiom as handoff_turn_append.sh.) The
+  # cached pct is from the same payload snapshot, so it goes stale with it.
+  if [[ ( -n "$sl_tokens" || -n "$sl_pct" ) && -f "$tokens_file" ]]; then
     sl_mtime="$(stat -c %Y "$sl_file" 2>/dev/null || stat -f %m "$sl_file" 2>/dev/null || echo 0)"
     tk_mtime="$(stat -c %Y "$tokens_file" 2>/dev/null || stat -f %m "$tokens_file" 2>/dev/null || echo 0)"
     if [[ "$sl_mtime" =~ ^[0-9]+$ && "$tk_mtime" =~ ^[0-9]+$ ]] && (( sl_mtime < tk_mtime )); then
       sl_tokens=""
+      sl_pct=""
     fi
   fi
 fi
@@ -606,7 +617,7 @@ fi
 # The regex is a POSIX ERE, used both with bash `=~` and jq `test()`; the
 # bash-escaped default passes through --arg with single backslashes, which is
 # exactly the ERE jq expects. See the header for what the default matches.
-ONE_M_MODEL_RE="${HANDOFF_CTX_1M_MODEL_REGEX:-\[1m\]|claude-(fable|mythos)-}"
+ONE_M_MODEL_RE="${HANDOFF_CTX_1M_MODEL_REGEX:-\[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])}"
 window_tokens="${HANDOFF_CTX_WINDOW_TOKENS:-}"
 window_source="env"
 # A non-positive-integer override (0, negative, or garbage) would make the
@@ -769,7 +780,25 @@ if [[ -f "$flag_file" ]]; then
 fi
 
 # --- Compose and emit the system-reminder ---
-pct=$((est_tokens * 100 / WINDOW_TOKENS))
+# Which percentage to report. Claude Code's own used_percentage is the ground
+# truth, so it wins whenever it is fresh AND the window is CC's too (an env pin
+# means the user chose a different budget, so CC's pct would contradict it).
+# Otherwise we compute tokens/window; when that window was merely INFERRED from
+# the model id, the reminder says so. That is the normal case in the desktop
+# app: it does not run the statusLine, the only place Claude Code exposes
+# context_window to scripts, and a stale model list there once made a 1M
+# session report 47% at 94,637 tokens. A guess must never read as a measurement.
+pct_label=""
+window_note=""
+if [[ "$window_source" == "statusline" && -n "$sl_pct" ]]; then
+  pct="${sl_pct%%.*}"
+else
+  pct=$((est_tokens * 100 / WINDOW_TOKENS))
+  if [[ "$window_source" == "auto" ]]; then
+    pct_label=" (estimated)"
+    window_note=" NOTE: this percentage is an ESTIMATE: the ${WINDOW_TOKENS}-token window was inferred from the model id (${session_model:-not recorded}), because Claude Code's own context_window.used_percentage has not reached this hook (the status line, its only source for hooks, has not reported for this session; the desktop app does not run it). Say it is an estimate when you mention it."
+  fi
+fi
 
 # The re-fire wording must match what will actually happen. With a finite cap
 # about to be reached — and the default suggest-mode MAX_FLAGS=1 means the
@@ -799,14 +828,14 @@ case "$REMINDER_MODE" in
   act)
     cat <<EOF
 <system-reminder>
-Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window).${est_note} This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself — do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. ${repeat_note}
+Context at ~${est_tokens} tokens (~${pct}%${pct_label} of a ${WINDOW_TOKENS}-token window).${est_note}${window_note} This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself; do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. ${repeat_note}
 </system-reminder>
 EOF
     ;;
   *)
     cat <<EOF
 <system-reminder>
-Context at ~${est_tokens} tokens (~${pct}% of a ${WINDOW_TOKENS}-token window).${est_note} This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than at 5%. Flag to the user as a passive mention — no question mark, no "want me to?". One line, e.g. "Flagging: ~${pct}% of context used — natural /handoff moment if you want to lock in the prose while I'm still sharp." ${repeat_note}
+Context at ~${est_tokens} tokens (~${pct}%${pct_label} of a ${WINDOW_TOKENS}-token window).${est_note}${window_note} This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than at 5%. Flag to the user as a passive mention: no question mark, no "want me to?". One line, e.g. "Flagging: ~${pct}%${pct_label} of context used: natural /handoff moment if you want to lock in the prose while I'm still sharp." ${repeat_note}
 </system-reminder>
 EOF
     ;;
