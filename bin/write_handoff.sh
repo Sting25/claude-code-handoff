@@ -805,6 +805,35 @@ if (( RESTAMP )); then
   fi
   rm -f "$restamp_src"; restamp_src=""
   chmod 600 "$restamp_tmp" 2>/dev/null || true
+  # Refresh the HANDOFF_WRITER marker to this restamping session (issue #132):
+  # a restamp is how a session curates fences in place (edit the Rules body,
+  # then --restamp to sign), and until now that edit never updated WRITER, so
+  # the doc kept crediting whichever earlier session did its last FULL write.
+  # A later --if-curated carry then read that stale sid off the doc and
+  # mislabeled its "carried forward from" comment with a session that didn't
+  # actually author the content being carried. Rewriting the marker in place
+  # (same line, same position; added only if a session id is known and a
+  # marker already exists, never newly inserted) keeps doc_author_id an
+  # accurate "who last touched this doc" signal for that carry logic, with no
+  # effect on the HMAC/skeleton mechanics themselves: both are recomputed
+  # below over whatever bytes are in restamp_tmp at that point, same as any
+  # other restamp edit.
+  if [[ -n "$writer_session_id" ]] \
+     && LC_ALL=C grep -qE '^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=[0-9]+ -->[[:space:]]*$' "$restamp_tmp"; then
+    restamp_writer_epoch="$(date +%s)"
+    if LC_ALL=C awk -v sid="$writer_session_id" -v t="$restamp_writer_epoch" '
+        /^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=[0-9]+ -->[[:space:]]*$/ {
+          print "<!-- HANDOFF_WRITER: sid=" sid " t=" t " -->"
+          next
+        }
+        { print }
+      ' "$restamp_tmp" > "$restamp_tmp.wr" 2>/dev/null; then
+      mv -f "$restamp_tmp.wr" "$restamp_tmp"
+      chmod 600 "$restamp_tmp" 2>/dev/null || true
+    else
+      rm -f "$restamp_tmp.wr" 2>/dev/null || true
+    fi
+  fi
   restamp_signed=0
   # Re-emit the skeleton stamp (structure verified intact above, so this equals
   # the recorded one) BEFORE the main HMAC, which then covers it — the same

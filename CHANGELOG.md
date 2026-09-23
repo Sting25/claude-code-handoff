@@ -17,6 +17,7 @@ No hook-command or permission-entry changes: nothing to re-patch in
 
 ### Fixed
 - **Placeholder detection misread CRLF handoffs.** `handoff_is_unedited_placeholder()` (in both `bin/handoff_session_start.sh` and `bin/write_handoff.sh`) matched the Notes heading and the placeholder sentinel byte-exact, so a handoff saved with CRLF line endings never matched: a genuinely unedited placeholder read as curated, the `/handoff-recover` banner never fired, and the SessionEnd safety net could preserve a placeholder doc forever. Both copies now tolerate an optional trailing `\r`, matching `hoist_notes()`'s existing CRLF handling.
+- **`HANDOFF_RULES_CARRIED` label could name a stale session after fences were hand-edited.** `write_handoff.sh --restamp` never refreshed the `HANDOFF_WRITER` marker, so a session that edited an already-carried Rules block in place and restamped it left the doc still credited to whichever earlier session did its last full write. The next stale-refresh then read that stale id off the doc and mislabeled its "carried forward from" comment with a session that never touched the content being carried. `--restamp` now refreshes the marker to the restamping session (added only when a session id is known and a marker already exists), so the label always names the session whose doc was actually carried, with no effect on HMAC/skeleton verification or the trust tier.
 
 ## [0.18.5] - 2026-09-23
 
