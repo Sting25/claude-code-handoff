@@ -6,8 +6,8 @@
 # narrative regions by priority, lowest first, and the current doc's whole
 # region (priority 3) has always outranked LOWER than the placeholder
 # fallback's curated history snapshot (priority 4). On a tight budget the
-# trimmer could zero out the current doc's entire region — HEAD, branch, and
-# recent commits included — before the fallback lost a single byte. Measured
+# trimmer could zero out the current doc's entire region (HEAD, branch, and
+# recent commits included) before the fallback lost a single byte. Measured
 # live on a real repo: "trimmed 2746 of 2746 bytes" from the current doc's
 # section, so the model got no git state at all, only the trim notice.
 #
@@ -17,6 +17,9 @@
 # (git_head_priority=9, trimmed last of everything narrative), stripped out
 # of the main current-doc region so it is never duplicated.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The writer's HEAD line separates sha and subject with an em dash (U+2014).
+# Spelled as a byte escape so this file adds no literal em dash (#109 gate).
+EMDASH=$'\xe2\x80\x94'
 
 SS="$REPO_ROOT/bin/handoff_session_start.sh"
 SENTINEL='<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->'
@@ -49,8 +52,8 @@ mk_current_placeholder() {  # <dir>
     echo "## Repo: fixture"
     echo
     # shellcheck disable=SC2016  # backticks are literal markdown code spans, not command substitution
-    printf '**HEAD:** `%s` — %s\n\n' \
-      "$(git -C "$d" rev-parse --short HEAD)" "$(git -C "$d" log -1 --pretty=%s)"
+    printf '**HEAD:** `%s` %s %s\n\n' \
+      "$(git -C "$d" rev-parse --short HEAD)" "$EMDASH" "$(git -C "$d" log -1 --pretty=%s)"
     # shellcheck disable=SC2016  # backticks are literal markdown code spans, not command substitution
     printf '**Branch:** `%s` (main)\n\n' "$(git -C "$d" rev-parse --abbrev-ref HEAD)"
     echo "### Recent commits"
@@ -114,7 +117,7 @@ check "fallback -> fallback notes head survives" yes "$(has "$out" FALLBACK_NOTE
 # --- (a2) Same shape, but with long commit subjects so the protected head
 #     region itself is bigger than the trimmer's fixed 240-byte-plus-path
 #     per-region reserve (below that reserve a region is never trimmed at
-#     all, priority or not — see the "res" check in handoff_session_start.sh's
+#     all, priority or not; see the "res" check in handoff_session_start.sh's
 #     ss_awk). This is the case that actually exercises git_head_priority:
 #     a small everyday repo's head never gets near that reserve, so without
 #     this fixture the priority number could regress to anything low and
@@ -138,7 +141,7 @@ check "fallback (large head) -> HEAD sha present"      yes "$(has "$out" "$head_
 check "fallback (large head) -> first recent commit present" yes "$(has "$out" "$first_commit_line_b")"
 check "fallback (large head) -> fallback notes head survives" yes "$(has "$out" FALLBACK_NOTE_HEAD)"
 
-# --- (b) Normal curated case: unchanged in substance — a small, fully
+# --- (b) Normal curated case: unchanged in substance: a small, fully
 #     curated current doc loads whole, HEAD/branch/commits appear once (no
 #     duplication from the new protected-head region), no trim notice. ------
 p2="$(mk_repo)" || exit 1
@@ -154,7 +157,7 @@ must bash -c "cat > '$p2/.claude/handoff_current.md'" <<EOF
 
 ## Repo: fixture
 
-**HEAD:** \`$head_short2\` — $(git -C "$p2" log -1 --pretty=%s)
+**HEAD:** \`$head_short2\` $EMDASH $(git -C "$p2" log -1 --pretty=%s)
 
 **Branch:** \`$(git -C "$p2" rev-parse --abbrev-ref HEAD)\` (main)
 
