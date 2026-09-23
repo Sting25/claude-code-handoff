@@ -25,7 +25,14 @@ No hook-command or permission-entry changes: nothing to re-patch in
   fallback lost a single byte. The loader now pulls a short, capped
   git-state head (the `## Repo:` line, HEAD, Branch, and up to 5 recent
   commits) out of the current doc into its own region with the highest
-  trim priority, so it survives even a trimmed fallback load (#131).
+  trim priority, so it survives even a trimmed fallback load. The
+  "reference DATA" caveat now prints ahead of this protected head (it
+  used to print below it), and the unverified load path now strips the
+  head from the narrative before hoisting Notes, not after: filtering
+  after the hoist let a `## Repo:` line pasted inside Notes (e.g. quoted
+  troubleshooting output) hijack the extraction, duplicating the real
+  head or silently deleting the pasted block depending on the pasted
+  text's shape (#131).
 
 ## [0.18.5] - 2026-09-23
 

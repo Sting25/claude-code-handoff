@@ -195,4 +195,97 @@ tiny_ok=no
 check "tiny budget -> within budget or documented over-budget notice" yes "$tiny_ok"
 check "tiny budget -> produced some output" yes "$([ -n "$out" ] && echo yes || echo no)"
 
+# --- (d) UNVERIFIED path (emit_untrusted), review finding F3: a "## Repo:"
+#     line pasted inside Notes (e.g. quoted troubleshooting output) must not
+#     hijack the git-head strip's extraction state machine. emit_untrusted
+#     used to run its `strip_git_head` filter AFTER hoist_notes, i.e. on a
+#     stream where Notes (containing the pasted block) had already been moved
+#     to the FRONT, so strip_git_head's "first ## Repo: line wins" scan hit
+#     the pasted block first instead of the doc's real snapshot section:
+#       - the pasted block, shaped exactly like a real snapshot (## Repo: /
+#         **HEAD:** / **Branch:** / ### Recent commits / fenced commits),
+#         fully matched and was SILENTLY DELETED (strip mode never prints a
+#         completed match).
+#       - the doc's OWN real snapshot section, now positioned after Notes in
+#         the hoisted stream, was never reached (the state machine only
+#         starts looking from state 0, and abandons/succeeds exactly once),
+#         so it survived unstripped in the narrative, duplicating the
+#         protected head's own copy of the real HEAD line.
+#     Fix: the filter now runs on the RAW file before hoist_notes, matching
+#     the verified path's own order, so it only ever sees the doc's real
+#     top-of-file snapshot section, never text quoted inside Notes.
+p4="$(mk_repo)" || exit 1
+cleanup_on_exit "$p4"
+real_sha="$(git -C "$p4" rev-parse --short HEAD)"
+real_subj="$(git -C "$p4" log -1 --pretty=%s)"
+real_branch="$(git -C "$p4" rev-parse --abbrev-ref HEAD)"
+mkdir -p "$p4/.claude" || exit 1
+must bash -c "cat > '$p4/.claude/handoff_current.md'" <<EOF
+# handoff: session handoff (auto-generated)
+
+**Generated:** 2026-09-22 12:00 UTC
+
+---
+
+## Repo: fixture
+
+**HEAD:** \`$real_sha\` - $real_subj
+
+**Branch:** \`$real_branch\` (main)
+
+### Recent commits
+
+\`\`\`
+$(git -C "$p4" log --oneline -10)
+\`\`\`
+
+### Working tree
+
+_clean_
+
+## Notes from this session
+
+PASTED_MARKER_BEFORE quoted troubleshooting output follows:
+
+## Repo: fake
+
+**HEAD:** \`deadbee\` - fake pasted subject
+
+**Branch:** \`main\` (nothing)
+
+### Recent commits
+
+\`\`\`
+fake commit line
+\`\`\`
+
+PASTED_MARKER_AFTER end of quoted output. CURATED_TAIL_D real curated prose.
+EOF
+out="$(run_ss "$p4")"
+check "unverified pasted-head -> no trim notice"        no  "$(has "$out" 'trimmed')"
+check "unverified pasted-head -> real HEAD sha present" yes "$(has "$out" "$real_sha")"
+# A raw "**HEAD:**" marker count is not distinguishing here: the pasted
+# block is SUPPOSED to survive (contributing its own "**HEAD:** `deadbee`"
+# line), and the real sha also legitimately appears a second time inside the
+# protected head's OWN "### Recent commits" fenced log (git log --oneline
+# echoes the same abbreviated HEAD sha there). So check the exact rendered
+# lines instead: the REAL "**HEAD:** `<sha>`" line must appear exactly once
+# (only from the protected head; a narrative duplicate would make it 2),
+# and the PASTED fake "**HEAD:** `deadbee`" line must also appear exactly
+# once (preserved, not silently deleted, not duplicated either).
+real_head_line_count="$(printf '%s\n' "$out" | grep -cF -- "**HEAD:** \`$real_sha\`")"
+# shellcheck disable=SC2016  # backticks are a literal markdown code span here, not command substitution
+fake_head_line_count="$(printf '%s\n' "$out" | grep -cF -- '**HEAD:** `deadbee`')"
+check "unverified pasted-head -> real HEAD line printed exactly once (F3, no narrative duplicate)" 1 \
+  "$real_head_line_count"
+check "unverified pasted-head -> pasted fake HEAD line printed exactly once (F3, preserved not deleted/duplicated)" 1 \
+  "$fake_head_line_count"
+check "unverified pasted-head -> pasted marker before block survives (F3, not silently deleted)" yes \
+  "$(has "$out" 'PASTED_MARKER_BEFORE')"
+check "unverified pasted-head -> pasted marker after block survives (F3, not silently deleted)" yes \
+  "$(has "$out" 'PASTED_MARKER_AFTER')"
+check "unverified pasted-head -> pasted fake sha survives (F3, not silently deleted)" yes \
+  "$(has "$out" 'deadbee')"
+check "unverified pasted-head -> curated tail survives" yes "$(has "$out" 'CURATED_TAIL_D')"
+
 finish
