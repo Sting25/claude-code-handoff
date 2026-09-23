@@ -54,6 +54,37 @@ No hook-command or permission-entry changes: nothing to re-patch in
   `used_percentage` wins said "the window is CC's too", but the code uses
   it for any non-pinned window, not only a status-line-reported one; the
   comment now matches.
+- **A curated handoff never refreshed again, once curated (#125).**
+  SessionEnd and PreCompact run `write_handoff.sh --if-curated`, and that
+  path preserved handoff_current.md any time it held curated Notes or
+  curated Rules, with no check on how old the curation was. Once a
+  single session ran /handoff, every LATER session that ended without
+  running /handoff hit the same "curated, so preserve" branch forever,
+  and the doc never rotated again. Measured on a real repo: 7 sessions,
+  0 refreshes, an 11-day-old handoff still loading as current. `--if-
+  curated` now also checks whether the doc predates the running
+  session (its HANDOFF_WRITER marker names an earlier session whose
+  write time is before this session's own recorded start); if so, this
+  session never curated it, and the write falls through to a normal
+  refresh, archiving the stale doc into `.claude/handoff_history/`
+  rather than deleting it. A doc written during this session's own
+  lifetime (concurrent curation) is still preserved untouched. The
+  refresh never destroys curated content: a doc whose Notes OR Rules
+  fences were curated is archived (rotation used to delete a doc with
+  placeholder Notes even when its fences were curated), and with
+  `HANDOFF_HISTORY_KEEP=0` (archiving disabled) the stale curated doc
+  is preserved as before. When the stale doc's provenance verifies
+  (untracked + valid HMAC, the same check the loader uses to grant
+  binding status), its `## Rules` fences are carried into the fresh,
+  signed doc so standing rules keep binding after a session that didn't
+  run /handoff; an unverified doc carries nothing, and Notes are never
+  carried (they stay in history). `prune_history()` now also never deletes the newest curated history
+  snapshot, so a run of uncurated safety-net rotations after a
+  stale-refresh can't prune it away, and
+  `handoff_session_start.sh`'s placeholder fallback now looks for the
+  newest CURATED history snapshot instead of just the newest file, so
+  it still surfaces real curated prose behind any number of uncurated
+  rotations.
 
 ## [0.18.4] - 2026-09-22
 
