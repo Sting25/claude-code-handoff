@@ -484,6 +484,11 @@ reference data through the history fallback. So that refresh carries
 the old doc's `## Rules` fences into the new doc's `## Rules` block,
 behind a one-line `HANDOFF_RULES_CARRIED` comment naming the source,
 and the new doc is signed like any write, so the fences keep binding.
+The comment names the session whose doc was carried (the last session
+to write or restamp it) and adds "whose snapshot is archived in
+handoff_history/" only when that doc is archived. A doc that was itself
+only a carried copy is not archived (see below), so its comment makes no
+archive claim.
 It does this only when the old doc passes the same provenance check the
 loader uses (untracked, balanced markers, valid HMAC); an unsigned,
 tampered, planted, or tracked doc carries nothing, so an unverified
@@ -492,10 +497,12 @@ are not carried: they stay in history and load through the fallback as
 data. A doc whose only curated content is carried fences (its Notes are
 still the placeholder) is not archived again when the next refresh
 carries the same fences forward, so a string of non-curating sessions
-does not fill history with copies. It is archived like any curated doc
-whenever the incoming write does not carry those exact fences (a
-`/handoff` or manual write, a carry refused by the provenance check, or
-fences edited by hand). The pin needs no carrying, since every write re-reads it from
+does not fill history with copies. That holds even when a session edited
+those fences by hand and restamped: the edited fences are carried into
+the new doc, so nothing is lost. The carried copy is archived like any
+curated doc whenever the incoming write does not carry its fences (a
+`/handoff` or manual write, or a carry refused by the provenance check).
+The pin needs no carrying, since every write re-reads it from
 `handoff_pinned.md`.
 
 One consequence to know about: the `/handoff` skill *edits* the doc

@@ -12,7 +12,11 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Fixed
+- **`HANDOFF_RULES_CARRIED` label claimed an archived snapshot that did not exist (#136).** When fences were carried through more than one session that ended without `/handoff`, every label after the first said the source's "Notes are in handoff_history/". That source was a carried-only copy, which is deleted rather than archived (#130), so the named file never existed. The label still names the session whose doc was carried (#132), and now adds "whose snapshot is archived in handoff_history/" only when this write's rotation will archive that doc, decided by the same `handoff_is_carried_only` check the rotation itself uses. Measured over an 11-session run (A curates, B to K never do): 8 false claims before, 0 after. Also corrects `docs/reference.md` and a code comment that said a carried copy whose fences were hand-edited gets archived: the edited fences are carried into the new doc and the copy is deleted, so nothing is lost, but the docs described the opposite.
 
 ## [0.18.6] - 2026-09-23
 
