@@ -78,8 +78,14 @@ Three slash commands plus one automatic safety net, doing different jobs:
   loss, not as a substitute for `/handoff`. The hook passes
   `--if-curated`, so if you already ran `/handoff` this session (it
   replaced the placeholder block with curated Notes), the safety-net
-  write is a no-op — your curated content stays put rather than being
-  rotated into history. A `/resume` session-switch (which fires
+  write is a no-op: your curated content stays put rather than being
+  rotated into history. That preservation only holds while the
+  curation is current: if the curated doc's `HANDOFF_WRITER` marker
+  names an earlier session whose write predates this session's own
+  start, this session never curated it, so `--if-curated` falls
+  through to a normal write instead, archiving the stale curated doc
+  into `.claude/handoff_history/` (not deleting it) rather than
+  preserving it forever (issue #125). A `/resume` session-switch (which fires
   `SessionEnd` with reason `resume`) is treated as a pause, not an
   ending, and skips the safety-net write; tune via
   `HANDOFF_SESSIONEND_SKIP_REASONS` (set it empty to always write).

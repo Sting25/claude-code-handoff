@@ -311,6 +311,51 @@ handoff_is_unedited_placeholder() {
   ' "$path"
 }
 
+# ----- HANDOFF_WRITER marker / origin-epoch helpers (issue #63, #125) -------
+# Shared by the cross-session overwrite guard below and the --if-curated
+# staleness check (#125): both need "who wrote this doc, and when did THIS
+# session first show up here" to compare against a doc's write time.
+
+# Parse the trailing HANDOFF_WRITER marker out of <path>, taking the LAST
+# matching line (a restamp or a concurrent write could leave more than one).
+# Sets doc_author_id and doc_write_epoch (both cleared first); either is left
+# empty if the marker is absent or fails charset revalidation: a value that
+# doesn't survive round-tripping through the regex counts as no marker at all,
+# not a partial one.
+handoff_parse_writer_marker() {  # <path>
+  local path="$1" marker_line
+  doc_author_id=""
+  doc_write_epoch=""
+  marker_line="$(LC_ALL=C grep -E '^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=[0-9]+ -->[[:space:]]*$' \
+    "$path" 2>/dev/null | tail -n 1 || true)"
+  doc_author_id="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=([A-Za-z0-9_-]+) t=[0-9]+ -->.*/\1/')"
+  doc_write_epoch="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=([0-9]+) -->.*/\1/')"
+  [[ "$doc_author_id" =~ ^[A-Za-z0-9_-]+$ ]] || doc_author_id=""
+  [[ "$doc_write_epoch" =~ ^[0-9]+$ ]] || doc_write_epoch=""
+  [[ -n "$doc_author_id" && -n "$doc_write_epoch" ]] || { doc_author_id=""; doc_write_epoch=""; }
+}
+
+# Origin epoch for <sid>: when THIS session id was first seen in <backup_dir>
+# (handoff_session_start.sh writes the sidecar create-once). Sidecar content
+# if a plain integer, else its mtime. Sets origin_epoch, left empty (fail
+# open) if <backup_dir> or the sidecar is a symlink, the sidecar is missing,
+# or nothing parses.
+handoff_origin_epoch_for_sid() {  # <sid> <backup_dir>
+  local sid="$1" backup_dir="$2" origin_sidecar origin_raw
+  origin_epoch=""
+  [[ -n "$sid" && ! -L "$backup_dir" ]] || return 0
+  origin_sidecar="$backup_dir/.session_started_${sid}"
+  if [[ -f "$origin_sidecar" && ! -L "$origin_sidecar" ]]; then
+    origin_raw="$(cat "$origin_sidecar" 2>/dev/null || true)"
+    if [[ "$origin_raw" =~ ^[0-9]+$ ]]; then
+      origin_epoch="$origin_raw"
+    else
+      origin_epoch="$(stat -c %Y "$origin_sidecar" 2>/dev/null || stat -f %m "$origin_sidecar" 2>/dev/null || true)"
+      [[ "$origin_epoch" =~ ^[0-9]+$ ]] || origin_epoch=""
+    fi
+  fi
+}
+
 # ----- Config (override via env in your shell rc) -----
 #
 # HANDOFF_INFLIGHT_DIRS — space-separated subdirs to scan for untracked /
@@ -804,6 +849,8 @@ fi
 # clobber the fences. Matched anywhere (a curated file simply won't contain the
 # token; the worst case is a false "not curated" that the Notes check covers).
 HANDOFF_RULES_PLACEHOLDER_TOKEN="HANDOFF_RULES_PLACEHOLDER"
+# Shared by the staleness check below and the #63 overwrite guard just after it.
+backup_dir="$handoff_dir/handoff_backups"
 if (( IF_CURATED )); then
   # Reason-aware skip (safety net only — never on curated /handoff or manual
   # runs, which don't pass --if-curated). A reason in the skip list means
@@ -832,10 +879,43 @@ if (( IF_CURATED )); then
       rules_curated=1
     fi
     if ! handoff_is_unedited_placeholder "$handoff_path" || (( rules_curated )); then
-      # Notes OR Rules were curated (or the file is otherwise non-placeholder).
-      # Preserve it rather than clobber with a fresh mechanical snapshot.
-      echo "$handoff_path"
-      exit 0
+      # Notes OR Rules were curated, but a curated doc can also just be
+      # STALE (issue #125): once any session runs /handoff, every later
+      # session that ends WITHOUT running /handoff hits this branch and,
+      # pre-#125, preserved that same curated doc forever: nothing ever
+      # refreshed it again. Distinguish "still current" from "stale" by
+      # asking whether the doc predates THIS session: if its HANDOFF_WRITER
+      # marker names an earlier session that finished before this one even
+      # started, this session never curated it (there was nothing to
+      # preserve from this session's own work) and it's safe to fall
+      # through to a normal write, which rotates the stale curated doc into
+      # handoff_history/ rather than deleting it.
+      #
+      # All of the following must be known and unambiguous, or we keep
+      # today's behavior (preserve): an unreadable signal must fail open
+      # toward NOT overwriting curated content, same direction as the #63
+      # guard. Doc newer than this session's origin (a concurrent session
+      # curated it during this session's lifetime) must still be preserved
+      # (that's "doc_write_epoch < origin_epoch", not "!=").
+      stale_curated=0
+      if [[ -n "$writer_session_id" ]]; then
+        handoff_parse_writer_marker "$handoff_path"
+        if [[ -n "$doc_author_id" && "$doc_author_id" != "$writer_session_id" \
+              && -n "$doc_write_epoch" ]]; then
+          handoff_origin_epoch_for_sid "$writer_session_id" "$backup_dir"
+          if [[ -n "$origin_epoch" ]] && (( doc_write_epoch < origin_epoch )); then
+            stale_curated=1
+          fi
+        fi
+      fi
+      if (( ! stale_curated )); then
+        # Still current (or staleness couldn't be established): preserve it
+        # rather than clobber with a fresh mechanical snapshot.
+        echo "$handoff_path"
+        exit 0
+      fi
+      # Stale: fall through to the normal write path below, which rotates
+      # this doc into handoff_history/ before writing the fresh snapshot.
     fi
   fi
 fi
@@ -847,15 +927,7 @@ case "$overwrite_guard_mode" in block | warn | off) ;; *) overwrite_guard_mode=b
 overwrite_guard_fired=0
 if (( ! IF_CURATED )) && [[ "$overwrite_guard_mode" != off && -n "$writer_session_id" \
       && -f "$handoff_path" ]]; then
-  marker_line="$(LC_ALL=C grep -E '^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=[0-9]+ -->[[:space:]]*$' \
-    "$handoff_path" 2>/dev/null | tail -n 1 || true)"
-  doc_author_id="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=([A-Za-z0-9_-]+) t=[0-9]+ -->.*/\1/')"
-  doc_write_epoch="$(printf '%s\n' "$marker_line" | sed -E 's/^<!-- HANDOFF_WRITER: sid=[A-Za-z0-9_-]+ t=([0-9]+) -->.*/\1/')"
-  # Re-validate charset (a non-matching line leaves sed's input unchanged) —
-  # a value that fails validation counts as an absent marker.
-  [[ "$doc_author_id" =~ ^[A-Za-z0-9_-]+$ ]] || doc_author_id=""
-  [[ "$doc_write_epoch" =~ ^[0-9]+$ ]] || doc_write_epoch=""
-  [[ -n "$doc_author_id" && -n "$doc_write_epoch" ]] || { doc_author_id=""; doc_write_epoch=""; }
+  handoff_parse_writer_marker "$handoff_path"
   # Clock skew: a stamp too far in the future can't be trusted against a
   # local origin timestamp — fail open.
   if [[ -n "$doc_write_epoch" ]]; then
@@ -869,18 +941,8 @@ if (( ! IF_CURATED )) && [[ "$overwrite_guard_mode" != off && -n "$writer_sessio
   # create-once). Sidecar content if a plain integer, else its mtime, else no
   # origin (fail open, same as a symlinked handoff_backups).
   origin_epoch=""
-  backup_dir="$handoff_dir/handoff_backups"
-  if [[ -n "$doc_author_id" && "$doc_author_id" != "$writer_session_id" && ! -L "$backup_dir" ]]; then
-    origin_sidecar="$backup_dir/.session_started_${writer_session_id}"
-    if [[ -f "$origin_sidecar" && ! -L "$origin_sidecar" ]]; then
-      origin_raw="$(cat "$origin_sidecar" 2>/dev/null || true)"
-      if [[ "$origin_raw" =~ ^[0-9]+$ ]]; then
-        origin_epoch="$origin_raw"
-      else
-        origin_epoch="$(stat -c %Y "$origin_sidecar" 2>/dev/null || stat -f %m "$origin_sidecar" 2>/dev/null || true)"
-        [[ "$origin_epoch" =~ ^[0-9]+$ ]] || origin_epoch=""
-      fi
-    fi
+  if [[ -n "$doc_author_id" && "$doc_author_id" != "$writer_session_id" ]]; then
+    handoff_origin_epoch_for_sid "$writer_session_id" "$backup_dir"
   fi
   if [[ -n "$origin_epoch" ]] && (( doc_write_epoch > origin_epoch )); then
     overwrite_guard_fired=1
@@ -1172,13 +1234,30 @@ prune_history() {
   # collation (measured on macOS en_US.UTF-8) — an at-the-retention-boundary
   # prune would then delete the newer sibling and keep the older one. Same
   # fix as handoff_session_start.sh's newest-first pick; keep them in sync.
-  local f
-  find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
+  local f sorted newest_curated=""
+  sorted="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
     | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
-    | LC_ALL=C sort -r \
+    | LC_ALL=C sort -r || true)"
+  # Never prune the newest CURATED snapshot (#125), even when it falls past
+  # the retention cutoff below: a run of uncurated safety-net rotations
+  # (each one just mechanical git state) would otherwise age the one
+  # snapshot worth keeping out of history before anything ever reads it.
+  # "Curated" reuses the same Notes-placeholder check write_handoff.sh
+  # already applies everywhere else, so a rotated file counts as curated
+  # here exactly when it did at rotation time.
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    if ! handoff_is_unedited_placeholder "$f"; then
+      newest_curated="$f"
+      break
+    fi
+  done <<<"$sorted"
+  printf '%s\n' "$sorted" \
     | tail -n +$((HISTORY_KEEP + 1)) \
     | while IFS= read -r f; do
-        [[ -n "$f" ]] && rm -f -- "$f"
+        [[ -n "$f" ]] || continue
+        [[ -n "$newest_curated" && "$f" == "$newest_curated" ]] && continue
+        rm -f -- "$f"
       done
   # `grep` exiting 1 (nothing ours to consider) must not fail the pipeline under
   # pipefail — the caller already guards with `|| true`, but be explicit.
