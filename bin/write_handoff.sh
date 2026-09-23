@@ -1200,6 +1200,28 @@ rotate_existing_handoff() {
     rm -f "$handoff_path"
     return 0
   fi
+  # A doc whose Notes are the placeholder and whose only curated content is
+  # Rules CARRIED from an earlier doc (HANDOFF_RULES_CARRIED marker) is not
+  # archived when THIS write carries the very same Rules body forward again:
+  # nothing in it is lost (the fences are in the incoming doc, and the doc
+  # they were first curated in was archived when it was rotated), and
+  # archiving every such copy is what let a run of uncurated sessions push
+  # the real curated snapshots out of history and shadow them in the
+  # SessionStart fallback. Every other case still archives: no carry this
+  # write (a curated /handoff write, a manual run, carry refused because
+  # provenance or signing failed), a body that differs (someone edited the
+  # carried fences), or curated Notes. There the doc may be the only copy of
+  # its Rules, and curated content must never be lost on an automatic path.
+  if [[ -n "$carried_rules" ]] \
+     && handoff_is_unedited_placeholder "$handoff_path" \
+     && grep -qF "$HANDOFF_RULES_CARRIED_PREFIX" "$handoff_path" 2>/dev/null; then
+    local outgoing_rules
+    if outgoing_rules="$(handoff_extract_rules_body "$handoff_path")" \
+       && [[ -n "$outgoing_rules" && "$outgoing_rules" == "$carried_rules" ]]; then
+      rm -f "$handoff_path"
+      return 0
+    fi
+  fi
   [[ "$HISTORY_KEEP" -gt 0 ]] || return 0
   mkdir -p "$history_dir"
   local ts archived
@@ -1320,33 +1342,38 @@ prune_history() {
   # collation (measured on macOS en_US.UTF-8) — an at-the-retention-boundary
   # prune would then delete the newer sibling and keep the older one. Same
   # fix as handoff_session_start.sh's newest-first pick; keep them in sync.
-  local f sorted newest_curated=""
+  local f sorted
   sorted="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null \
     | LC_ALL=C grep -E '/handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?\.md$' \
     | LC_ALL=C sort -r || true)"
-  # Never prune the newest CURATED snapshot (#125), even when it falls past
-  # the retention cutoff below: a run of uncurated safety-net rotations
-  # (each one just mechanical git state) would otherwise age the one
-  # snapshot worth keeping out of history before anything ever reads it.
-  # "Curated" means Notes curated OR Rules curated (same OR the --if-curated
-  # preserve decision and rotate_existing_handoff's delete-vs-archive
-  # decision both use, via handoff_rules_curated): a rules-only curated
-  # snapshot (placeholder Notes, curated Rules fence) is real curated
-  # content too, and used to be indistinguishable here from an ordinary
-  # uncurated safety-net rotation, so it could be pruned like any other
-  # stale file.
+  # Never prune the newest NOTES-curated snapshot nor the newest RULES-curated
+  # snapshot (#125), even when they fall past the retention cutoff below (they
+  # may be the same file): a run of uncurated safety-net rotations (each one
+  # just mechanical git state) would otherwise age the snapshots worth keeping
+  # out of history before anything ever reads them. The two are tracked
+  # SEPARATELY on purpose. A single "newest curated (Notes OR Rules)" slot
+  # used to be taken by the newest doc whose only curated content was Rules
+  # carried forward by the stale refresh (placeholder Notes), so the last
+  # snapshot holding real curated Notes was no longer protected and was
+  # pruned after KEEP uncurated sessions. Rules-curated uses the same
+  # handoff_rules_curated definition as the --if-curated preserve decision
+  # and rotate_existing_handoff's delete-vs-archive decision.
+  local newest_notes="" newest_rules=""
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
-    if ! handoff_is_unedited_placeholder "$f" || handoff_rules_curated "$f"; then
-      newest_curated="$f"
-      break
+    if [[ -z "$newest_notes" ]] && ! handoff_is_unedited_placeholder "$f"; then
+      newest_notes="$f"
     fi
+    if [[ -z "$newest_rules" ]] && handoff_rules_curated "$f"; then
+      newest_rules="$f"
+    fi
+    [[ -n "$newest_notes" && -n "$newest_rules" ]] && break
   done <<<"$sorted"
   printf '%s\n' "$sorted" \
     | tail -n +$((HISTORY_KEEP + 1)) \
     | while IFS= read -r f; do
         [[ -n "$f" ]] || continue
-        [[ -n "$newest_curated" && "$f" == "$newest_curated" ]] && continue
+        [[ "$f" == "$newest_notes" || "$f" == "$newest_rules" ]] && continue
         rm -f -- "$f"
       done
   # `grep` exiting 1 (nothing ours to consider) must not fail the pipeline under
