@@ -136,13 +136,84 @@ else
   check "signed -> within budget"          yes "$(le "$(bytes "$out")" 9000)"
   check "signed -> narrative was trimmed"  yes "$(has "$out" 'trimmed')"
   check "signed -> notes head survives"    yes "$(has "$out" BIG_NOTE_HEAD)"
-  # Notes must precede the git snapshot (or the snapshot must be gone) so the
-  # trim eats mechanical state first. Guards the verified path's own hoist.
-  repo_ln="$(line_of "$out" '## Repo:')"
-  check "signed -> notes ahead of snapshot" yes \
-    "$([ "$repo_ln" -eq 0 ] || [ "$(line_of "$out" BIG_NOTE_HEAD)" -lt "$repo_ln" ] && echo yes || echo no)"
+  # Issue #131: the current doc's short git-state head (its own "## Repo:"
+  # line, HEAD, Branch, first commits) is now pulled into its own protected
+  # region ahead of Notes on purpose, so it survives trimming; that ONE
+  # "## Repo:" line is expected before Notes. What must still hold is that
+  # the main narrative's copy of the SAME heading was not also kept (no
+  # duplicate git snapshot), i.e. "## Repo:" appears at most once overall.
+  repo_count="$(printf '%s\n' "$out" | grep -c '^## Repo: ')"
+  check "signed -> git snapshot appears at most once (protected head, no duplicate)" yes \
+    "$([ "$repo_count" -le 1 ] && echo yes || echo no)"
   check "signed -> pin intact in binding tier" yes "$(has "$after" PIN_MARKER)"
   check "signed -> verify step in binding tier" yes "$(has "$after" 'Verify state matches reality')"
+
+  # --- 6b. Signed doc, VERIFIED path: the Notes hoist (issue #131 review
+  #     finding F1) must still run when provenance verifies. Case 6 above only
+  #     confirmed the protected git-state head survives trimming; it does not
+  #     exercise hoist_notes at all, because that fixture's real git snapshot
+  #     is tiny (a "### Working tree" of "_clean_"), so cutting the narrative
+  #     region from the end never reaches Notes either way. Removing
+  #     `hoist_notes` from the verified pipeline
+  #     (`strip_bind "$current" | strip_git_head | hoist_notes | defang_untrusted`)
+  #     passed the whole suite before this fixture existed. Here the working
+  #     tree is inflated with 400 untracked files so "### Working tree" is a
+  #     large REMAINING mechanical section (git_head only ever captures up to
+  #     the Recent-commits fence, never Working tree), big enough that without
+  #     the hoist, trimming the region from its end eats Notes entirely.
+  p6b="$(mk_repo)" || exit 1
+  cleanup_on_exit "$p6b"
+  for ((i = 1; i <= 300; i++)); do : > "$p6b/untracked_file_$i.txt"; done
+  must mkdir -p "$p6b/.claude"
+  ( cd "$p6b" && env HANDOFF_SECRET_FILE="$p6b/.secret" bash "$WH" </dev/null >/dev/null 2>&1 )
+  doc6b="$p6b/.claude/handoff_current.md"
+  # Deliberately smaller than case 6's 150-line Notes: measured, 150 lines +
+  # 300 untracked files trims the WHOLE "### Working tree" section away
+  # before this fixture's assertions can even check its position relative to
+  # Notes. 60 lines leaves the region just over budget, so the trimmer only
+  # eats part of the (still large) Working tree file list and the heading
+  # itself survives, letting the "Notes precedes Working tree" check below
+  # actually exercise ordering instead of vacuously passing on an absent
+  # section.
+  big6b="$(for ((i = 1; i <= 60; i++)); do printf 'Curated line %d with enough words to add up quickly.\\n' "$i"; done)"
+  must sed "s|<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->|BIG2_NOTE_HEAD\\n${big6b}BIG2_NOTE_TAIL|" \
+    "$doc6b" > "$doc6b.tmp"
+  must mv "$doc6b.tmp" "$doc6b"
+  ( cd "$p6b" && env HANDOFF_SECRET_FILE="$p6b/.secret" bash "$WH" --restamp </dev/null >/dev/null 2>&1 )
+  out6b="$(run_ss "$p6b")"
+  check "signed+big-worktree -> within budget"      yes "$(le "$(bytes "$out6b")" 9000)"
+  check "signed+big-worktree -> narrative trimmed"  yes "$(has "$out6b" 'trimmed')"
+  check "signed+big-worktree -> notes head survives" yes "$(has "$out6b" BIG2_NOTE_HEAD)"
+  check "signed+big-worktree -> Working tree section present" yes \
+    "$(has "$out6b" '### Working tree')"
+  check "signed+big-worktree -> Notes heading precedes Working tree (hoisted)" yes \
+    "$([ "$(line_of "$out6b" 'BIG2_NOTE_HEAD')" -lt "$(line_of "$out6b" '### Working tree')" ] && echo yes || echo no)"
+
+  # --- 6c. Signed doc, VERIFIED path, untrimmed: dropping `strip_git_head`
+  #     from the verified pipeline (review finding F2) makes a small signed
+  #     curated doc print "**HEAD:**" twice: once in the protected head
+  #     region, once again in the main narrative, because nothing removed it
+  #     there. Case 6/6b above are always trimmed (12 KB of curated prose), so
+  #     a naive "at most once" check run only there is vacuous whenever the
+  #     main narrative's own copy gets cut along with everything else; this
+  #     fixture stays small enough to load whole (no trim), so the only way
+  #     "**HEAD:**" appears once is if strip_git_head actually removed the
+  #     narrative's copy.
+  p6c="$(mk_repo)" || exit 1
+  cleanup_on_exit "$p6c"
+  must mkdir -p "$p6c/.claude"
+  ( cd "$p6c" && env HANDOFF_SECRET_FILE="$p6c/.secret" bash "$WH" </dev/null >/dev/null 2>&1 )
+  doc6c="$p6c/.claude/handoff_current.md"
+  must sed "s|<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->|SMALL_NOTE_HEAD\\nSmall curated note.\\nSMALL_NOTE_TAIL|" \
+    "$doc6c" > "$doc6c.tmp"
+  must mv "$doc6c.tmp" "$doc6c"
+  ( cd "$p6c" && env HANDOFF_SECRET_FILE="$p6c/.secret" bash "$WH" --restamp </dev/null >/dev/null 2>&1 )
+  out6c="$(run_ss "$p6c")"
+  check "signed small -> no trim notice"        no  "$(has "$out6c" 'trimmed')"
+  check "signed small -> notes survive"         yes "$(has "$out6c" SMALL_NOTE_TAIL)"
+  head_count6c="$(printf '%s\n' "$out6c" | grep -c '\*\*HEAD:\*\*')"
+  check "signed small -> HEAD line printed at most once (no narrative duplicate)" yes \
+    "$([ "$head_count6c" -le 1 ] && echo yes || echo no)"
 fi
 
 ge() { [ "$1" -ge "$2" ] && echo yes || echo no; }
