@@ -227,7 +227,9 @@ rm -rf "$repo"
 #        refresh was rm'd: the fences were lost with no history copy. -----
 BIND_B='<!-- HANDOFF_BIND_BEGIN -->'
 BIND_E='<!-- HANDOFF_BIND_END -->'
-RULES_H='## Rules (fences — carried into the next session)'
+# The writer's Rules heading contains an em dash; spell it as a byte escape so
+# this file's own text stays dash-free (repo diff hygiene gate).
+RULES_H="## Rules (fences $(printf '\342\200\224') carried into the next session)"
 plant_rules_only() {  # <repo> <marker_line> <fence_text>
   mkdir -p "$1/.claude"
   {
