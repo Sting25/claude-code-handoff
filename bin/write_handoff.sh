@@ -1553,7 +1553,11 @@ handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
   printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n' "$repo_root" "$in_git"
   # Writer marker (issue #63), read by the guard above on the NEXT write.
   # Right after HANDOFF_ROOT so it sits in the verbatim preamble both HMACs
-  # cover, and --restamp (never regenerates the preamble) leaves it intact.
+  # cover. --restamp never regenerates the preamble, but since #132 it does
+  # rewrite this one line to the restamping session (when a session id is
+  # known and a marker exists), so the doc is credited to whoever last
+  # curated it. Consequence for the guard: a doc restamped by another
+  # session counts as that session's write.
   # Absent when no session id resolved -> the guard is inert on this doc.
   if [[ -n "$writer_session_id" ]]; then
     printf '<!-- HANDOFF_WRITER: sid=%s t=%s -->\n' "$writer_session_id" "$write_epoch"
