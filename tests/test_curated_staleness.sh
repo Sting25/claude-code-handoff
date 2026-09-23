@@ -688,4 +688,121 @@ else
   rm -rf "$repo"
 fi
 
+# --- 19 (issue #136): the carried-from label claims an archive only when --
+#         one exists. A curates; B, C, D, E end without curating; F then
+#         hand-edits the carried fence and restamps; G carries it. Each
+#         label names its immediate source (#132), but only A is a real
+#         curated doc that rotation archives: every later source is a
+#         carried-only copy #130 deletes. The old label said "whose Notes
+#         are in handoff_history/" on every hop, naming a deleted file. ---
+# The current doc's carried-from label, minus the comment wrapper.
+carried_label_of() { sed -n 's/^<!-- HANDOFF_RULES_CARRIED: \(.*\) -->$/\1/p' "$1"; }
+# yes if a history snapshot's own HANDOFF_WRITER marker names <sid>.
+archived_writer() {  # <repo> <sid> -> yes|no
+  if grep -lE "^<!-- HANDOFF_WRITER: sid=$2 t=[0-9]+ -->\$" \
+       "$1/.claude/handoff_history"/handoff_*.md >/dev/null 2>&1; then
+    echo yes
+  else
+    echo no
+  fi
+}
+# yes if <label> claims an archived snapshot that history does not hold.
+label_claim_false() {  # <repo> <label> -> yes|no
+  local sid
+  case "$2" in *"handoff_history/"*) ;; *) echo no; return ;; esac
+  sid="$(printf '%s\n' "$2" | sed -nE 's/.*sid=([A-Za-z0-9_-]+) t=.*/\1/p')"
+  if [[ "$(archived_writer "$1" "$sid")" == yes ]]; then echo no; else echo yes; fi
+}
+if ! command -v openssl >/dev/null 2>&1; then
+  skip "19: openssl not installed, cannot build the signed carry chain for the archive-claim checks"
+else
+  repo="$(mk_repo_gitignored)"
+  doc19="$repo/.claude/handoff_current.md"
+  ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --session-id sidA19 >/dev/null 2>&1 )
+  sub_line "$doc19" 's/<!-- HANDOFF_RULES_PLACEHOLDER.*-->/- Do NOT rotate keys. FENCE19/'
+  sub_line "$doc19" 's/^<!-- HANDOFF_PLACEHOLDER: .*-->$/NOTES19 curated by A/'
+  ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --restamp >/dev/null 2>&1 )
+
+  uncurated_session "$repo" sidB19
+  lab="$(carried_label_of "$doc19")"
+  check "19: hop 1 -> label names A" yes "$(has "$lab" "sid=sidA19 ")"
+  check "19: hop 1 -> label says A's snapshot is archived" yes \
+    "$(has "$lab" "whose snapshot is archived in handoff_history/")"
+  check "19: hop 1 -> A's snapshot really is in history" yes "$(archived_writer "$repo" sidA19)"
+
+  uncurated_session "$repo" sidC19
+  lab="$(carried_label_of "$doc19")"
+  check "19: hop 2 -> fence still carried" yes "$(has "$(cat "$doc19")" FENCE19)"
+  check "19: hop 2 -> label names B, the immediate source" yes "$(has "$lab" "sid=sidB19 ")"
+  check "19: hop 2 -> B's carried-only doc is not in history" no "$(archived_writer "$repo" sidB19)"
+  check "19: hop 2 -> label makes no archive claim" no "$(has "$lab" "handoff_history/")"
+  check "19: hop 2 -> exactly one carried-from label" 1 \
+    "$(grep -c '^<!-- HANDOFF_RULES_CARRIED: ' "$doc19" || true)"
+
+  labels19=0; false_claims19=0
+  for s in sidD19 sidE19; do
+    uncurated_session "$repo" "$s"
+    lab="$(carried_label_of "$doc19")"
+    if [[ -n "$lab" ]]; then labels19=$((labels19 + 1)); fi
+    if [[ "$(label_claim_false "$repo" "$lab")" == yes ]]; then false_claims19=$((false_claims19 + 1)); fi
+  done
+  check "19: hops 3-4 -> a label on every hop" 2 "$labels19"
+  check "19: hops 3-4 -> no label claims a snapshot history lacks" 0 "$false_claims19"
+
+  # F: the #132 sanctioned edit (fence body only, label line left in place),
+  # restamped under F's own id.
+  sub_line "$doc19" 's/FENCE19/FENCE19_EDITED_BY_F/'
+  ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --restamp --session-id sidF19 >/dev/null 2>&1 )
+  uncurated_session "$repo" sidG19
+  lab="$(carried_label_of "$doc19")"
+  check "19: after F's edit -> G carries the edited fence" yes "$(has "$(cat "$doc19")" FENCE19_EDITED_BY_F)"
+  check "19: after F's edit -> label names F" yes "$(has "$lab" "sid=sidF19 ")"
+  check "19: after F's edit -> F's doc was deleted, not archived" no "$(archived_writer "$repo" sidF19)"
+  check "19: after F's edit -> label makes no archive claim" no "$(has "$lab" "handoff_history/")"
+  check "19: after F's edit -> history still holds only A" 1 "$(hist_count "$repo")"
+  out19="$(run_ss_in "$repo")"
+  check "19: G start -> edited fence binding" yes "$(in_binding_tier "$out19" FENCE19_EDITED_BY_F)"
+  rm -rf "$repo"
+fi
+
+# --- 20 (issue #136): the history fallback shows an archived doc's fences --
+#         as reference text without its BIND marker lines. A curates, B ends
+#         without curating, so B's start loads A's snapshot through the
+#         fallback. Then again with that snapshot converted to CRLF (#128).
+# The fallback section of a SessionStart output, up to the recover banner.
+fallback_section() {  # <ss_output>
+  case "$1" in *"$FALLBACK_HDR"*) ;; *) return 0 ;; esac
+  printf '%s\n' "${1#*"$FALLBACK_HDR"}" | sed '/ACTION: RUN \/handoff-recover/,$d'
+}
+marker_lines() {  # stdin -> count of BIND marker lines, trailing CR tolerated
+  tr -d '\r' | grep -cE '^<!-- HANDOFF_BIND_(BEGIN|END) -->$' || true
+}
+if ! command -v openssl >/dev/null 2>&1; then
+  skip "20: openssl not installed, cannot build the signed fixture for the fallback marker checks"
+else
+  repo="$(mk_repo_gitignored)"
+  mk_signed_stale "$repo" "Do NOT merge. FENCE20" "NOTES20 curated by A"
+  uncurated_session "$repo" sidB20
+  a20="$(grep -rl NOTES20 "$repo/.claude/handoff_history" | head -n 1)"
+  check "20: fixture -> A's archived snapshot has BIND marker lines" yes \
+    "$([[ "$(marker_lines <"$a20")" -gt 0 ]] && echo yes || echo no)"
+  out20="$(run_ss_in "$repo")"
+  fb20="$(fallback_section "$out20")"
+  check "20: B start -> fallback loaded" yes "$(has "$out20" "$FALLBACK_HDR")"
+  check "20: fallback -> A's Notes present" yes "$(has "$fb20" NOTES20)"
+  check "20: fallback -> A's fence kept as reference text" yes "$(has "$fb20" FENCE20)"
+  check "20: fallback -> no BIND marker lines" 0 "$(printf '%s\n' "$fb20" | marker_lines)"
+  check "20: fence still binding from the current doc" yes "$(in_binding_tier "$out20" FENCE20)"
+
+  awk '{ printf "%s\r\n", $0 }' "$a20" > "$a20.tmp" && mv "$a20.tmp" "$a20"
+  check "20: CRLF fixture -> marker lines end in CR" yes \
+    "$(grep -q $'^<!-- HANDOFF_BIND_BEGIN -->\r$' "$a20" && echo yes || echo no)"
+  out20c="$(run_ss_in "$repo")"
+  fb20c="$(fallback_section "$out20c")"
+  check "20: CRLF fallback -> A's Notes present" yes "$(has "$fb20c" NOTES20)"
+  check "20: CRLF fallback -> A's fence kept" yes "$(has "$fb20c" FENCE20)"
+  check "20: CRLF fallback -> no BIND marker lines" 0 "$(printf '%s\n' "$fb20c" | marker_lines)"
+  rm -rf "$repo"
+fi
+
 finish

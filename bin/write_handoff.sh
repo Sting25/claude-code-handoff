@@ -906,6 +906,17 @@ handoff_rules_curated() {  # <path>
 # re-emission so repeated carries don't stack copies of it.
 HANDOFF_RULES_CARRIED_PREFIX="<!-- HANDOFF_RULES_CARRIED: "
 
+# A carried-only copy: placeholder Notes plus Rules a stale refresh carried in
+# (the HANDOFF_RULES_CARRIED marker). rotate_existing_handoff deletes such a
+# doc instead of archiving it when this write carries its Rules forward (#130),
+# and the carry path uses the SAME test to decide whether its label may say
+# the source is archived (#136). One definition, so the label can never claim
+# an archive the rotation then skips.
+handoff_is_carried_only() {  # <path>
+  handoff_is_unedited_placeholder "$1" \
+    && grep -qF "$HANDOFF_RULES_CARRIED_PREFIX" "$1" 2>/dev/null
+}
+
 # Print the body of <path>'s writer Rules region: the lines between the
 # `BIND_BEGIN` + Rules-heading pair and the next `BIND_END`, minus the heading,
 # single-line HTML comments (placeholder / carried marker scaffolding) and
@@ -939,6 +950,7 @@ backup_dir="$handoff_dir/handoff_backups"
 # --if-curated stale-refresh path below.
 carried_rules=""
 carried_from=""
+carried_source_archived=0
 if (( IF_CURATED )); then
   # Reason-aware skip (safety net only — never on curated /handoff or manual
   # runs, which don't pass --if-curated). A reason in the skip list means
@@ -1029,6 +1041,16 @@ if (( IF_CURATED )); then
             carried_rules="$(printf '%s\n' "$carried_rules" | handoff_sanitize_markers)"
           fi
           carried_from="sid=${doc_author_id} t=${doc_write_epoch}"
+          # The label may say the source is archived only when this write's
+          # rotation is certain to archive it (#136). A carried-only source
+          # is deleted instead (#130), so from the second hop on the old
+          # unconditional "whose Notes are in handoff_history/" named a file
+          # that no longer existed. Any other source IS archived: the carry
+          # required curated Rules (so the placeholder delete cannot fire)
+          # and the staleness check required HISTORY_KEEP > 0.
+          if ! handoff_is_carried_only "$handoff_path"; then
+            carried_source_archived=1
+          fi
         else
           carried_rules=""
         fi
@@ -1245,12 +1267,16 @@ rotate_existing_handoff() {
   # the real curated snapshots out of history and shadow them in the
   # SessionStart fallback. Every other case still archives: no carry this
   # write (a curated /handoff write, a manual run, carry refused because
-  # provenance or signing failed), a body that differs (someone edited the
-  # carried fences), or curated Notes. There the doc may be the only copy of
-  # its Rules, and curated content must never be lost on an automatic path.
-  if [[ -n "$carried_rules" ]] \
-     && handoff_is_unedited_placeholder "$handoff_path" \
-     && grep -qF "$HANDOFF_RULES_CARRIED_PREFIX" "$handoff_path" 2>/dev/null; then
+  # provenance or signing failed), a body that differs from what this write
+  # carried, or curated Notes. There the doc may be the only copy of its
+  # Rules, and curated content must never be lost on an automatic path.
+  # The carry reads the same file this deletes, so "differs" means the doc
+  # changed between the carry and this rotation. Fences hand-edited and
+  # restamped in a carried-only doc match what is carried, so that doc IS
+  # deleted; the edited fences live on in the incoming doc (measured, #136).
+  # The carry path's archive label uses the same handoff_is_carried_only
+  # test, so the two cannot disagree.
+  if [[ -n "$carried_rules" ]] && handoff_is_carried_only "$handoff_path"; then
     local outgoing_rules
     if outgoing_rules="$(handoff_extract_rules_body "$handoff_path")" \
        && [[ -n "$outgoing_rules" && "$outgoing_rules" == "$carried_rules" ]]; then
@@ -1748,11 +1774,18 @@ EOF
   # and only from a doc whose provenance verified; see that block. It is
   # emitted in place of the placeholder so this freshly signed doc keeps the
   # fences binding, preceded by a single-line comment naming the source doc
-  # (stripped from the binding output like every HTML comment).
+  # (stripped from the binding output like every HTML comment). The comment
+  # says the source is archived only when carried_source_archived is set; a
+  # carried-only source is deleted, so saying nothing is the only true
+  # option (#136).
   printf '%s\n' "$HANDOFF_BIND_BEGIN"
   printf '%s\n\n' "$HANDOFF_RULES_HEADING"
   if [[ -n "$carried_rules" ]]; then
-    printf '%s%s -->\n' "$HANDOFF_RULES_CARRIED_PREFIX" "carried forward from the verified handoff $carried_from, whose Notes are in handoff_history/"
+    carried_label="carried forward from the verified handoff $carried_from"
+    if (( carried_source_archived )); then
+      carried_label="$carried_label, whose snapshot is archived in handoff_history/"
+    fi
+    printf '%s%s -->\n' "$HANDOFF_RULES_CARRIED_PREFIX" "$carried_label"
     printf '%s\n' "$carried_rules"
   else
     printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
