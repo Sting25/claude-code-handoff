@@ -864,8 +864,45 @@ handoff_rules_curated() {  # <path>
     && ! grep -qF "$HANDOFF_RULES_PLACEHOLDER_TOKEN" "$1" 2>/dev/null
 }
 
+# Carry-forward marker for Rules fences copied out of a stale doc (#125): a
+# single-line HTML comment, so handoff_bind_content strips it from the binding
+# output and it never reads as a rule. Stripped from an extracted body before
+# re-emission so repeated carries don't stack copies of it.
+HANDOFF_RULES_CARRIED_PREFIX="<!-- HANDOFF_RULES_CARRIED: "
+
+# Print the body of <path>'s writer Rules region: the lines between the
+# `BIND_BEGIN` + Rules-heading pair and the next `BIND_END`, minus the heading,
+# single-line HTML comments (placeholder / carried marker scaffolding) and
+# leading/trailing blank lines. Only the FIRST such region is taken: a doc that
+# passed provenance was built by this writer (one Rules region) and any later
+# --restamp refused structural changes via the skeleton stamp. Returns awk's
+# status so a failed filter reads as "nothing to carry", never a partial body.
+handoff_extract_rules_body() {  # <path>
+  LC_ALL=C awk \
+    -v begin_m="$HANDOFF_BIND_BEGIN" \
+    -v end_m="$HANDOFF_BIND_END" \
+    -v rules_h="$HANDOFF_RULES_HEADING" '
+    done_ { next }
+    held { held = 0; if ($0 == rules_h) { inside = 1; next } }
+    inside {
+      if ($0 == end_m) { inside = 0; done_ = 1; next }
+      if ($0 ~ /^<!--.*-->[[:space:]]*$/) next
+      if ($0 ~ /^[[:space:]]*$/) { if (n) blanks++; next }
+      while (blanks > 0) { print ""; blanks-- }
+      print; n++
+      next
+    }
+    $0 == begin_m { held = 1 }
+  ' "$1"
+}
+
 # Shared by the staleness check below and the #63 overwrite guard just after it.
 backup_dir="$handoff_dir/handoff_backups"
+# Rules fences carried from a stale, provenance-verified doc into this write
+# (#125); empty = emit the normal Rules placeholder. Set ONLY by the
+# --if-curated stale-refresh path below.
+carried_rules=""
+carried_from=""
 if (( IF_CURATED )); then
   # Reason-aware skip (safety net only — never on curated /handoff or manual
   # runs, which don't pass --if-curated). A reason in the skip list means
@@ -932,6 +969,34 @@ if (( IF_CURATED )); then
       fi
       # Stale: fall through to the normal write path below, which rotates
       # this doc into handoff_history/ before writing the fresh snapshot.
+      #
+      # Carry its binding Rules forward. Without this, one non-curating
+      # session demotes the previous session's fences to history, where
+      # they load only as untrusted DATA through the fallback: standing
+      # rules silently stop binding. Carry ONLY when the stale doc passes
+      # the same provenance gate the SessionStart loader uses to grant
+      # binding status (untracked + balanced BIND markers + valid HMAC over
+      # the whole doc, via the provenance lib). Anything less (no lib, no
+      # openssl, no secret, tracked, tampered, planted, trust disabled)
+      # carries nothing: copying an unverified doc's fences into a doc this
+      # run is about to SIGN would launder them into the binding tier. The
+      # Notes are never carried: they stay in history and load via the
+      # fallback as data. Also requires can_sign: an unsigned new doc could
+      # not make them bind anyway.
+      if (( rules_curated )) && can_sign \
+         && type handoff_provenance_ok >/dev/null 2>&1 \
+         && handoff_provenance_ok "$handoff_path" "$repo_root" "$handoff_relpath"; then
+        if carried_rules="$(handoff_extract_rules_body "$handoff_path")"; then
+          # Same marker-shape defang the pin body gets: only the writer may
+          # open or close a bind region, even inside carried content.
+          if [[ -n "$carried_rules" ]] && type handoff_sanitize_markers >/dev/null 2>&1; then
+            carried_rules="$(printf '%s\n' "$carried_rules" | handoff_sanitize_markers)"
+          fi
+          carried_from="sid=${doc_author_id} t=${doc_write_epoch}"
+        else
+          carried_rules=""
+        fi
+      fi
     fi
   fi
 fi
@@ -1607,9 +1672,20 @@ EOF
   # loads with binding framing — model-authored Notes below never do, so a
   # stray "next session should..." sentence can't become law — and even
   # marked content binds only when the document's provenance verifies.
+  #
+  # carried_rules (#125) is set only by the --if-curated stale-refresh path,
+  # and only from a doc whose provenance verified; see that block. It is
+  # emitted in place of the placeholder so this freshly signed doc keeps the
+  # fences binding, preceded by a single-line comment naming the source doc
+  # (stripped from the binding output like every HTML comment).
   printf '%s\n' "$HANDOFF_BIND_BEGIN"
   printf '%s\n\n' "$HANDOFF_RULES_HEADING"
-  printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
+  if [[ -n "$carried_rules" ]]; then
+    printf '%s%s -->\n' "$HANDOFF_RULES_CARRIED_PREFIX" "carried forward from the verified handoff $carried_from, whose Notes are in handoff_history/"
+    printf '%s\n' "$carried_rules"
+  else
+    printf '<!-- HANDOFF_RULES_PLACEHOLDER: /handoff may replace this comment with explicit scope fences. Only content inside the BIND markers loads as binding (and only when provenance verifies); leave this comment in place for none. -->\n'
+  fi
   printf '%s\n' "$HANDOFF_BIND_END"
   printf '\n'
   echo '---'
