@@ -795,3 +795,19 @@ handoff_worktree_copy() {  # <doc> <worktree_root>
   echo "handoff: also saved a copy for sessions in the main checkout: $dest" >&2
   return 0
 }
+
+# Worktree handoff copies in <main_root>'s history newer than <current> (all
+# of them when <current> does not exist), newest first, one path per line.
+handoff_worktree_copies_newer() {  # <main_root> <current>
+  local dir="$1/$HANDOFF_WT_COPY_RELDIR" f
+  [ -d "$dir" ] && [ ! -L "$1/.claude" ] && [ ! -L "$1/.claude/handoff_history" ] \
+    && [ ! -L "$dir" ] || return 0
+  # -type f skips symlinks, so a planted link never gets listed.
+  find "$dir" -maxdepth 1 -type f -name 'handoff_*.md' 2>/dev/null | LC_ALL=C sort -r \
+    | while IFS= read -r f; do
+        printf '%s\n' "${f##*/}" | LC_ALL=C grep -Eq "$HANDOFF_WT_COPY_NAME_RE" || continue
+        if [ -e "$2" ] && [ ! "$f" -nt "$2" ]; then continue; fi
+        printf '%s\n' "$f"
+      done
+  return 0
+}

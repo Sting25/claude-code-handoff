@@ -620,6 +620,42 @@ emit_untrusted() {  # <file> [trim priority, default 5] [extra filter, default c
   shrink_end
 }
 
+# --- Worktree handoffs (#141) -------------------------------------------------
+# Point at handoffs that sessions in this checkout's linked worktrees saved
+# here (handoff_worktree_copy in bin/handoff_provenance.sh) after this
+# checkout's own handoff was written. Names and paths only, never content, so
+# a copy cannot reach the binding tier; printed under the reference-DATA
+# caveat (pass "1" to print it here) and in its own trimmable region. Names
+# are already restricted to the writer's exact shape by the lib.
+wt_list_max=5
+emit_worktree_handoffs() {  # [print the data caveat first if "1"]
+  local copies f base ts wt br n=0 total
+  [ "${in_git:-0}" = "1" ] && type handoff_worktree_copies_newer >/dev/null 2>&1 || return 0
+  copies="$(handoff_worktree_copies_newer "$repo" "$current")"
+  [ -n "$copies" ] || return 0
+  total="$(printf '%s\n' "$copies" | wc -l | tr -d ' ')"
+  [ "${1:-0}" != "1" ] || emit_data_caveat
+  echo "### Handoffs from worktree sessions, newer than this checkout's handoff"
+  echo
+  shrink_begin 6 "$repo/$HANDOFF_WT_COPY_RELDIR"
+  while IFS= read -r f; do
+    n=$((n + 1))
+    [ "$n" -le "$wt_list_max" ] || break
+    base="${f##*/}"; base="${base#handoff_}"; base="${base%.md}"
+    ts="${base%%__*}"; wt="${base#*__}"; br="${wt#*__}"; wt="${wt%%__*}"
+    # shellcheck disable=SC2016  # the backticks are literal Markdown
+    printf -- '- Session in worktree `%s` (branch `%s`) handed off at %s %s:%s:%s: read `%s`\n' \
+      "$wt" "$br" "${ts:0:10}" "${ts:11:2}" "${ts:13:2}" "${ts:15:2}" "$f"
+  done <<EOF_WT
+$copies
+EOF_WT
+  if [ "$total" -gt "$wt_list_max" ]; then
+    echo "- ...and $((total - wt_list_max)) older ones in \`$repo/$HANDOFF_WT_COPY_RELDIR/\`"
+  fi
+  shrink_end
+  echo
+}
+
 # --- Tiered rules loading (issue #42) ----------------------------------------
 # The handoff carries two content kinds with opposite trust needs: narrative
 # (reference DATA — the framing above is correct for it) and an explicit rules
@@ -935,6 +971,7 @@ if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ] || [ -n "$current_corr
   # before, so this branch is never "fresh" when current_corrupt_reason is
   # set, even if history/backups happen to be empty for some other reason.
   if [ -z "$current_corrupt_reason" ] && [ -z "$history_hit" ] && [ -z "$backups_hit" ]; then
+    emit_worktree_handoffs 1  # silent unless a worktree session handed off here
     exit 0
   fi
 
@@ -946,6 +983,7 @@ if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ] || [ -n "$current_corr
     echo "⚠️  handoff: no handoff to load at $current, but this project has prior handoff artifacts (.claude/handoff_history/ or .claude/handoff_backups/), so one may have been expected. Attempting an automatic best-effort rebuild (run /handoff-more or /handoff-recover to inspect what exists)."
   fi
   echo
+  emit_worktree_handoffs 1
 
   # --- Auto-rebuild (issue #78) ----------------------------------------------
   # Best-effort ONLY: mechanical concatenation of whatever other artifacts
@@ -1208,6 +1246,7 @@ emit_data_caveat
 # Protected head next (its own region, trimmed last) and stripped out of the
 # main region below so it is never printed twice.
 emit_git_head "$current"
+emit_worktree_handoffs
 
 if [ "$prov_ok" = "1" ]; then
   # Verified: narrative (minus the rules regions) keeps data framing; the
