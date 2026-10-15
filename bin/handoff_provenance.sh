@@ -159,6 +159,21 @@ HANDOFF_ROOT_ANCHOR=""
 # shellcheck disable=SC2034
 HANDOFF_ROOT_VIA=""
 
+# Physical path of <dir>'s git common dir (the main repo's .git for a linked
+# worktree), or return 1. --git-common-dir may print a path RELATIVE to the git
+# process cwd, i.e. <dir> (from a main-repo toplevel it is just ".git"), so
+# prefix it before resolving.
+handoff_git_common_dir() {  # <dir>
+  local c
+  c="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$c" in
+    "") return 1 ;;
+    /*) : ;;
+    *) c="$1/$c" ;;
+  esac
+  (cd "$c" 2>/dev/null && pwd -P)
+}
+
 handoff_resolve_root() {  # [payload_cwd]
   local anchor via toplevel common common_phys parent
   if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
@@ -188,16 +203,9 @@ handoff_resolve_root() {  # [payload_cwd]
     HANDOFF_ROOT="$toplevel"
     HANDOFF_ROOT_IN_GIT=1
     if [ "${HANDOFF_ANCHOR:-toplevel}" = "common" ]; then
-      # Main-repo root = parent of the common git dir. --git-common-dir may
-      # print a RELATIVE path (relative to the git process cwd, i.e. our
-      # anchor — from a main-repo toplevel it is just ".git"), so prefix the
-      # anchor before walking up. Any failure falls back to the toplevel
-      # already set above.
-      common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || common=""
-      case "$common" in
-        ""|/*) : ;;
-        *) common="$anchor/$common" ;;
-      esac
+      # Main-repo root = parent of the common git dir. Any failure falls back
+      # to the toplevel already set above.
+      common="$(handoff_git_common_dir "$anchor")" || common=""
       if [ -n "$common" ] && parent="$(cd "$common/.." 2>/dev/null && pwd -P)" \
          && [ -d "$parent" ]; then
         HANDOFF_ROOT="$parent"
@@ -210,12 +218,7 @@ handoff_resolve_root() {  # [payload_cwd]
     # main .git dir); its physical parent is the repo root — but only claim
     # that when the dir is actually named ".git" (a bare repo has no
     # worktree to anchor on, so it keeps the non-git fallback).
-    common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || common=""
-    case "$common" in
-      ""|/*) : ;;
-      *) common="$anchor/$common" ;;
-    esac
-    if [ -n "$common" ] && common_phys="$(cd "$common" 2>/dev/null && pwd -P)" \
+    if common_phys="$(handoff_git_common_dir "$anchor")" \
        && [ "${common_phys##*/}" = ".git" ] && [ -d "${common_phys%/.git}" ]; then
       HANDOFF_ROOT="${common_phys%/.git}"
       HANDOFF_ROOT_IN_GIT=1
