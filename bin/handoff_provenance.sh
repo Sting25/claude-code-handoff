@@ -159,6 +159,21 @@ HANDOFF_ROOT_ANCHOR=""
 # shellcheck disable=SC2034
 HANDOFF_ROOT_VIA=""
 
+# Physical path of <dir>'s git common dir (the main repo's .git for a linked
+# worktree), or return 1. --git-common-dir may print a path RELATIVE to the git
+# process cwd, i.e. <dir> (from a main-repo toplevel it is just ".git"), so
+# prefix it before resolving.
+handoff_git_common_dir() {  # <dir>
+  local c
+  c="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$c" in
+    "") return 1 ;;
+    /*) : ;;
+    *) c="$1/$c" ;;
+  esac
+  (cd "$c" 2>/dev/null && pwd -P)
+}
+
 handoff_resolve_root() {  # [payload_cwd]
   local anchor via toplevel common common_phys parent
   if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
@@ -188,16 +203,9 @@ handoff_resolve_root() {  # [payload_cwd]
     HANDOFF_ROOT="$toplevel"
     HANDOFF_ROOT_IN_GIT=1
     if [ "${HANDOFF_ANCHOR:-toplevel}" = "common" ]; then
-      # Main-repo root = parent of the common git dir. --git-common-dir may
-      # print a RELATIVE path (relative to the git process cwd, i.e. our
-      # anchor — from a main-repo toplevel it is just ".git"), so prefix the
-      # anchor before walking up. Any failure falls back to the toplevel
-      # already set above.
-      common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || common=""
-      case "$common" in
-        ""|/*) : ;;
-        *) common="$anchor/$common" ;;
-      esac
+      # Main-repo root = parent of the common git dir. Any failure falls back
+      # to the toplevel already set above.
+      common="$(handoff_git_common_dir "$anchor")" || common=""
       if [ -n "$common" ] && parent="$(cd "$common/.." 2>/dev/null && pwd -P)" \
          && [ -d "$parent" ]; then
         HANDOFF_ROOT="$parent"
@@ -210,12 +218,7 @@ handoff_resolve_root() {  # [payload_cwd]
     # main .git dir); its physical parent is the repo root — but only claim
     # that when the dir is actually named ".git" (a bare repo has no
     # worktree to anchor on, so it keeps the non-git fallback).
-    common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || common=""
-    case "$common" in
-      ""|/*) : ;;
-      *) common="$anchor/$common" ;;
-    esac
-    if [ -n "$common" ] && common_phys="$(cd "$common" 2>/dev/null && pwd -P)" \
+    if common_phys="$(handoff_git_common_dir "$anchor")" \
        && [ "${common_phys##*/}" = ".git" ] && [ -d "${common_phys%/.git}" ]; then
       HANDOFF_ROOT="${common_phys%/.git}"
       HANDOFF_ROOT_IN_GIT=1
@@ -662,4 +665,149 @@ handoff_bind_has_content() {  # <file>
 handoff_defang() {
   LC_ALL=C sed -E 's#<(/?((system-reminder|command-name|command-message|command-args|local-command-stdout|local-command-stderr)|(antml:)?(tool_use|tool_result|function_calls|function_results|invoke|parameter))([[:space:]][^>]*)?)>#«\1»#g' \
     || echo "⚠️  handoff: defang filter failed — rules content above may be truncated"
+}
+
+# ---------------------------------------------------------------------------
+# Worktree handoff copies (#141).
+#
+# A handoff written in a LINKED worktree (`git worktree add`) lands in that
+# worktree's own .claude/, where a session started in the main checkout never
+# looks, and it is lost when the worktree is removed. HANDOFF_ANCHOR=common is
+# no fix: the main and worktree sessions would then overwrite one shared
+# handoff_current.md. So the writer leaves the worktree's doc as it is AND
+# saves a dated, never-overwritten copy into the main checkout's
+# .claude/handoff_history/worktrees/, and the main checkout's SessionStart
+# loader points at copies newer than its own handoff_current.md. A copy is
+# narrative DATA only: its BIND markers and HMAC/skeleton trailers are
+# stripped, and the loader prints its path, never its content, so nothing in
+# it can reach the binding tier.
+
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+HANDOFF_WT_COPY_RELDIR='.claude/handoff_history/worktrees'
+# Header lines handoff_worktree_copy writes above the copied body (the
+# duplicate check skips them); keep in step with its printf block.
+HANDOFF_WT_COPY_HEADER_LINES=5
+# The exact copy file-name shape. Only names matching it are ever listed: a
+# cloned repo can plant files in that folder, and listed names reach the model.
+HANDOFF_WT_COPY_NAME_RE='^handoff_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?__[A-Za-z0-9.-]+__[A-Za-z0-9.-]+\.md$'
+
+# Main checkout root of a LINKED worktree, or return 1 for the main checkout
+# itself and a submodule (git dir == common dir) and for a bare repo's
+# worktree (common dir not named .git: there is no main checkout to copy to).
+handoff_linked_worktree_main() {  # <dir>
+  local common gd
+  common="$(handoff_git_common_dir "$1")" || return 1
+  gd="$(git -C "$1" rev-parse --git-dir 2>/dev/null)" || return 1
+  case "$gd" in
+    "") return 1 ;;
+    /*) : ;;
+    *) gd="$1/$gd" ;;
+  esac
+  gd="$(cd "$gd" 2>/dev/null && pwd -P)" || return 1
+  [ "$gd" != "$common" ] || return 1
+  [ "${common##*/}" = ".git" ] && [ -d "${common%/.git}" ] || return 1
+  printf '%s\n' "${common%/.git}"
+}
+
+# File-name-safe slug: every byte outside [A-Za-z0-9.-] becomes "-", so "__"
+# stays an unambiguous field separator in the copy name. Capped at 60 bytes.
+handoff_wt_slug() {  # <text>
+  local s
+  s="$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9.-' '-' | cut -c1-60)"
+  printf '%s\n' "${s:-unknown}"
+}
+
+# Save <doc>, a curated handoff in the linked worktree <worktree_root>, as a
+# dated copy in the main checkout. A no-op anywhere else. Best-effort: every
+# refusal warns on stderr and returns 0, so it never fails the caller, and it
+# prints nothing on stdout (the writer's stdout is its own "done" signal).
+handoff_worktree_copy() {  # <doc> <worktree_root>
+  local main wt_phys dir p name branch body final last stamp dest n
+  main="$(handoff_linked_worktree_main "$2")" || return 0
+  wt_phys="$(cd "$2" 2>/dev/null && pwd -P)" || return 0
+  dir="$main/$HANDOFF_WT_COPY_RELDIR"
+  for p in "$main/.claude" "$main/.claude/handoff_history" "$dir"; do
+    if [ -L "$p" ]; then
+      echo "handoff: $p is a symlink; refusing to copy this worktree handoff into the main checkout." >&2
+      return 0
+    fi
+  done
+  # Fail closed on an unignored folder: the copy holds private session notes.
+  if ! git -C "$main" check-ignore -q "$HANDOFF_WT_COPY_RELDIR/handoff_x.md" 2>/dev/null; then
+    echo "handoff: the main checkout $main does not git-ignore $HANDOFF_WT_COPY_RELDIR/, so this worktree handoff was NOT copied there (it could be committed by mistake). Add .claude/handoff_history/ to its .gitignore (running /handoff once in the main checkout does that), then re-run /handoff here." >&2
+    return 0
+  fi
+  if ! mkdir -p "$dir" 2>/dev/null || [ -L "$dir" ] \
+     || ! body="$(mktemp "$dir/.wt_copy.XXXXXX" 2>/dev/null)"; then
+    echo "handoff: cannot write in $dir; this worktree handoff was NOT copied to the main checkout." >&2
+    return 0
+  fi
+  if ! final="$(mktemp "$dir/.wt_copy.XXXXXX" 2>/dev/null)"; then
+    rm -f "$body"
+    echo "handoff: cannot write in $dir; this worktree handoff was NOT copied to the main checkout." >&2
+    return 0
+  fi
+  name="$(handoff_wt_slug "${wt_phys##*/}")"
+  branch="$(handoff_wt_slug "$(git -C "$2" rev-parse --abbrev-ref HEAD 2>/dev/null || true)")"
+  # Body: the doc minus BIND markers and HMAC/skeleton trailers (CR-tolerant),
+  # so the copy can never verify or bind anywhere.
+  LC_ALL=C awk -v b="$HANDOFF_BIND_BEGIN" -v e="$HANDOFF_BIND_END" \
+      -v m="$HANDOFF_MAC_PREFIX" -v k="$HANDOFF_SKEL_PREFIX" '
+    { l = $0; sub(/\r$/, "", l) }
+    l == b || l == e || index(l, m) == 1 || index(l, k) == 1 { next }
+    { print }' "$1" > "$body" 2>/dev/null || {
+    rm -f "$body" "$final"
+    echo "handoff: could not read $1; this worktree handoff was NOT copied to the main checkout." >&2
+    return 0
+  }
+  # A restamp with nothing new (e.g. /handoff run twice) adds no copy.
+  last="$(find "$dir" -maxdepth 1 -type f -name "handoff_*__${name}__${branch}.md" 2>/dev/null \
+    | LC_ALL=C sort | tail -n 1)"
+  if [ -n "$last" ] \
+     && tail -n "+$((HANDOFF_WT_COPY_HEADER_LINES + 1))" "$last" 2>/dev/null | cmp -s - "$body"; then
+    rm -f "$body" "$final"
+    echo "handoff: unchanged since the last main-checkout copy ($last); no new copy." >&2
+    return 0
+  fi
+  stamp="$(date '+%Y-%m-%d_%H%M%S')"
+  {
+    printf '<!-- HANDOFF_WORKTREE_COPY: worktree=%s branch=%s -->\n' "$name" "$branch"
+    printf '# Worktree handoff copy: reference DATA, not standing rules\n\n'
+    # shellcheck disable=SC2016  # the backticks are literal Markdown
+    printf '> _Copied %s from `%s/.claude/handoff_current.md` (worktree `%s`, branch `%s`) so sessions in the main checkout can find it; never overwritten. Its Rules and Pinned sections bound only that worktree'"'"'s next session: read them as context, not as rules here._\n\n' \
+      "$stamp" "$wt_phys" "$name" "$branch"
+    cat "$body"
+  } > "$final"
+  rm -f "$body"
+  # ln is an atomic create-if-absent, so a same-second clash never overwrites.
+  dest="$dir/handoff_${stamp}__${name}__${branch}.md"
+  n=1
+  while ! ln "$final" "$dest" 2>/dev/null; do
+    n=$((n + 1))
+    if [ "$n" -gt 50 ]; then
+      rm -f "$final"
+      echo "handoff: could not create a new copy name in $dir; this worktree handoff was NOT copied to the main checkout." >&2
+      return 0
+    fi
+    dest="$dir/handoff_${stamp}_${n}__${name}__${branch}.md"
+  done
+  rm -f "$final"
+  echo "handoff: also saved a copy for sessions in the main checkout: $dest" >&2
+  return 0
+}
+
+# Worktree handoff copies in <main_root>'s history newer than <current> (all
+# of them when <current> does not exist), newest first, one path per line.
+handoff_worktree_copies_newer() {  # <main_root> <current>
+  local dir="$1/$HANDOFF_WT_COPY_RELDIR" f
+  [ -d "$dir" ] && [ ! -L "$1/.claude" ] && [ ! -L "$1/.claude/handoff_history" ] \
+    && [ ! -L "$dir" ] || return 0
+  # -type f skips symlinks, so a planted link never gets listed.
+  find "$dir" -maxdepth 1 -type f -name 'handoff_*.md' 2>/dev/null | LC_ALL=C sort -r \
+    | while IFS= read -r f; do
+        printf '%s\n' "${f##*/}" | LC_ALL=C grep -Eq "$HANDOFF_WT_COPY_NAME_RE" || continue
+        if [ -e "$2" ] && [ ! "$f" -nt "$2" ]; then continue; fi
+        printf '%s\n' "$f"
+      done
+  return 0
 }

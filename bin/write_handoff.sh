@@ -631,6 +631,15 @@ if (( RESTAMP )); then
     echo "write_handoff.sh: --restamp: no $handoff_relpath to stamp; nothing done." >&2
     exit 0
   fi
+  # In a linked worktree, also leave a dated copy in the main checkout (#141;
+  # see handoff_worktree_copy). Here, not on the full write: the full write is
+  # the uncurated skeleton, and the restamp is the step /handoff and
+  # /handoff-recover run once Notes are curated. Before the signing checks,
+  # because the copy never carries a signature and must not depend on one.
+  if (( in_git )) && type handoff_worktree_copy >/dev/null 2>&1 \
+     && ! handoff_is_unedited_placeholder "$handoff_path"; then
+    handoff_worktree_copy "$handoff_path" "$repo_root" || true
+  fi
   if ! can_sign; then
     echo "write_handoff.sh: --restamp: signing unavailable (provenance lib missing, or HANDOFF_TRUST_DISABLE=1); leaving the file as is." >&2
     echo "$handoff_path"
