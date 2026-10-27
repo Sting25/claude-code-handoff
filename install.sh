@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: ebbc9da7a42f657bda04d6e37c120ef70b96b116eaf022228d2c705c2834199e
+# SOURCE-SHA256: 188b7d9ad030f20160707dc4d796e360e4f59eb38fce9545b8933e48e0e19237
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -33,7 +33,7 @@ What it does:
   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
   2. Patches ~/.claude/settings.json to add six hooks
-     (SessionStart / SessionEnd / PreCompact / PostCompact / Stop /
+     (SessionStart / SessionEnd / PreCompact / PostCompact / WorktreeRemove / Stop /
      UserPromptSubmit), six permission entries, and — only when you
      don't already have one — a statusLine command (never overwrites
      an existing statusLine; prints the manual step instead).
@@ -246,6 +246,10 @@ model_pin_record="$claude_home/handoff-model-pin"
   # treated as session-start fresh (stale-high numbers can't nudge, and the
   # once-per-session nudge cap re-arms). Only fires on CC >= 2.1.76.
   post_cmd='bash $HOME/.claude/bin/handoff_compact_reset.sh 2>/dev/null || true'
+  # WorktreeRemove (#142): salvage a removed worktree's handoff and raw dumps
+  # into the main checkout. Fires on CC >= 2.1.300, only for worktrees Claude
+  # Code created; older builds simply never fire it.
+  wr_cmd='bash $HOME/.claude/bin/handoff_worktree_remove.sh 2>/dev/null || true'
   # statusLine command. No `|| true` here, unlike the hooks: stdout IS the
   # product (the rendered line), and a nonzero exit just blanks the line — there
   # is no hook pipeline to poison.
@@ -259,6 +263,7 @@ perm_ss="Bash(bash $HOME/.claude/bin/handoff_session_start.sh)"
 # precedent of allowlisting a hook-only script): harmless if never used.
 perm_sl="Bash(bash $HOME/.claude/bin/handoff_statusline.sh)"
 perm_reset="Bash(bash $HOME/.claude/bin/handoff_compact_reset.sh)"
+perm_wr="Bash(bash $HOME/.claude/bin/handoff_worktree_remove.sh)"
 
 # Marker substrings used to detect prior installs (and to remove on uninstall).
 # These are the full installed command path (literal $HOME, exactly as stored in
@@ -280,6 +285,7 @@ perm_reset="Bash(bash $HOME/.claude/bin/handoff_compact_reset.sh)"
   up_marker='$HOME/.claude/bin/handoff_ctx_check.sh'
   sl_marker='$HOME/.claude/bin/handoff_statusline.sh'
   post_marker='$HOME/.claude/bin/handoff_compact_reset.sh'
+  wr_marker='$HOME/.claude/bin/handoff_worktree_remove.sh'
 }
 
 # -------------------------------------------------------------------- symlinks
@@ -462,6 +468,7 @@ install_symlinks() {
   link "$repo_root/bin/handoff_recover_tail.sh"   "$claude_home/bin/handoff_recover_tail.sh"
   link "$repo_root/bin/handoff_statusline.sh"     "$claude_home/bin/handoff_statusline.sh"
   link "$repo_root/bin/handoff_compact_reset.sh"  "$claude_home/bin/handoff_compact_reset.sh"
+  link "$repo_root/bin/handoff_worktree_remove.sh" "$claude_home/bin/handoff_worktree_remove.sh"
   link "$repo_root/bin/handoff_provenance.sh"     "$claude_home/bin/handoff_provenance.sh"
   link "$repo_root/skills/handoff/SKILL.md"          "$claude_home/skills/handoff/SKILL.md"
   link "$repo_root/skills/handoff/README.md"         "$claude_home/skills/handoff/README.md"
@@ -480,7 +487,8 @@ install_symlinks() {
            "$repo_root/bin/handoff_session_start.sh" \
            "$repo_root/bin/handoff_recover_tail.sh" \
            "$repo_root/bin/handoff_statusline.sh" \
-           "$repo_root/bin/handoff_compact_reset.sh" 2>/dev/null || true
+           "$repo_root/bin/handoff_compact_reset.sh" \
+           "$repo_root/bin/handoff_worktree_remove.sh" 2>/dev/null || true
 }
 
 uninstall_symlinks() {
@@ -491,6 +499,7 @@ uninstall_symlinks() {
   unlink_if_ours "$claude_home/bin/handoff_recover_tail.sh"   "$repo_root/bin/handoff_recover_tail.sh"
   unlink_if_ours "$claude_home/bin/handoff_statusline.sh"     "$repo_root/bin/handoff_statusline.sh"
   unlink_if_ours "$claude_home/bin/handoff_compact_reset.sh"  "$repo_root/bin/handoff_compact_reset.sh"
+  unlink_if_ours "$claude_home/bin/handoff_worktree_remove.sh" "$repo_root/bin/handoff_worktree_remove.sh"
   unlink_if_ours "$claude_home/bin/handoff_provenance.sh"     "$repo_root/bin/handoff_provenance.sh"
   unlink_if_ours "$claude_home/skills/handoff/SKILL.md"          "$repo_root/skills/handoff/SKILL.md"
   unlink_if_ours "$claude_home/skills/handoff/README.md"         "$repo_root/skills/handoff/README.md"
@@ -604,6 +613,7 @@ Paste this into $settings under "hooks" and "permissions":
     "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "$se_cmd" }] }],
     "PreCompact":        [{ "hooks": [{ "type": "command", "command": "$pc_cmd" }] }],
     "PostCompact":       [{ "hooks": [{ "type": "command", "command": "$post_cmd" }] }],
+    "WorktreeRemove":    [{ "hooks": [{ "type": "command", "command": "$wr_cmd" }] }],
     "Stop":              [{ "hooks": [{ "type": "command", "command": "$st_cmd" }] }],
     "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "$up_cmd" }] }]
   },
@@ -614,7 +624,8 @@ Paste this into $settings under "hooks" and "permissions":
       "$perm_ctx",
       "$perm_ss",
       "$perm_sl",
-      "$perm_reset"
+      "$perm_reset",
+      "$perm_wr"
     ]
   },
   "statusLine": { "type": "command", "command": "$sl_cmd" }
@@ -948,6 +959,7 @@ patch_settings() {
   # SessionEnd marker: each event's hook list is checked independently.
   maybe_install_hook PreCompact       "$se_marker" "$pc_cmd"
   maybe_install_hook PostCompact      "$post_marker" "$post_cmd"
+  maybe_install_hook WorktreeRemove   "$wr_marker" "$wr_cmd"
   maybe_install_hook Stop             "$st_marker" "$st_cmd"
   maybe_install_hook UserPromptSubmit "$up_marker" "$up_cmd"
   maybe_install_statusline
@@ -957,6 +969,7 @@ patch_settings() {
   maybe_install_perm "$perm_ss"
   maybe_install_perm "$perm_sl"
   maybe_install_perm "$perm_reset"
+  maybe_install_perm "$perm_wr"
   maybe_install_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   # If no change vs backup, drop the redundant backup.
@@ -974,6 +987,7 @@ unpatch_settings() {
     echo "  - $ss_marker"
     echo "  - $se_marker  (both the SessionEnd and PreCompact entries)"
     echo "  - $post_marker"
+    echo "  - $wr_marker"
     echo "  - $st_marker"
     echo "  - $up_marker"
     echo "the \"statusLine\" entry if its command contains:"
@@ -985,6 +999,7 @@ unpatch_settings() {
     echo "  - $perm_ss"
     echo "  - $perm_sl"
     echo "  - $perm_reset"
+    echo "  - $perm_wr"
     echo "and, if you used --model, the top-level \"model\" key (the value this"
     echo "installer wrote, if any, is recorded in $model_pin_record)."
     return
@@ -1010,6 +1025,7 @@ unpatch_settings() {
   maybe_uninstall_hook SessionEnd       "$se_marker"
   maybe_uninstall_hook PreCompact       "$se_marker"
   maybe_uninstall_hook PostCompact      "$post_marker"
+  maybe_uninstall_hook WorktreeRemove   "$wr_marker"
   maybe_uninstall_hook Stop             "$st_marker"
   maybe_uninstall_hook UserPromptSubmit "$up_marker"
   maybe_uninstall_statusline
@@ -1019,6 +1035,7 @@ unpatch_settings() {
   maybe_uninstall_perm "$perm_ss"
   maybe_uninstall_perm "$perm_sl"
   maybe_uninstall_perm "$perm_reset"
+  maybe_uninstall_perm "$perm_wr"
   maybe_uninstall_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   if cmp -s "$settings" "$settings.bak.$ts"; then
@@ -1164,7 +1181,7 @@ doctor() {
   # worth naming, so they're collected separately (dangling_list) and
   # reported as one WARN instead of feeding this check.
   bare_wired=0
-  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_worktree_remove handoff_provenance; do
     dst="$claude_home/bin/$name.sh"
     if [[ -e "$dst" ]]; then
       bare_wired=1
@@ -1173,11 +1190,12 @@ doctor() {
   done
   if (( ! bare_wired )) && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
     if jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
-           --arg st "$st_marker" --arg up "$up_marker" '
+           --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" '
          ( (.hooks.SessionStart // [])     | any(.. | .command? // "" | contains($ss)) ) or
          ( (.hooks.SessionEnd // [])       | any(.. | .command? // "" | contains($se)) ) or
          ( (.hooks.PreCompact // [])       | any(.. | .command? // "" | contains($se)) ) or
          ( (.hooks.PostCompact // [])      | any(.. | .command? // "" | contains($post)) ) or
+         ( (.hooks.WorktreeRemove // [])   | any(.. | .command? // "" | contains($wr)) ) or
          ( (.hooks.Stop // [])             | any(.. | .command? // "" | contains($st)) ) or
          ( (.hooks.UserPromptSubmit // []) | any(.. | .command? // "" | contains($up)) )
        ' "$settings" >/dev/null 2>&1; then
@@ -1189,7 +1207,7 @@ doctor() {
   # whose target is gone is real breakage worth naming even on a healthy
   # plugin-only machine, just not evidence of a wired bare-scripts install.
   dangling_list=""
-  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+  for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_worktree_remove handoff_provenance; do
     dst="$claude_home/bin/$name.sh"
     if [[ -L "$dst" && ! -e "$dst" ]]; then
       dangling_list="$dangling_list $dst"
@@ -1213,7 +1231,7 @@ doctor() {
     fi
   else
     echo "doctor: checking installed handoff hooks under $claude_home/bin"
-    for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+    for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_worktree_remove handoff_provenance; do
       dst="$claude_home/bin/$name.sh"
       if [[ -e "$dst" ]]; then
         if [[ -L "$dst" ]]; then
@@ -1396,18 +1414,30 @@ doctor() {
         # doctor entirely under set -e before this BROKEN branch ever ran).
         # `|| true` on the substitution catches that same failure mode for
         # any other malformed shape too, leaving events_str empty so the
-        # subset check below reports it as BROKEN (missing all six) instead
+        # subset check below reports it as BROKEN (missing all seven) instead
         # of taking doctor down with it.
         events_str="$(jq -r '.hooks // {} | keys | sort | join(",")' "$hooks_json" 2>/dev/null || true)"
         expected_events="PostCompact,PreCompact,SessionEnd,SessionStart,Stop,UserPromptSubmit"
+        expected_list="PostCompact PreCompact SessionEnd SessionStart Stop UserPromptSubmit"
+        expected_count=six
+        # WorktreeRemove (#142) is judged by the CACHED plugin's own shape,
+        # not this installer's: a cached version that ships
+        # bin/handoff_worktree_remove.sh must wire it, while an older cached
+        # version has neither and is consistent (not BROKEN). The script
+        # check below applies the same rule in the other direction.
+        if [[ -f "$vdir/bin/handoff_worktree_remove.sh" ]]; then
+          expected_events="$expected_events,WorktreeRemove"
+          expected_list="$expected_list WorktreeRemove"
+          expected_count=seven
+        fi
         # Subset check, not exact equality: hooks.json only counts as broken
-        # if it's missing one of the six events this tool wires. Exact
+        # if it's missing one of the events this tool wires. Exact
         # equality used to flag a hooks.json with an EXTRA event (a future
         # Claude Code hook, or a fork's own addition) as "missing" events it
         # never lost, just because the sorted list no longer matched
         # verbatim.
         missing_events=""
-        for ev in PostCompact PreCompact SessionEnd SessionStart Stop UserPromptSubmit; do
+        for ev in $expected_list; do
           case ",$events_str," in
             *",$ev,"*) ;;
             *) missing_events="$missing_events $ev" ;;
@@ -1417,7 +1447,7 @@ doctor() {
           echo "  BROKEN  $hooks_json is missing hook event(s):$missing_events (has [$events_str], need all of [$expected_events])"
           broken=$((broken + 1))
         else
-          echo "  ok      $hooks_json has all six hook events"
+          echo "  ok      $hooks_json has all $expected_count hook events"
           extra_events=""
           rest="$events_str"
           while [[ -n "$rest" ]]; do
@@ -1427,7 +1457,7 @@ doctor() {
               *) rest="" ;;
             esac
             case " $ev " in
-              *" PostCompact "*|*" PreCompact "*|*" SessionEnd "*|*" SessionStart "*|*" Stop "*|*" UserPromptSubmit "*) ;;
+              *" PostCompact "*|*" PreCompact "*|*" SessionEnd "*|*" SessionStart "*|*" Stop "*|*" UserPromptSubmit "*|*" WorktreeRemove "*) ;;
               *) [[ -n "$ev" ]] && extra_events="$extra_events $ev" ;;
             esac
           done
@@ -1437,14 +1467,23 @@ doctor() {
         fi
       fi
       missing_scripts=""
-      for name in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+      script_list="write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance"
+      script_count=eight
+      # handoff_worktree_remove.sh is required exactly when the cached
+      # hooks.json wires WorktreeRemove (see the events check above).
+      if [[ -f "$hooks_json" ]] && command -v jq >/dev/null 2>&1 \
+         && jq -e '.hooks // {} | has("WorktreeRemove")' "$hooks_json" >/dev/null 2>&1; then
+        script_list="$script_list handoff_worktree_remove"
+        script_count=nine
+      fi
+      for name in $script_list; do
         [[ -f "$vdir/bin/$name.sh" ]] || missing_scripts="$missing_scripts $name.sh"
       done
       if [[ -n "$missing_scripts" ]]; then
         echo "  BROKEN  $vdir/bin is missing:$missing_scripts (the plugin's hooks call these directly)"
         broken=$((broken + 1))
       else
-        echo "  ok      $vdir/bin has all eight scripts"
+        echo "  ok      $vdir/bin has all $script_count scripts"
       fi
     fi
     echo

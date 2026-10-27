@@ -11,6 +11,7 @@ Paste this into $settings under "hooks" and "permissions":
     "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "$se_cmd" }] }],
     "PreCompact":        [{ "hooks": [{ "type": "command", "command": "$pc_cmd" }] }],
     "PostCompact":       [{ "hooks": [{ "type": "command", "command": "$post_cmd" }] }],
+    "WorktreeRemove":    [{ "hooks": [{ "type": "command", "command": "$wr_cmd" }] }],
     "Stop":              [{ "hooks": [{ "type": "command", "command": "$st_cmd" }] }],
     "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "$up_cmd" }] }]
   },
@@ -21,7 +22,8 @@ Paste this into $settings under "hooks" and "permissions":
       "$perm_ctx",
       "$perm_ss",
       "$perm_sl",
-      "$perm_reset"
+      "$perm_reset",
+      "$perm_wr"
     ]
   },
   "statusLine": { "type": "command", "command": "$sl_cmd" }

@@ -21,7 +21,7 @@ What it does:
   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
   2. Patches ~/.claude/settings.json to add six hooks
-     (SessionStart / SessionEnd / PreCompact / PostCompact / Stop /
+     (SessionStart / SessionEnd / PreCompact / PostCompact / WorktreeRemove / Stop /
      UserPromptSubmit), six permission entries, and — only when you
      don't already have one — a statusLine command (never overwrites
      an existing statusLine; prints the manual step instead).
@@ -234,6 +234,10 @@ model_pin_record="$claude_home/handoff-model-pin"
   # treated as session-start fresh (stale-high numbers can't nudge, and the
   # once-per-session nudge cap re-arms). Only fires on CC >= 2.1.76.
   post_cmd='bash $HOME/.claude/bin/handoff_compact_reset.sh 2>/dev/null || true'
+  # WorktreeRemove (#142): salvage a removed worktree's handoff and raw dumps
+  # into the main checkout. Fires on CC >= 2.1.300, only for worktrees Claude
+  # Code created; older builds simply never fire it.
+  wr_cmd='bash $HOME/.claude/bin/handoff_worktree_remove.sh 2>/dev/null || true'
   # statusLine command. No `|| true` here, unlike the hooks: stdout IS the
   # product (the rendered line), and a nonzero exit just blanks the line — there
   # is no hook pipeline to poison.
@@ -247,6 +251,7 @@ perm_ss="Bash(bash $HOME/.claude/bin/handoff_session_start.sh)"
 # precedent of allowlisting a hook-only script): harmless if never used.
 perm_sl="Bash(bash $HOME/.claude/bin/handoff_statusline.sh)"
 perm_reset="Bash(bash $HOME/.claude/bin/handoff_compact_reset.sh)"
+perm_wr="Bash(bash $HOME/.claude/bin/handoff_worktree_remove.sh)"
 
 # Marker substrings used to detect prior installs (and to remove on uninstall).
 # These are the full installed command path (literal $HOME, exactly as stored in
@@ -268,5 +273,6 @@ perm_reset="Bash(bash $HOME/.claude/bin/handoff_compact_reset.sh)"
   up_marker='$HOME/.claude/bin/handoff_ctx_check.sh'
   sl_marker='$HOME/.claude/bin/handoff_statusline.sh'
   post_marker='$HOME/.claude/bin/handoff_compact_reset.sh'
+  wr_marker='$HOME/.claude/bin/handoff_worktree_remove.sh'
 }
 

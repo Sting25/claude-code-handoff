@@ -960,6 +960,26 @@ backup_dir="$handoff_dir/handoff_backups"
 carried_rules=""
 carried_from=""
 carried_source_archived=0
+# Worktree salvage (#142), safety-net runs only: when this root is a LINKED
+# worktree, leave this session's raw per-turn dump and (if curated) the doc
+# in the main checkout's .claude/handoff_history/worktrees/, since both die
+# with the worktree. Runs after every --if-curated outcome, including the
+# reason skip just below (a /resume switch may be the last event this
+# worktree ever sees). Never on the skill path, never fails the hook, stderr
+# only. The lib helpers are no-ops outside a linked worktree.
+worktree_salvage() {
+  (( IF_CURATED )) && (( in_git )) || return 0
+  type handoff_worktree_salvage_dump >/dev/null 2>&1 || return 0
+  handoff_linked_worktree_main "$repo_root" >/dev/null 2>&1 || return 0
+  if [[ -n "$writer_session_id" && -f "$backup_dir/handoff_raw_${writer_session_id}.md" ]]; then
+    handoff_worktree_salvage_dump "$backup_dir/handoff_raw_${writer_session_id}.md" "$repo_root" || true
+  fi
+  if [[ -f "$handoff_path" && ! -L "$handoff_path" ]] \
+     && ! handoff_is_unedited_placeholder "$handoff_path"; then
+    handoff_worktree_copy "$handoff_path" "$repo_root" || true
+  fi
+  return 0
+}
 if (( IF_CURATED )); then
   # Reason-aware skip (safety net only — never on curated /handoff or manual
   # runs, which don't pass --if-curated). A reason in the skip list means
@@ -971,6 +991,7 @@ if (( IF_CURATED )); then
   if [[ -n "$session_end_reason" && -n "$skip_reasons" ]]; then
     for skip_r in $(printf '%s' "$skip_reasons" | tr ',' ' '); do
       if [[ "$skip_r" == "$session_end_reason" ]]; then
+        worktree_salvage
         echo "$handoff_path"
         exit 0
       fi
@@ -1021,6 +1042,7 @@ if (( IF_CURATED )); then
       if (( ! stale_curated )); then
         # Still current (or staleness couldn't be established): preserve it
         # rather than clobber with a fresh mechanical snapshot.
+        worktree_salvage
         echo "$handoff_path"
         exit 0
       fi
@@ -1920,5 +1942,10 @@ if (( write_lock_held )); then
   rmdir "$write_lock_dir" 2>/dev/null || true
   write_lock_held=0
 fi
+
+# Safety-net runs in a linked worktree: salvage this session's raw dump (and
+# the doc, when curated) into the main checkout (#142). Outside the lock: it
+# only reads here and writes elsewhere.
+worktree_salvage
 
 echo "$handoff_path"

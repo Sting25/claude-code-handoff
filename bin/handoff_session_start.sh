@@ -627,30 +627,62 @@ emit_untrusted() {  # <file> [trim priority, default 5] [extra filter, default c
 # a copy cannot reach the binding tier; printed under the reference-DATA
 # caveat (pass "1" to print it here) and in its own trimmable region. Names
 # are already restricted to the writer's exact shape by the lib.
+# Salvaged raw dumps of UNCURATED worktree sessions (#142; the same folder,
+# raw_ prefix, written by the SessionEnd/PreCompact safety net and the
+# WorktreeRemove hook) are listed the same way, with a pointer to
+# /handoff-recover, which can compose notes from one. Each list is capped at
+# wt_list_max entries.
 wt_list_max=5
 emit_worktree_handoffs() {  # [print the data caveat first if "1"]
-  local copies f base ts wt br n=0 total
+  local copies raws f base ts wt br sid n=0 total
   [ "${in_git:-0}" = "1" ] && type handoff_worktree_copies_newer >/dev/null 2>&1 || return 0
   copies="$(handoff_worktree_copies_newer "$repo" "$current")"
-  [ -n "$copies" ] || return 0
-  total="$(printf '%s\n' "$copies" | wc -l | tr -d ' ')"
+  raws=""
+  if type handoff_worktree_raw_newer >/dev/null 2>&1; then
+    raws="$(handoff_worktree_raw_newer "$repo" "$current")"
+  fi
+  [ -n "$copies" ] || [ -n "$raws" ] || return 0
   [ "${1:-0}" != "1" ] || emit_data_caveat
   echo "### Handoffs from worktree sessions, newer than this checkout's handoff"
   echo
   shrink_begin 6 "$repo/$HANDOFF_WT_COPY_RELDIR"
-  while IFS= read -r f; do
-    n=$((n + 1))
-    [ "$n" -le "$wt_list_max" ] || break
-    base="${f##*/}"; base="${base#handoff_}"; base="${base%.md}"
-    ts="${base%%__*}"; wt="${base#*__}"; br="${wt#*__}"; wt="${wt%%__*}"
-    # shellcheck disable=SC2016  # the backticks are literal Markdown
-    printf -- '- Session in worktree `%s` (branch `%s`) handed off at %s %s:%s:%s: read `%s`\n' \
-      "$wt" "$br" "${ts:0:10}" "${ts:11:2}" "${ts:13:2}" "${ts:15:2}" "$f"
-  done <<EOF_WT
+  if [ -n "$copies" ]; then
+    total="$(printf '%s\n' "$copies" | wc -l | tr -d ' ')"
+    while IFS= read -r f; do
+      n=$((n + 1))
+      [ "$n" -le "$wt_list_max" ] || break
+      base="${f##*/}"; base="${base#handoff_}"; base="${base%.md}"
+      ts="${base%%__*}"; wt="${base#*__}"; br="${wt#*__}"; wt="${wt%%__*}"
+      # shellcheck disable=SC2016  # the backticks are literal Markdown
+      printf -- '- Session in worktree `%s` (branch `%s`) handed off at %s %s:%s:%s: read `%s`\n' \
+        "$wt" "$br" "${ts:0:10}" "${ts:11:2}" "${ts:13:2}" "${ts:15:2}" "$f"
+    done <<EOF_WT
 $copies
 EOF_WT
-  if [ "$total" -gt "$wt_list_max" ]; then
-    echo "- ...and $((total - wt_list_max)) older ones in \`$repo/$HANDOFF_WT_COPY_RELDIR/\`"
+    if [ "$total" -gt "$wt_list_max" ]; then
+      echo "- ...and $((total - wt_list_max)) older ones in \`$repo/$HANDOFF_WT_COPY_RELDIR/\`"
+    fi
+  fi
+  if [ -n "$raws" ]; then
+    n=0
+    total="$(printf '%s\n' "$raws" | wc -l | tr -d ' ')"
+    while IFS= read -r f; do
+      n=$((n + 1))
+      [ "$n" -le "$wt_list_max" ] || break
+      # raw_<stamp>__<wt>__<branch>__<sid8>.md; the slugs never contain "_",
+      # so the first two "__" split unambiguously and the rest is the id.
+      base="${f##*/}"; base="${base#raw_}"; base="${base%.md}"
+      ts="${base%%__*}"; wt="${base#*__}"; br="${wt#*__}"; wt="${wt%%__*}"
+      sid="${br#*__}"; br="${br%%__*}"
+      # shellcheck disable=SC2016  # the backticks are literal Markdown
+      printf -- '- Uncurated session `%s...` in worktree `%s` (branch `%s`) last wrote at %s %s:%s:%s: raw per-turn dump at `%s` (reference data; /handoff-recover can compose notes from it)\n' \
+        "$sid" "$wt" "$br" "${ts:0:10}" "${ts:11:2}" "${ts:13:2}" "${ts:15:2}" "$f"
+    done <<EOF_WR
+$raws
+EOF_WR
+    if [ "$total" -gt "$wt_list_max" ]; then
+      echo "- ...and $((total - wt_list_max)) older raw dumps in \`$repo/$HANDOFF_WT_COPY_RELDIR/\`"
+    fi
   fi
   shrink_end
   echo
