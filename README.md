@@ -30,9 +30,61 @@ no manual patching) or install the **bare scripts** (legacy, still
 fully supported) into `~/.claude/`. Pick one — see
 [Dual-mode warning](#dual-mode-warning) below before running both.
 
-### Plugin install (recommended)
+For the plugin, the recommended layout is a **per-project opt-in**: the
+plugin is active only in the repos where you install it. Installing at
+user scope (active in every project) stays supported as the
+alternative.
 
-Inside Claude Code:
+### Per-project plugin install (recommended)
+
+Run these in the project you want the handoff in, in this order:
+
+1. Declare the marketplace for the project:
+
+   ```bash
+   claude plugin marketplace add Sting25/claude-code-handoff --scope project
+   ```
+
+   (Alternatively, add an `extraKnownMarketplaces` entry for
+   `claude-code-handoff` to the project's `.claude/settings.json`.)
+
+2. Install the plugin at project scope:
+
+   ```bash
+   claude plugin install claude-code-handoff@claude-code-handoff --scope project
+   ```
+
+   This writes `enabledPlugins` to the project's `.claude/settings.json`.
+   Use `--scope local` instead to write `.claude/settings.local.json`
+   and keep the install out of the committed settings.
+
+If you are switching from the global (user-scope) layout, remove it
+first:
+
+```bash
+claude plugin uninstall claude-code-handoff@claude-code-handoff --scope user
+```
+
+The uninstall is required, not optional. Scope precedence is local,
+then project, then user, and a user-level `false` does not disable a
+plugin that a project enables, so you cannot opt out of the global
+install by overriding it. Uninstall at user scope, then install in each
+project that should have the plugin.
+
+What to expect:
+
+- Project scope also covers that repo's git worktrees.
+- Only loaded plugins register hooks and skills, so a project that has
+  not opted in sees neither the hooks nor `/handoff`, `/handoff-more`,
+  or `/handoff-recover`.
+- Collaborators must run the install command themselves. Committing
+  `.claude/settings.json` records that the plugin is enabled but does
+  not install it on their machines.
+
+### Plugin install, user scope (alternative)
+
+Installs the plugin once for every project on the machine. Inside
+Claude Code:
 
 ```
 /plugin marketplace add Sting25/claude-code-handoff
@@ -193,7 +245,10 @@ secret — details in
 
 Plugin installs update and uninstall through Claude Code's own plugin
 management (`/plugin` in-session) instead — there's no `git pull` or
-`install.sh` step for that mode.
+`install.sh` step for that mode. For a per-project install, name the
+same scope the plugin was installed at, for example
+`claude plugin uninstall claude-code-handoff@claude-code-handoff --scope project`
+(or `--scope local`); a user-scope install uses `--scope user`.
 
 Installing from a volatile path (`/tmp`, CI scratch) auto-switches to
 copy mode; `--copy` / `--link` force it, and `--model 'opus[1m]'` pins
