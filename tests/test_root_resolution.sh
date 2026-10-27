@@ -180,4 +180,63 @@ check "fallback picks the _2 (newer) archive under UTF-8 locale" yes "$(has "$ou
 check "older base archive not chosen"                            no  "$(has "$out" "OLDER_SNAPSHOT_MARK")"
 rm -rf "$d"
 
+echo "root resolution — desktop worktree session follows the payload cwd (#142)"
+
+# The Claude Code desktop app runs a worktree session with CLAUDE_PROJECT_DIR =
+# the MAIN checkout and the payload cwd = the linked worktree (process cwd =
+# main). Rung 1 used to win, sending every hook to the main checkout while the
+# /handoff skill (no CLAUDE_PROJECT_DIR) wrote into the worktree. Now the
+# payload cwd wins in exactly that shape, and only there.
+resolve() {  # <project_dir> <payload_cwd> [env...] -> "via root"
+  local pd="$1" pc="$2"; shift 2
+  ( cd "$pd" && env CLAUDE_PROJECT_DIR="$pd" "$@" bash -c \
+    ". '$REPO_ROOT/bin/handoff_provenance.sh'; handoff_resolve_root '$pc'; printf '%s %s' \"\$HANDOFF_ROOT_VIA\" \"\$HANDOFF_ROOT\"" )
+}
+M="$(mk_repo)"; U="$(mk_repo)"; N="$(mktemp -d)"; N="$(cd "$N" && pwd -P)"
+cleanup_on_exit "$M" "$U" "$N"
+must mkdir -p "$M/.claude/worktrees" "$M/sub"
+must git -C "$M" worktree add -q "$M/.claude/worktrees/wt-x" -b wt-x
+W="$M/.claude/worktrees/wt-x"
+must mkdir -p "$W/deep"
+check "payload cwd in a linked worktree wins"     "payload_cwd_worktree $W" "$(resolve "$M" "$W")"
+check "a subdirectory of the worktree wins too"   "payload_cwd_worktree $W" "$(resolve "$M" "$W/deep")"
+check "subdir of the same checkout: project dir"  "project_dir $M"          "$(resolve "$M" "$M/sub")"
+check "unrelated repo cwd: project dir"           "project_dir $M"          "$(resolve "$M" "$U")"
+check "non-git cwd: project dir"                  "project_dir $M"          "$(resolve "$M" "$N")"
+check "empty payload cwd: project dir"            "project_dir $M"          "$(resolve "$M" "")"
+check "HANDOFF_HOOKS_FOLLOW_WORKTREE=0: old order" "project_dir $M"         "$(resolve "$M" "$W" HANDOFF_HOOKS_FOLLOW_WORKTREE=0)"
+check "HANDOFF_ANCHOR=common still wins after"    "payload_cwd_worktree $M" "$(resolve "$M" "$W" HANDOFF_ANCHOR=common)"
+# The reverse shape (project dir = worktree, cwd = main) is not a desktop
+# session; and a worktree of ANOTHER repo is not this project's.
+check "project dir = worktree, cwd = main: rung 1" "project_dir $W"         "$(resolve "$W" "$M")"
+must git -C "$U" worktree add -q "$U.wt" -b u-wt
+cleanup_on_exit "$U.wt"
+check "worktree of an unrelated repo: project dir" "project_dir $M"         "$(resolve "$M" "$U.wt")"
+err="$(resolve "$M" "$W" HANDOFF_DEBUG=1 2>&1 >/dev/null)"
+check "debug trace names the new rung"            yes "$(has "$err" "via=payload_cwd_worktree")"
+# End to end, the hooks the desktop app fires: SessionStart, Stop, SessionEnd
+# all land in the worktree's .claude/, nothing in the main checkout's.
+( cd "$M" && printf '{"session_id":"SIDWT0001","cwd":"%s"}' "$W" \
+    | env CLAUDE_PROJECT_DIR="$M" bash "$SS" >/dev/null 2>&1 )
+check "SessionStart: origin marker in the worktree" yes "$([[ -f "$W/.claude/handoff_backups/.session_started_SIDWT0001" ]] && echo yes || echo no)"
+check "SessionStart: nothing in the main checkout"  no  "$([[ -e "$M/.claude/handoff_backups" ]] && echo yes || echo no)"
+if command -v jq >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+  tx="$N/tx.jsonl"
+  must printf '{"type":"user","message":{"content":"hello from the worktree"}}\n' > "$tx"
+  ( cd "$M" && printf '{"session_id":"SIDWT0001","transcript_path":"%s","cwd":"%s"}' "$tx" "$W" \
+      | env CLAUDE_PROJECT_DIR="$M" bash "$REPO_ROOT/bin/handoff_turn_append.sh" >/dev/null 2>&1 )
+  check "Stop: raw dump in the worktree"            yes "$([[ -f "$W/.claude/handoff_backups/handoff_raw_SIDWT0001.md" ]] && echo yes || echo no)"
+  check "Stop: no raw dump in the main checkout"    no  "$([[ -e "$M/.claude/handoff_backups" ]] && echo yes || echo no)"
+else
+  skip "jq or perl missing; Stop-hook placement case not run"
+fi
+( cd "$M" && printf '{"session_id":"SIDWT0001","reason":"other","cwd":"%s"}' "$W" \
+    | env CLAUDE_PROJECT_DIR="$M" bash "$WH" --if-curated >/dev/null 2>&1 )
+check "SessionEnd: doc in the worktree"             yes "$([[ -f "$W/.claude/handoff_current.md" ]] && echo yes || echo no)"
+check "SessionEnd: doc records the worktree root"   yes "$(has "$(cat "$W/.claude/handoff_current.md" 2>/dev/null)" "HANDOFF_ROOT: $W in_git=1")"
+check "SessionEnd: no doc in the main checkout"     no  "$([[ -f "$M/.claude/handoff_current.md" ]] && echo yes || echo no)"
+# This main checkout does not ignore .claude/, so the salvage refuses: the only
+# thing it may have left in main's .claude/ is the worktrees/ dir git made.
+check "main's .claude holds only the worktree"      "worktrees" "$(ls "$M/.claude")"
+
 finish
