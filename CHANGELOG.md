@@ -12,7 +12,11 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Fixed
+- **Worktree sessions started without the main checkout's handoff, and a doc inherited from it got a false `/handoff-recover` banner (#143).** A fresh linked worktree has no `.claude/handoff_current.md`, so `SessionStart` loaded nothing there. When Claude Code's `.worktreeinclude` (or any copy) put the main checkout's doc into the worktree, the loader called it a moved project ("written for X but loading at Y") and, for a placeholder doc (the main session live and not yet curated), printed `ACTION: RUN /handoff-recover` for a session that never existed in that worktree. Now a session in a linked worktree with no handoff of its own loads the main checkout's doc as inherited context, announced in one line, with the same tiers as a local load (it was written on this machine, so its rules verify and bind) and nothing written into either checkout. A doc in the worktree whose `HANDOFF_ROOT` is the main checkout is reported as a copy inherited from it, not as a moved project. In both inherited shapes the recover banner and the auto-rebuild never fire (the main checkout's raw dumps can belong to a live sibling session, #104), and a placeholder's Notes fallback reads the main checkout's `handoff_history/`. A doc written by a session in the worktree itself, every main-checkout session, submodules, bare repos and `HANDOFF_ANCHOR=common` behave exactly as before.
 
 ## [0.18.7] - 2026-09-23
 

@@ -12,6 +12,7 @@ digest you never read.
 
 - **Snapshots where you left off** — git state plus a written summary of decisions, open questions, and next steps.
 - **Auto-loads that snapshot into your next session** in the same repo — no copy-paste, no kickoff prompt.
+- **Follows you into linked git worktrees**: a session in a worktree that has no handoff of its own loads the main checkout's handoff as inherited context (standing rules included), and never asks you to recover a session that never ran there.
 - **Keeps a per-turn backup**, so a crashed or killed session can be reconstructed afterwards.
 - **Saves a mechanical git-state snapshot on every clean exit**, even if you forget to hand off.
 - **Nudges you when context is filling** (about 100k tokens in, or 40% of the window on smaller models), while Claude is still sharp enough to write a good summary, so you hand off confidently instead of riding a bloated session, which also means less context re-processing and fewer wasted tokens.

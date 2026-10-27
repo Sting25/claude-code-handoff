@@ -330,6 +330,26 @@ Two consumers read this directory:
 - `/handoff-more` reads up to N retained snapshots into context on
   demand, so the assistant can see further back than just yesterday.
 
+**Linked git worktrees.** Each linked worktree is its own root with its
+own `.claude/` (see `HANDOFF_ANCHOR` under "Advanced environment
+variables"), so a fresh worktree has no handoff. A session started there
+loads the main checkout's `handoff_current.md` as inherited context
+instead: one `handoff: this worktree has no handoff yet; loading the
+main checkout's handoff as inherited context: <path>` line, then the
+same load a local doc would get (its rules were signed on this machine,
+so they verify and bind). That load writes nothing into either checkout.
+If the main checkout's doc was copied into the worktree (Claude Code's
+`.worktreeinclude` does this for git-ignored files at worktree creation),
+its `HANDOFF_ROOT` line names the main checkout, and the loader reports
+it as inherited from there instead of warning about a moved project. In
+both cases the `/handoff-recover` banner and the auto-rebuild never
+fire, even when the inherited doc is an uncurated placeholder: the main
+checkout's session may still be live, and there is nothing to recover
+in the worktree. The placeholder's Notes fallback reads the main
+checkout's `handoff_history/`. Once a session in the worktree writes its
+own handoff (its `HANDOFF_ROOT` is the worktree), the worktree behaves
+like any other root, banner included.
+
 The retention dir is bootstrapped into the repo's `.gitignore` on
 first write — handoffs are intentionally per-developer, not
 checked-in artifacts.
@@ -715,7 +735,10 @@ near the top records which project root the writer resolved; the
 SessionStart loader compares it against the root it resolves and warns
 when the two disagree, which is how a moved or renamed project (or a
 copied `.claude/`) announces itself instead of silently loading a
-snapshot that describes somewhere else. The `SessionEnd` hook
+snapshot that describes somewhere else. (One copy is expected and named
+as such: a doc copied from the main checkout into one of its linked
+worktrees, see "Linked git worktrees" under "Where the handoff files
+live".) The `SessionEnd` hook
 leaves the Notes block as a placeholder. Running `/handoff` is what
 fills it in, so for any session that involved real discussion, `/handoff`
 is the preferred path; `SessionEnd` is the safety net for unplanned exits.
@@ -743,7 +766,10 @@ deliberately — flipping it would silently relocate every existing user's
 handoff files on upgrade. Two caveats for `common`: in a **submodule**
 it resolves to `<super>/.git/modules`, and under `--separate-git-dir` to
 the external git dir's parent — both outside the working tree. Prefer it
-only in a plain multi-worktree checkout.
+only in a plain multi-worktree checkout. With the default, a worktree
+that has no handoff of its own loads the main checkout's as inherited
+context (see "Linked git worktrees" under "Where the handoff files
+live"), so a worktree session never starts blind.
 
 **`HANDOFF_DEBUG=1`** — prints a one-line root-resolution trace to
 stderr (which precedence rung won, the anchor, the resolved root). The
