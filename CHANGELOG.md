@@ -12,7 +12,11 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Changed
+- **Desktop app: the context nudge no longer prints an inferred percentage the app already shows (#144).** In the Claude desktop app the hook environment carries `CLAUDE_CODE_ENTRYPOINT=claude-desktop`, the status line does not run, and the app displays the real context figure in its own meter. The `UserPromptSubmit` nudge still printed a percentage computed from a model-id window guess plus a 60-word note saying it was an estimate (measured 2026-10-27: "~107856 tokens (~10% (estimated) of a 1000000-token window)" beside a visible app meter). When that variable is set, no fresh statusline percentage is cached, and `HANDOFF_CTX_WINDOW_TOKENS` is not pinned, the reminder (suggest and act modes, and the suggested flag line) now reports the token count only, says the app's context meter is the authoritative figure, and omits the percentage and its window note; the bytes/4 caveat is kept as one sentence when the count is estimated. Threshold, cooldown, cap and flag recording are unchanged. A hand-wired status line in the app still produces the normal percentage wording. New knob `HANDOFF_CTX_NO_DESKTOP_MODE=1` restores the inferred percentage. Terminal sessions are byte-identical to before. `tests/lib.sh` now unsets `CLAUDE_CODE_ENTRYPOINT` and `CLAUDE_CODE_DESKTOP_APP_VERSION` so the suite behaves the same whether it runs from a terminal or from a shell inside the app.
 
 ## [0.18.7] - 2026-09-23
 

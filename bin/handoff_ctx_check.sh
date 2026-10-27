@@ -140,6 +140,23 @@
 #                               cache entirely, restoring the pre-statusline
 #                               detection chain exactly. Debugging / regression
 #                               escape hatch; default unset (cache honored).
+#   HANDOFF_CTX_NO_DESKTOP_MODE set to 1 to disable desktop mode (issue #144).
+#                               In the Claude desktop app the hook environment
+#                               carries CLAUDE_CODE_ENTRYPOINT=claude-desktop
+#                               and the app shows the real context figure in
+#                               its own meter, while the status line (the only
+#                               source of used_percentage for hooks) does not
+#                               run there. So when that variable is set, no
+#                               fresh statusline pct exists, and the window was
+#                               not pinned by HANDOFF_CTX_WINDOW_TOKENS, the
+#                               reminder reports the token estimate only,
+#                               points the model at the app's meter as the
+#                               authoritative figure, and omits the inferred
+#                               percentage and its window NOTE. Threshold,
+#                               cooldown and cap logic are unchanged. Set 1 to
+#                               print the inferred percentage anyway. Terminal
+#                               sessions (variable unset or any other value)
+#                               are unaffected either way.
 #   HANDOFF_HEALTH_PROMPTS      Stop-hook health detector A (issue #71):
 #                               number of UserPromptSubmit fires, with
 #                               .ctx_<session_id> still absent, before this
@@ -878,18 +895,59 @@ else
   est_note=''
 fi
 
+# --- Desktop mode (issue #144) ---
+# In the Claude desktop app the hook environment carries
+# CLAUDE_CODE_ENTRYPOINT=claude-desktop, and the app displays the real context
+# figure in its own meter. The status line does not run there, so without a
+# cached pct every percentage this hook could print is inferred from a model-id
+# window guess, which the app's meter already contradicts or confirms on
+# screen. Measured 2026-10-27: "~10% (estimated) of a 1000000-token window"
+# plus a 60-word NOTE, beside a visible app meter. So in that situation the
+# reminder carries the token count only and points the model at the meter.
+# Conditions, each of which keeps the percentage path when it fails:
+#   - entrypoint is the desktop app (a terminal session never changes);
+#   - no fresh statusline pct (someone may wire a statusLine in the app, and
+#     CC's own used_percentage is then authoritative, exactly as today);
+#   - the window was not pinned by HANDOFF_CTX_WINDOW_TOKENS (a pin is the
+#     user's own number, and the pct against it is what they asked for);
+#   - HANDOFF_CTX_NO_DESKTOP_MODE is not 1 (the escape hatch).
+# Threshold, cooldown, cap and flag recording above are untouched: only the
+# wording of the emitted reminder differs. The terminal-session strings below
+# are assembled from the same pieces as before, so that path is byte-identical.
+desktop_mode=0
+if [[ "${CLAUDE_CODE_ENTRYPOINT:-}" == "claude-desktop" ]] \
+   && [[ -z "$sl_pct" && "$window_source" != "env" ]] \
+   && [[ "${HANDOFF_CTX_NO_DESKTOP_MODE:-0}" != "1" ]]; then
+  desktop_mode=1
+fi
+if (( desktop_mode )); then
+  # One sentence: the long form explains a percentage this reminder no longer
+  # prints, and the bytes/4 caveat still matters because the app meter shows a
+  # token figure that the estimate will overshoot.
+  if [[ "$token_source" == "estimated" ]]; then
+    est_note=' NOTE: this token figure is ESTIMATED from transcript byte size (bytes/4), not a measured count, and typically runs high.'
+  fi
+  ctx_head="Context at ~${est_tokens} tokens.${est_note} The desktop app's own context meter is the authoritative figure for how full the window is: refer to it rather than inferring a percentage."
+  flag_example="about ${est_tokens} tokens of context used (see the app's context meter)"
+  late_compare="waiting until the meter is nearly full"
+else
+  ctx_head="Context at ~${est_tokens} tokens (~${pct}%${pct_label} of a ${WINDOW_TOKENS}-token window).${est_note}${window_note}"
+  flag_example="~${pct}%${pct_label} of context used"
+  late_compare="at 5%"
+fi
+
 case "$REMINDER_MODE" in
   act)
     cat <<EOF
 <system-reminder>
-Context at ~${est_tokens} tokens (~${pct}%${pct_label} of a ${WINDOW_TOKENS}-token window).${est_note}${window_note} This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself; do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. ${repeat_note}
+${ctx_head} This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself; do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. ${repeat_note}
 </system-reminder>
 EOF
     ;;
   *)
     cat <<EOF
 <system-reminder>
-Context at ~${est_tokens} tokens (~${pct}%${pct_label} of a ${WINDOW_TOKENS}-token window).${est_note}${window_note} This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than at 5%. Flag to the user as a passive mention: no question mark, no "want me to?". One line, e.g. "Flagging: ~${pct}%${pct_label} of context used: natural /handoff moment if you want to lock in the prose while I'm still sharp." ${repeat_note}
+${ctx_head} This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than ${late_compare}. Flag to the user as a passive mention: no question mark, no "want me to?". One line, e.g. "Flagging: ${flag_example}: natural /handoff moment if you want to lock in the prose while I'm still sharp." ${repeat_note}
 </system-reminder>
 EOF
     ;;
