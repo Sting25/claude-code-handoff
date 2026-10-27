@@ -152,10 +152,26 @@ when the cache has a percentage but no window size. Without a cached
 percentage, the hook computes tokens / window, and if that window was
 only auto-detected (from the session's model id, from `~/.claude.json`,
 or widened by the >200k-token ratchet), the reminder labels the figure
-"(estimated)" and names the actual source it came from. The desktop app
-is the usual case: it does not run the status line, and Claude Code
-exposes `context_window` to hooks only through it, so there the
-percentage is always an estimate.
+"(estimated)" and names the actual source it came from.
+
+The desktop app is the usual case for a missing cached percentage: it
+does not run the status line, and Claude Code exposes `context_window`
+to hooks only through it. The app does, however, show the real figure in
+its own context meter, so printing an inferred percentage there repeats
+a number the user can already see, with a long note explaining it is a
+guess. The hook therefore runs in **desktop mode** when the hook
+environment carries `CLAUDE_CODE_ENTRYPOINT=claude-desktop` (the app
+sets it, together with `CLAUDE_CODE_DESKTOP_APP_VERSION`), no fresh
+cached percentage exists, and `HANDOFF_CTX_WINDOW_TOKENS` is not
+pinned: the reminder reports the token count only, says the app's
+context meter is the authoritative figure, and drops the inferred
+percentage and its window note (the bytes/4 caveat stays, as one
+sentence, when the count itself is an estimate). The threshold, cooldown
+and cap logic are unchanged, so the nudge fires at the same point. A
+status line wired by hand in the app still wins: with a fresh cached
+percentage the normal wording returns. `HANDOFF_CTX_NO_DESKTOP_MODE=1`
+restores the inferred percentage in the app. Terminal sessions never
+enter desktop mode and are unchanged.
 
 The nudge needs a growth measure to space its reminders, and until
 0.14.2 that could only be the Stop hook's transcript byte count
