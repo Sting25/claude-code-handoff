@@ -12,7 +12,11 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Added
+- **Handoffs written in a linked git worktree now reach the main checkout (#141).** A `/handoff` run in a worktree (`git worktree add`) used to land only in that worktree's own `.claude/`, where a session started in the main checkout never looked, and it was lost when the worktree was removed. The worktree still gets its own `handoff_current.md` as before; the `--restamp` step at the end of `/handoff` (and `/handoff-recover`) now also saves a dated copy to the main checkout's `.claude/handoff_history/worktrees/`, named after the worktree, branch and time. Copies are never overwritten, an unchanged doc adds none, and the main checkout's own `handoff_current.md` and history are never touched, so two sessions cannot clobber each other. The copy is reference data only: its HMAC trailers and BIND markers are removed, so its Rules and Pinned sections can never load as binding anywhere. It is refused, with a warning, when the main checkout does not git-ignore that folder (the copy holds private session notes) or a folder on the way is a symlink. At session start in the main checkout, the loader lists copies newer than its own handoff (up to 5) as one line each with the path to read, inside the reference-data block and never with their content.
 
 ## [0.18.7] - 2026-09-23
 
