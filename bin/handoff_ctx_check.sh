@@ -908,15 +908,18 @@ fi
 #   - entrypoint is the desktop app (a terminal session never changes);
 #   - no fresh statusline pct (someone may wire a statusLine in the app, and
 #     CC's own used_percentage is then authoritative, exactly as today);
-#   - the window was not pinned by HANDOFF_CTX_WINDOW_TOKENS (a pin is the
-#     user's own number, and the pct against it is what they asked for);
+#   - the window was neither pinned by HANDOFF_CTX_WINDOW_TOKENS (a pin is the
+#     user's own number, and the pct against it is what they asked for) nor
+#     read from a statusline cache (CC's own context_window_size is a measured
+#     window, so a pct against it is not a guess even without pct= in the
+#     cache); only a window INFERRED by the auto path qualifies;
 #   - HANDOFF_CTX_NO_DESKTOP_MODE is not 1 (the escape hatch).
 # Threshold, cooldown, cap and flag recording above are untouched: only the
 # wording of the emitted reminder differs. The terminal-session strings below
 # are assembled from the same pieces as before, so that path is byte-identical.
 desktop_mode=0
 if [[ "${CLAUDE_CODE_ENTRYPOINT:-}" == "claude-desktop" ]] \
-   && [[ -z "$sl_pct" && "$window_source" != "env" ]] \
+   && [[ -z "$sl_pct" && "$window_source" == "auto" ]] \
    && [[ "${HANDOFF_CTX_NO_DESKTOP_MODE:-0}" != "1" ]]; then
   desktop_mode=1
 fi

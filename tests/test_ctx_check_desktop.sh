@@ -107,6 +107,16 @@ out="$(run_auto "$repo" DESKSL "$DESK")"
 check "desktop + fresh sl pct -> ~42% printed"  yes "$(has "$out" "~42%")"
 check "desktop + fresh sl pct -> no meter wording" no "$(has "$out" "context meter")"
 
+# --- Fresh statusline cache with window= but no pct= -> percentage path ----
+# CC's own context_window_size is a measured window, so a pct against it is
+# not a guess: desktop mode must stand down (window_source == statusline).
+repo="$(mk_repo)"; cleanup_on_exit "$repo"
+seed "$repo" DESKWIN 4000 150000 claude-opus-5-5
+seed_sl "$repo" DESKWIN "tokens=150000" "window=1000000"
+out="$(run_auto "$repo" DESKWIN "$DESK")"
+check "desktop + fresh sl window only -> ~15% printed" yes "$(has "$out" "~15%")"
+check "desktop + fresh sl window only -> no meter wording" no "$(has "$out" "context meter")"
+
 # --- Stale statusline cache (older than tokens file) -> desktop mode --------
 repo="$(mk_repo)"; cleanup_on_exit "$repo"
 seed "$repo" DESKSTALE 4000 150000 claude-opus-5-5
