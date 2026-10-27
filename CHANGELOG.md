@@ -12,7 +12,11 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+No hook-command or permission-entry changes: nothing to re-patch in
+`~/.claude/settings.json`.
+
+### Changed
+- **Docs: per-project opt-in plugin install is now the recommended layout (#146).** README gains "Per-project plugin install (recommended)" (declare the marketplace with `--scope project`, install with `claude plugin install claude-code-handoff@claude-code-handoff --scope project`, or `--scope local` to keep it out of committed settings) and `docs/reference.md` gains "Plugin installs: project scope". Switching from the global layout requires `claude plugin uninstall ... --scope user` first, because a user-level `false` does not disable a project-enabled plugin. Documents that project scope also covers that repo's worktrees, that only loaded plugins register hooks and skills (other projects see neither), and that collaborators must run the install command themselves. User-scope install stays documented as the alternative, and the update/uninstall note now names the matching `--scope`. Documentation only; no hook code changes.
 
 ## [0.18.7] - 2026-09-23
 
