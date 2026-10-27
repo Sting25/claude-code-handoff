@@ -13,6 +13,7 @@ env-var list, see [skills/handoff/README.md](../skills/handoff/README.md).
 - [Status line](#status-line)
 - [Compaction safety net](#compaction-safety-net)
 - [Where the handoff files live](#where-the-handoff-files-live)
+- [Worktree sessions](#worktree-sessions)
 - [Pinned context](#pinned-context-carried-forward-every-handoff)
 - [Trusted rules: when the fences actually bind](#trusted-rules-when-the-fences-actually-bind)
 - [Cross-session overwrite guard](#cross-session-overwrite-guard)
@@ -404,6 +405,58 @@ silently moving the origin forward and reopening the exact
 stale-overwrite hole the [cross-session overwrite
 guard](#cross-session-overwrite-guard) (issue #63) closes.
 
+## Worktree sessions
+
+A linked git worktree (`git worktree add`, or the worktrees the Claude
+Code desktop app creates under `.claude/worktrees/`) has its own
+`.claude/` and therefore its own handoff. Three things keep that
+handoff from being lost with the worktree:
+
+1. **Hooks follow the worktree.** In a desktop worktree session
+   `CLAUDE_PROJECT_DIR` names the main checkout while the hook
+   payload `cwd` is the worktree. `handoff_resolve_root` anchors on
+   the payload `cwd` when it lies in a linked worktree of
+   `CLAUDE_PROJECT_DIR`'s checkout (`via=payload_cwd_worktree` in the
+   `HANDOFF_DEBUG` trace), so every hook reads and writes the
+   worktree's `.claude/`, the same place the `/handoff` skill writes.
+   `HANDOFF_HOOKS_FOLLOW_WORKTREE=0` turns this off.
+2. **A curated handoff is copied to the main checkout.** When
+   `/handoff` (or `/handoff-recover`) restamps a curated doc in a
+   linked worktree, and whenever the `SessionEnd`/`PreCompact` safety
+   net runs there with a curated doc, a dated copy lands in
+   `<main>/.claude/handoff_history/worktrees/handoff_<stamp>__<worktree>__<branch>.md`.
+   The copy is narrative data only: its BIND markers and signature
+   trailers are stripped, it is never overwritten (an unchanged doc
+   adds no copy), and the worktree keeps its own doc untouched.
+3. **An uncurated session's raw dump is salvaged.** The same safety
+   net, on every outcome including the `resume` skip, saves this
+   session's `handoff_backups/handoff_raw_<session_id>.md` as
+   `<main>/.claude/handoff_history/worktrees/raw_<stamp>__<worktree>__<branch>__<sid8>.md`
+   (`sid8` is the first 8 characters of the session id). The
+   `WorktreeRemove` hook (`bin/handoff_worktree_remove.sh`, Claude
+   Code 2.1.300 and later, only for worktrees Claude Code created)
+   does the same for the worktree's `handoff_current.md` (when it is
+   not an unedited placeholder) and every raw dump it still holds,
+   which covers sessions killed before `SessionEnd`. Salvaged dumps
+   are deduplicated (an identical dump for the same worktree, branch
+   and session adds no file) and carry a header naming their origin.
+
+The main checkout's `SessionStart` lists copies and salvaged dumps
+newer than its own `handoff_current.md` (up to 5 of each) under the
+reference-data caveat: the path to read, the worktree, branch and
+session id prefix, and for a raw dump a pointer to `/handoff-recover`,
+which can compose Notes from it. Only files whose names match the
+writer's exact shape are listed, never their content, so nothing in
+that folder can reach the binding tier.
+
+Both copy and salvage refuse, with a message on stderr, unless the
+main checkout git-ignores `.claude/handoff_history/` (running
+`/handoff` once in the main checkout adds that), and they refuse a
+symlinked `.claude/`, `handoff_history/` or `worktrees/` folder.
+Neither ever writes to stdout or fails the hook.
+`HANDOFF_ANCHOR=common` (below) is the alternative when every
+worktree should share one `.claude/` instead.
+
 ## Pinned context (carried forward every handoff)
 
 Some context outlives a single session but isn't a permanent rule —
@@ -745,6 +798,19 @@ it resolves to `<super>/.git/modules`, and under `--separate-git-dir` to
 the external git dir's parent — both outside the working tree. Prefer it
 only in a plain multi-worktree checkout.
 
+**`HANDOFF_HOOKS_FOLLOW_WORKTREE`** (default on). In a Claude Code
+desktop worktree session `CLAUDE_PROJECT_DIR` is the main checkout
+and the hook payload `cwd` is the linked worktree. By default
+`handoff_resolve_root` then anchors the hooks on the payload `cwd`,
+so hooks and the `/handoff` skill agree on the worktree's `.claude/`
+(see [Worktree sessions](#worktree-sessions)). Set it to `0` to
+restore the plain precedence (`CLAUDE_PROJECT_DIR` first), which
+sends every hook of a worktree session to the main checkout. It only
+matters when the payload `cwd` is inside a linked worktree of
+`CLAUDE_PROJECT_DIR`'s checkout; a subdirectory, an unrelated repo
+or a non-git directory never trigger it. `HANDOFF_ANCHOR=common`
+still applies afterwards.
+
 **`HANDOFF_DEBUG=1`** — prints a one-line root-resolution trace to
 stderr (which precedence rung won, the anchor, the resolved root). The
 first thing to reach for when a handoff is written somewhere the loader
@@ -842,10 +908,11 @@ control.
 `./install.sh`:
 
 1. Symlinks the bin scripts and skills into `~/.claude/`.
-2. Patches `~/.claude/settings.json` to add six hooks
+2. Patches `~/.claude/settings.json` to add seven hooks
    (`SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`,
-   `Stop`, `UserPromptSubmit`), six permission entries, and — **only
-   if you don't already have one** — the `statusLine` command. An
+   `Stop`, `UserPromptSubmit`, `WorktreeRemove`), seven permission
+   entries, and (**only if you don't already have one**) the
+   `statusLine` command. An
    existing statusLine is never overwritten; the installer prints
    the manual wiring step instead (see [Status line](#status-line)).
 
@@ -1016,6 +1083,7 @@ is preserved; uninstall only removes entries it can prove are its own.
 │   ├── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
 │   ├── handoff_statusline.sh      # statusLine command: status line + caches CC's own ctx numbers
 │   ├── handoff_compact_reset.sh   # PostCompact hook: resets ctx sidecars for the freed window
+│   ├── handoff_worktree_remove.sh # WorktreeRemove hook: salvages a removed worktree's handoff and raw dumps into the main checkout
 │   └── handoff_provenance.sh      # sourced lib: HMAC signing/verification + BIND-region extraction + structural skeleton stamp (issue #42, H-A)
 ├── skills/
 │   ├── handoff/

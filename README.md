@@ -142,7 +142,7 @@ fresh secret.
 
 ## How it works
 
-Six hooks drive it, wired up by either install mode (the plugin ships
+Seven hooks drive it, wired up by either install mode (the plugin ships
 them in `hooks/hooks.json`; the bare-scripts installer patches them
 into `~/.claude/settings.json`):
 `SessionStart` loads the latest handoff into a new session,
@@ -152,7 +152,9 @@ backup and records context usage, `UserPromptSubmit` nudges you
 toward `/handoff` once usage crosses about 100k tokens (or 40% of the
 window, whichever comes first), and
 `PostCompact` resets those measurements so the freed window is
-treated as fresh. Handoffs are signed with a per-machine HMAC key, so
+treated as fresh, and `WorktreeRemove` salvages a removed git
+worktree's handoff and raw dumps into the main checkout (see
+"Worktree sessions" in the reference). Handoffs are signed with a per-machine HMAC key, so
 a cloned repo can't inject fake standing rules: only rules with a
 valid signature load as binding, everything else loads as inert
 reference text.

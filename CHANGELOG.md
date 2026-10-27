@@ -12,7 +12,19 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+**Hook-command change:** a new `WorktreeRemove` hook,
+`bash $HOME/.claude/bin/handoff_worktree_remove.sh 2>/dev/null || true`,
+plus its permission entry
+`Bash(bash $HOME/.claude/bin/handoff_worktree_remove.sh)`. The plugin
+ships it in `hooks/hooks.json`; the bare-scripts install gets it by
+re-running `./install.sh` after `git pull` (idempotent, existing entries
+are left alone). Claude Code fires it from 2.1.300 and only for the
+worktrees it created; older builds never fire it, which is harmless.
+
+### Fixed
+- **Desktop worktree sessions wrote their hooks into the main checkout (#142).** The Claude Code desktop app runs a worktree session with `CLAUDE_PROJECT_DIR` set to the main checkout and the hook payload `cwd` set to the linked worktree, so every hook (SessionStart, Stop, SessionEnd, PreCompact, UserPromptSubmit, PostCompact) read and wrote the main checkout's `.claude/`, while the `/handoff` skill (no `CLAUDE_PROJECT_DIR` in the Bash tool) wrote into the worktree. A worktree session's placeholder and raw dumps overwrote or staled the main checkout's handoff, and its curated doc died with the worktree. `handoff_resolve_root` now anchors on the payload `cwd` when it lies in a linked worktree whose main checkout is `CLAUDE_PROJECT_DIR`'s toplevel (`via=payload_cwd_worktree` in the `HANDOFF_DEBUG` trace). A `cd` into a subdirectory of the same checkout, into an unrelated repo, or into a non-git directory keeps the old order; `HANDOFF_HOOKS_FOLLOW_WORKTREE=0` restores it unconditionally; `HANDOFF_ANCHOR=common` still applies afterwards.
+- **Uncurated worktree sessions left nothing recoverable (#142).** `SessionEnd` and `PreCompact` (`write_handoff.sh --if-curated`) in a linked worktree now salvage the session's raw per-turn dump into `<main>/.claude/handoff_history/worktrees/raw_<stamp>__<worktree>__<branch>__<sid8>.md` (dated, never overwritten, deduplicated, reference data only) and run the #141 copy for a curated doc, on every outcome including the `resume` skip. The new `WorktreeRemove` hook (`bin/handoff_worktree_remove.sh`) does the same for the worktree's `handoff_current.md` and every raw dump when Claude Code removes the worktree, so sessions killed before `SessionEnd` are covered too. The main checkout's `SessionStart` lists salvaged dumps newer than its own handoff next to the #141 copies, with the path to read and a pointer to `/handoff-recover`. Both salvage paths refuse unless the main checkout git-ignores `.claude/handoff_history/`, refuse symlinked folders, print nothing on stdout and never fail the hook.
+- **`install.sh --doctor` judges the cached plugin by its own shape.** It requires `WorktreeRemove` in a cached `hooks/hooks.json` only when that cache ships `bin/handoff_worktree_remove.sh`, and the script only when the hook is wired, so an older cached plugin stays `ok` rather than `BROKEN` after this installer is updated.
 
 ## [0.18.7] - 2026-09-23
 
