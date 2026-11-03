@@ -12,6 +12,10 @@ are appended).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.19.0] - 2026-11-03
+
 **Hook-command change:** a new `WorktreeRemove` hook,
 `bash $HOME/.claude/bin/handoff_worktree_remove.sh 2>/dev/null || true`,
 plus its permission entry
