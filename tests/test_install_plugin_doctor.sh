@@ -51,9 +51,9 @@ mk_sandbox() {
 }
 
 # A healthy-looking plugin cache: hooks/hooks.json (copied from the repo, so
-# it genuinely has all six events) plus stub bin/ scripts for all eight
+# it genuinely has all seven events) plus stub bin/ scripts for all nine
 # names. Needed since #70 added structural checks (hooks.json present and
-# parseable, bin/ has all eight scripts) that a bare empty version directory
+# parseable, bin/ has all nine scripts) that a bare empty version directory
 # would now fail, which would make every test below that just wants a
 # plugin present (not specifically testing those structural checks) fail for
 # an unrelated reason. See mk_broken_plugin_cache below for the deliberately
@@ -63,7 +63,7 @@ mk_plugin_cache() {  # <home_dir>
   must mkdir -p "$vdir/bin" "$vdir/hooks"
   must cp "$REPO_ROOT/hooks/hooks.json" "$vdir/hooks/hooks.json"
   local n
-  for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+  for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_worktree_remove handoff_provenance; do
     must touch "$vdir/bin/$n.sh"
   done
 }
@@ -137,7 +137,7 @@ mk_plugin_cache_at() {  # <config_dir>
   must mkdir -p "$vdir/bin" "$vdir/hooks"
   must cp "$REPO_ROOT/hooks/hooks.json" "$vdir/hooks/hooks.json"
   local n
-  for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+  for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_worktree_remove handoff_provenance; do
     must touch "$vdir/bin/$n.sh"
   done
 }
@@ -173,8 +173,8 @@ dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
 check "genuine plugin-only: doctor exit 0"        0   "$drc"
 check "genuine plugin-only: no MISSING lines"     no  "$(has "$dout" "MISSING")"
 check "genuine plugin-only: skip-loop note"       yes "$(has "$dout" "no bare-scripts install found")"
-check "genuine plugin-only: plugin hooks.json ok" yes "$(has "$dout" "has all six hook events")"
-check "genuine plugin-only: plugin bin ok"        yes "$(has "$dout" "has all eight scripts")"
+check "genuine plugin-only: plugin hooks.json ok" yes "$(has "$dout" "has all seven hook events")"
+check "genuine plugin-only: plugin bin ok"        yes "$(has "$dout" "has all nine scripts")"
 check "genuine plugin-only: no ./install.sh advice" no "$(has "$dout" "Re-run ./install.sh")"
 rm -rf "$src" "$home"
 
@@ -215,7 +215,7 @@ rm -rf "$src" "$home"
 read -r src home <<<"$(mk_sandbox)"
 vdir="$home/.claude/plugins/cache/somemkt/claude-code-handoff/0.14.0"
 must mkdir -p "$vdir/bin"
-for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_worktree_remove handoff_provenance; do
   must touch "$vdir/bin/$n.sh"
 done
 dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
@@ -229,7 +229,7 @@ read -r src home <<<"$(mk_sandbox)"
 vdir="$home/.claude/plugins/cache/somemkt/claude-code-handoff/0.14.0"
 must mkdir -p "$vdir/bin" "$vdir/hooks"
 must cp "$REPO_ROOT/hooks/hooks.json" "$vdir/hooks/hooks.json"
-for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_compact_reset handoff_provenance; do
+for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_compact_reset handoff_worktree_remove handoff_provenance; do
   must touch "$vdir/bin/$n.sh"
 done   # handoff_statusline.sh deliberately omitted
 dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
@@ -243,7 +243,7 @@ read -r src home <<<"$(mk_sandbox)"
 vdir="$home/.claude/plugins/cache/somemkt/claude-code-handoff/0.14.0"
 must mkdir -p "$vdir/bin" "$vdir/hooks"
 must jq 'del(.hooks.Stop)' "$REPO_ROOT/hooks/hooks.json" > "$vdir/hooks/hooks.json"
-for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_worktree_remove handoff_provenance; do
   must touch "$vdir/bin/$n.sh"
 done
 dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
@@ -260,7 +260,7 @@ dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
 check "dual mode: doctor exit 0"                  0   "$drc"
 check "dual mode: still runs bare-script loop"    yes "$(has "$dout" "checking installed handoff hooks under")"
 check "dual mode: still runs plugin checks"       yes "$(has "$dout" "checking plugin cache at")"
-check "dual mode: plugin hooks.json ok"           yes "$(has "$dout" "has all six hook events")"
+check "dual mode: plugin hooks.json ok"           yes "$(has "$dout" "has all seven hook events")"
 rm -rf "$src" "$home"
 
 # --- O. F1 regression: plugin dir with NO version subdirectory at all -------
@@ -291,7 +291,7 @@ read -r src home <<<"$(mk_sandbox)"
 vdir="$home/.claude/plugins/cache/somemkt/claude-code-handoff/0.14.0"
 must mkdir -p "$vdir/bin" "$vdir/hooks"
 must bash -c "printf '%s' '{}' > '$vdir/hooks/hooks.json'"
-for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_worktree_remove handoff_provenance; do
   must touch "$vdir/bin/$n.sh"
 done
 dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
@@ -300,25 +300,52 @@ check "F2 hooks.json {}: BROKEN, missing hook events" yes \
   "$(has "$dout" "missing hook event(s)")"
 rm -rf "$src" "$home"
 
-# --- Q. F3 regression: hooks.json has all six PLUS an extra event ----------
+# --- Q. F3 regression: hooks.json has all seven PLUS an extra event ----------
 # Exact-string equality used to report this as "missing hook event(s)" even
 # though nothing is actually missing, just because the sorted comma-joined
 # list no longer matched the expected string verbatim once a 7th name (e.g.
-# a future Claude Code hook) was added. Now a subset check: all six present
+# a future Claude Code hook) was added. Now a subset check: all seven present
 # is healthy (RC 0), extras get a harmless note, not BROKEN.
 read -r src home <<<"$(mk_sandbox)"
 vdir="$home/.claude/plugins/cache/somemkt/claude-code-handoff/0.14.0"
 must mkdir -p "$vdir/bin" "$vdir/hooks"
 must jq '.hooks.Notification = [{"hooks":[{"type":"command","command":"echo hi"}]}]' \
   "$REPO_ROOT/hooks/hooks.json" > "$vdir/hooks/hooks.json"
-for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_worktree_remove handoff_provenance; do
   must touch "$vdir/bin/$n.sh"
 done
 dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
 check "F3 extra event: exit 0"                  0   "$drc"
-check "F3 extra event: still all six ok"        yes "$(has "$dout" "has all six hook events")"
+check "F3 extra event: still all six ok"        yes "$(has "$dout" "has all seven hook events")"
 check "F3 extra event: not reported as missing" no  "$(has "$dout" "missing hook event(s)")"
 check "F3 extra event: harmless-extra note"     yes "$(has "$dout" "extra hook event(s), harmless: Notification")"
+rm -rf "$src" "$home"
+
+# --- Q2. #142: the cached plugin is judged by its own shape ----------------
+# An older cached plugin (no WorktreeRemove hook, no
+# handoff_worktree_remove.sh) is internally consistent and must stay ok
+# after this installer is updated; a cache that ships the script but does
+# not wire the hook (or the reverse) is BROKEN.
+read -r src home <<<"$(mk_sandbox)"
+vdir="$home/.claude/plugins/cache/somemkt/claude-code-handoff/0.14.0"
+must mkdir -p "$vdir/bin" "$vdir/hooks"
+must jq 'del(.hooks.WorktreeRemove)' "$REPO_ROOT/hooks/hooks.json" > "$vdir/hooks/hooks.json"
+for n in write_handoff handoff_turn_append handoff_ctx_check handoff_session_start handoff_recover_tail handoff_statusline handoff_compact_reset handoff_provenance; do
+  must touch "$vdir/bin/$n.sh"
+done
+dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
+check "older cache (no WorktreeRemove): exit 0"     0   "$drc"
+check "older cache: six events ok"                   yes "$(has "$dout" "has all six hook events")"
+check "older cache: eight scripts ok"                yes "$(has "$dout" "has all eight scripts")"
+must touch "$vdir/bin/handoff_worktree_remove.sh"
+dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
+check "script shipped, hook missing: nonzero exit"  nonzero "$([[ $drc -ne 0 ]] && echo nonzero || echo zero)"
+check "script shipped, hook missing: BROKEN event"  yes "$(has "$dout" "missing hook event(s): WorktreeRemove")"
+must cp "$REPO_ROOT/hooks/hooks.json" "$vdir/hooks/hooks.json"
+must rm "$vdir/bin/handoff_worktree_remove.sh"
+dout="$(HOME="$home" bash "$src/install.sh" --doctor 2>&1)"; drc=$?
+check "hook wired, script missing: nonzero exit"    nonzero "$([[ $drc -ne 0 ]] && echo nonzero || echo zero)"
+check "hook wired, script missing: BROKEN script"   yes "$(has "$dout" "is missing: handoff_worktree_remove.sh")"
 rm -rf "$src" "$home"
 
 # --- R. F4 regression: plugin-only machine with ONE dangling bin/ leftover --

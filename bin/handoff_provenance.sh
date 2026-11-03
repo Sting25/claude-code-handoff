@@ -117,7 +117,7 @@ handoff_secret_path() {
 #   HANDOFF_ROOT_IN_GIT  1 when the root is a git worktree top, else 0
 #   HANDOFF_ROOT_ANCHOR  the anchor dir the resolution started from
 #   HANDOFF_ROOT_VIA     which precedence rung chose the anchor:
-#                        project_dir | payload_cwd | pwd
+#                        project_dir | payload_cwd_worktree | payload_cwd | pwd
 #
 # Anchor precedence (first hit wins):
 #   1. $CLAUDE_PROJECT_DIR — set AND an existing directory. Claude Code
@@ -148,6 +148,25 @@ handoff_secret_path() {
 # than the (documented, opt-in-fixable) worktree-deletion hazard. Unset or
 # HANDOFF_ANCHOR=toplevel keeps current behavior.
 #
+# Desktop worktree sessions (#142): the Claude Code desktop app runs a
+# worktree session with CLAUDE_PROJECT_DIR = the MAIN checkout and the hook
+# payload `cwd` = the linked worktree ("hook paths don't follow the
+# worktree"). Rung 1 then sent every hook to the main checkout's .claude/
+# while the /handoff skill (Bash tool, no CLAUDE_PROJECT_DIR) wrote into the
+# worktree: the worktree session's placeholder and raw dumps overwrote the
+# main checkout's doc, and its curated doc died with the worktree. So rung 1
+# yields to the payload cwd when, and only when, ALL of these hold:
+#   - CLAUDE_PROJECT_DIR and the payload cwd are both set, both directories,
+#     and their physical paths differ;
+#   - the payload cwd's git toplevel is a LINKED worktree
+#     (handoff_linked_worktree_main, defined further down; fine at call time);
+#   - that worktree's main checkout IS the physical toplevel of
+#     CLAUDE_PROJECT_DIR.
+# Then the anchor is the payload cwd and via="payload_cwd_worktree". A cd into
+# a subdirectory of the same toplevel, into an unrelated repo, or into a
+# non-git dir keeps the order above. HANDOFF_HOOKS_FOLLOW_WORKTREE=0 restores
+# the old order; HANDOFF_ANCHOR=common still applies afterwards, as always.
+#
 # HANDOFF_DEBUG=1 prints a one-line trace to stderr.
 
 # shellcheck disable=SC2034  # consumed by the sourcing scripts
@@ -174,10 +193,35 @@ handoff_git_common_dir() {  # <dir>
   (cd "$c" 2>/dev/null && pwd -P)
 }
 
+# Is <cwd> inside a LINKED worktree whose main checkout is <project_dir>'s
+# toplevel (and not merely a subdirectory of the same toplevel)? The #142
+# desktop-session shape; see the header block above. Return 1 on any doubt.
+handoff_cwd_is_worktree_of() {  # <cwd> <project_dir>
+  local cwd_phys pd_phys cwd_top pd_top wt_main
+  cwd_phys="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+  pd_phys="$(cd "$2" 2>/dev/null && pwd -P)" || return 1
+  [ "$cwd_phys" != "$pd_phys" ] || return 1
+  cwd_top="$(git -C "$cwd_phys" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  pd_top="$(git -C "$pd_phys" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [ -n "$cwd_top" ] && [ -n "$pd_top" ] || return 1
+  cwd_top="$(cd "$cwd_top" 2>/dev/null && pwd -P)" || return 1
+  pd_top="$(cd "$pd_top" 2>/dev/null && pwd -P)" || return 1
+  [ "$cwd_top" != "$pd_top" ] || return 1
+  wt_main="$(handoff_linked_worktree_main "$cwd_top")" || return 1
+  [ "$wt_main" = "$pd_top" ]
+}
+
 handoff_resolve_root() {  # [payload_cwd]
   local anchor via toplevel common common_phys parent
   if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
     anchor="$CLAUDE_PROJECT_DIR" via="project_dir"
+    # Desktop worktree session (#142): follow the payload cwd into a linked
+    # worktree of the project dir. Opt out with HANDOFF_HOOKS_FOLLOW_WORKTREE=0.
+    if [ "${HANDOFF_HOOKS_FOLLOW_WORKTREE:-1}" != "0" ] \
+       && [ -n "${1:-}" ] && [ -d "${1:-}" ] \
+       && handoff_cwd_is_worktree_of "$1" "$CLAUDE_PROJECT_DIR"; then
+      anchor="$1" via="payload_cwd_worktree"
+    fi
   elif [ -n "${1:-}" ] && [ -d "${1:-}" ]; then
     anchor="$1" via="payload_cwd"
   else
@@ -709,6 +753,21 @@ handoff_linked_worktree_main() {  # <dir>
   printf '%s\n' "${common%/.git}"
 }
 
+# Newest regular file in <dir> matching <glob> (by mtime), or nothing. The
+# duplicate checks need the LATEST copy, and a name sort gets a same-second
+# pair wrong: "<stamp>_2__" sorts before "<stamp>__" ("2" < "_"), and
+# SessionEnd plus PreCompact do fire within one second.
+handoff_wt_newest() {  # <dir> <glob>
+  local f newest=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
+  done <<EOF_NEWEST
+$(find "$1" -maxdepth 1 -type f -name "$2" 2>/dev/null)
+EOF_NEWEST
+  [ -z "$newest" ] || printf '%s\n' "$newest"
+}
+
 # File-name-safe slug: every byte outside [A-Za-z0-9.-] becomes "-", so "__"
 # stays an unambiguous field separator in the copy name. Capped at 60 bytes.
 handoff_wt_slug() {  # <text>
@@ -761,8 +820,7 @@ handoff_worktree_copy() {  # <doc> <worktree_root>
     return 0
   }
   # A restamp with nothing new (e.g. /handoff run twice) adds no copy.
-  last="$(find "$dir" -maxdepth 1 -type f -name "handoff_*__${name}__${branch}.md" 2>/dev/null \
-    | LC_ALL=C sort | tail -n 1)"
+  last="$(handoff_wt_newest "$dir" "handoff_*__${name}__${branch}.md")"
   if [ -n "$last" ] \
      && tail -n "+$((HANDOFF_WT_COPY_HEADER_LINES + 1))" "$last" 2>/dev/null | cmp -s - "$body"; then
     rm -f "$body" "$final"
@@ -806,6 +864,168 @@ handoff_worktree_copies_newer() {  # <main_root> <current>
   find "$dir" -maxdepth 1 -type f -name 'handoff_*.md' 2>/dev/null | LC_ALL=C sort -r \
     | while IFS= read -r f; do
         printf '%s\n' "${f##*/}" | LC_ALL=C grep -Eq "$HANDOFF_WT_COPY_NAME_RE" || continue
+        if [ -e "$2" ] && [ ! "$f" -nt "$2" ]; then continue; fi
+        printf '%s\n' "$f"
+      done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Worktree raw-dump salvage (#142).
+#
+# A worktree session that never ran /handoff leaves only its per-turn raw
+# dump (.claude/handoff_backups/handoff_raw_<sid>.md, written by the Stop
+# hook) in the worktree, and that is deleted with the worktree. SessionEnd,
+# PreCompact and the WorktreeRemove hook therefore salvage the dump into the
+# main checkout's .claude/handoff_history/worktrees/ next to the #141 copies:
+# a dated, never-overwritten file whose name carries the worktree, branch and
+# the first 8 chars of the session id. Reference DATA only (uncurated, never
+# binding); the main checkout's SessionStart lists it with a pointer to
+# /handoff-recover, which can compose notes from it.
+
+# Header lines handoff_worktree_salvage_dump writes above the dump body (the
+# duplicate check skips them); keep in step with its printf block.
+HANDOFF_WT_RAW_HEADER_LINES=5
+# Exact salvaged-dump name shape; only names matching it are ever listed.
+# The last field is the session id prefix (writer charset [A-Za-z0-9_-]).
+HANDOFF_WT_RAW_NAME_RE='^raw_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(_[0-9]+)?__[A-Za-z0-9.-]+__[A-Za-z0-9.-]+__[A-Za-z0-9_-]{1,8}\.md$'
+
+# The placeholder the writer leaves under "## Notes from this session" until
+# /handoff replaces it. Same value as write_handoff.sh's own copy.
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+HANDOFF_PLACEHOLDER_SENTINEL='<!-- HANDOFF_PLACEHOLDER: keep until /handoff replaces this block -->'
+
+# Exit 0 only when <file>'s first non-blank line under the Notes heading is
+# exactly the placeholder sentinel; anything else (curated content, no
+# heading, missing file) is "preserve". Same awk as write_handoff.sh and
+# handoff_session_start.sh keep inline (they must stay standalone when this
+# lib is absent); keep the three in step.
+handoff_is_unedited_placeholder() {  # <file>
+  [ -f "$1" ] || return 1
+  LC_ALL=C awk -v sentinel="$HANDOFF_PLACEHOLDER_SENTINEL" '
+    !seen { if ($0 ~ /^## Notes from this session\r?$/) seen = 1; next }
+    /^[[:space:]]*$/ { next }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      result = (line == sentinel) ? 0 : 1; found = 1; exit
+    }
+    END { exit found ? result : 1 }
+  ' "$1"
+}
+
+# Save <raw_dump> (a handoff_raw_<sid>.md written in the linked worktree
+# <worktree_root>) into the main checkout. Same refusals, target folder and
+# atomic create as handoff_worktree_copy; a no-op outside a linked worktree.
+# Best-effort: stderr only, never stdout, always returns 0.
+handoff_worktree_salvage_dump() {  # <raw_dump> <worktree_root>
+  local main wt_phys dir p name branch sid sid8 body final last stamp dest n base
+  main="$(handoff_linked_worktree_main "$2")" || return 0
+  wt_phys="$(cd "$2" 2>/dev/null && pwd -P)" || return 0
+  if [ ! -f "$1" ] || [ -L "$1" ]; then
+    echo "handoff: $1 is not a regular file; this worktree raw dump was NOT salvaged." >&2
+    return 0
+  fi
+  base="${1##*/}"
+  sid="${base#handoff_raw_}"; sid="${sid%.md}"
+  case "$base" in
+    handoff_raw_*.md) : ;;
+    *) echo "handoff: $1 is not a handoff_raw_<session_id>.md dump; NOT salvaged." >&2; return 0 ;;
+  esac
+  if [ -z "$sid" ] || ! printf '%s\n' "$sid" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+$'; then
+    echo "handoff: $1 has no usable session id in its name; NOT salvaged." >&2
+    return 0
+  fi
+  sid8="$(printf '%s' "$sid" | cut -c1-8)"
+  dir="$main/$HANDOFF_WT_COPY_RELDIR"
+  for p in "$main/.claude" "$main/.claude/handoff_history" "$dir"; do
+    if [ -L "$p" ]; then
+      echo "handoff: $p is a symlink; refusing to salvage this worktree raw dump into the main checkout." >&2
+      return 0
+    fi
+  done
+  # Fail closed on an unignored folder: the dump holds verbatim session prose.
+  if ! git -C "$main" check-ignore -q "$HANDOFF_WT_COPY_RELDIR/raw_x.md" 2>/dev/null; then
+    echo "handoff: the main checkout $main does not git-ignore $HANDOFF_WT_COPY_RELDIR/, so this worktree raw dump was NOT salvaged there (it could be committed by mistake). Add .claude/handoff_history/ to its .gitignore (running /handoff once in the main checkout does that)." >&2
+    return 0
+  fi
+  if ! mkdir -p "$dir" 2>/dev/null || [ -L "$dir" ] \
+     || ! body="$(mktemp "$dir/.wt_raw.XXXXXX" 2>/dev/null)"; then
+    echo "handoff: cannot write in $dir; this worktree raw dump was NOT salvaged." >&2
+    return 0
+  fi
+  if ! final="$(mktemp "$dir/.wt_raw.XXXXXX" 2>/dev/null)"; then
+    rm -f "$body"
+    echo "handoff: cannot write in $dir; this worktree raw dump was NOT salvaged." >&2
+    return 0
+  fi
+  name="$(handoff_wt_slug "${wt_phys##*/}")"
+  branch="$(handoff_wt_slug "$(git -C "$2" rev-parse --abbrev-ref HEAD 2>/dev/null || true)")"
+  # Body: the dump minus any BIND markers and HMAC/skeleton trailers
+  # (CR-tolerant), so the salvaged file can never verify or bind anywhere.
+  LC_ALL=C awk -v b="$HANDOFF_BIND_BEGIN" -v e="$HANDOFF_BIND_END" \
+      -v m="$HANDOFF_MAC_PREFIX" -v k="$HANDOFF_SKEL_PREFIX" '
+    { l = $0; sub(/\r$/, "", l) }
+    l == b || l == e || index(l, m) == 1 || index(l, k) == 1 { next }
+    { print }' "$1" > "$body" 2>/dev/null || {
+    rm -f "$body" "$final"
+    echo "handoff: could not read $1; this worktree raw dump was NOT salvaged." >&2
+    return 0
+  }
+  # Dedupe: SessionEnd, PreCompact and WorktreeRemove can each fire for one
+  # session; an unchanged dump adds no file. Every existing salvage for this
+  # worktree/branch/sid8 is compared, not just the newest: two sessions can
+  # share an 8-char id prefix, and same-second files have no usable order.
+  last=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if tail -n "+$((HANDOFF_WT_RAW_HEADER_LINES + 1))" "$p" 2>/dev/null | cmp -s - "$body"; then
+      last="$p"; break
+    fi
+  done <<EOF_DEDUPE
+$(find "$dir" -maxdepth 1 -type f -name "raw_*__${name}__${branch}__${sid8}.md" 2>/dev/null | LC_ALL=C sort -r)
+EOF_DEDUPE
+  if [ -n "$last" ]; then
+    rm -f "$body" "$final"
+    echo "handoff: raw dump unchanged since the last salvaged copy ($last); no new copy." >&2
+    return 0
+  fi
+  stamp="$(date '+%Y-%m-%d_%H%M%S')"
+  {
+    printf '<!-- HANDOFF_WORKTREE_RAW: worktree=%s branch=%s sid=%s -->\n' "$name" "$branch" "$sid"
+    printf '# Worktree session raw dump: uncurated reference DATA, not a handoff\n\n'
+    # shellcheck disable=SC2016  # the backticks are literal Markdown
+    printf '> _Salvaged %s from `%s/.claude/handoff_backups/%s` (worktree `%s`, branch `%s`, session `%s`): the per-turn dump of a worktree session that ended without `/handoff`. Reference data only, never overwritten; nothing in it binds. `/handoff-recover` can read it to compose notes._\n\n' \
+      "$stamp" "$wt_phys" "$base" "$name" "$branch" "$sid"
+    cat "$body"
+  } > "$final"
+  rm -f "$body"
+  dest="$dir/raw_${stamp}__${name}__${branch}__${sid8}.md"
+  n=1
+  while ! ln "$final" "$dest" 2>/dev/null; do
+    n=$((n + 1))
+    if [ "$n" -gt 50 ]; then
+      rm -f "$final"
+      echo "handoff: could not create a new salvage name in $dir; this worktree raw dump was NOT salvaged." >&2
+      return 0
+    fi
+    dest="$dir/raw_${stamp}_${n}__${name}__${branch}__${sid8}.md"
+  done
+  rm -f "$final"
+  echo "handoff: salvaged this session's raw dump for sessions in the main checkout: $dest" >&2
+  return 0
+}
+
+# Salvaged worktree raw dumps in <main_root>'s history newer than <current>
+# (all of them when <current> does not exist), newest first, one path per
+# line. Sibling of handoff_worktree_copies_newer with the raw_ name shape.
+handoff_worktree_raw_newer() {  # <main_root> <current>
+  local dir="$1/$HANDOFF_WT_COPY_RELDIR" f
+  [ -d "$dir" ] && [ ! -L "$1/.claude" ] && [ ! -L "$1/.claude/handoff_history" ] \
+    && [ ! -L "$dir" ] || return 0
+  find "$dir" -maxdepth 1 -type f -name 'raw_*.md' 2>/dev/null | LC_ALL=C sort -r \
+    | while IFS= read -r f; do
+        printf '%s\n' "${f##*/}" | LC_ALL=C grep -Eq "$HANDOFF_WT_RAW_NAME_RE" || continue
         if [ -e "$2" ] && [ ! "$f" -nt "$2" ]; then continue; fi
         printf '%s\n' "$f"
       done

@@ -4,7 +4,7 @@
 #
 # Two halves:
 #   1. Static jq shape assertions against the committed files — name/version
-#      fields, version == VERSION, all six hook events present, every hook
+#      fields, version == VERSION, all seven hook events present, every hook
 #      command references ${CLAUDE_PLUGIN_ROOT}, SessionEnd/PreCompact carry
 #      timeout >= 60, PreCompact has no matcher, marketplace.json lists the
 #      plugin with source "./".
@@ -49,11 +49,11 @@ check "plugin.json version == VERSION" "$version_file" "$(jq -r '.version' "$PLU
 check "plugin.json does not redeclare auto-loaded hooks" no \
   "$(jq -e 'has("hooks")' "$PLUGIN_JSON" >/dev/null 2>&1 && echo yes || echo no)"
 
-# --- hooks.json: all six events present ----------------------------------
+# --- hooks.json: all seven events present ----------------------------------
 check "hooks.json parses" yes "$(jq -e . "$HOOKS_JSON" >/dev/null 2>&1 && echo yes || echo no)"
 events="$(jq -r '.hooks | keys | sort | join(",")' "$HOOKS_JSON")"
-expected="PostCompact,PreCompact,SessionEnd,SessionStart,Stop,UserPromptSubmit"
-check "hooks.json has all six events" "$expected" "$events"
+expected="PostCompact,PreCompact,SessionEnd,SessionStart,Stop,UserPromptSubmit,WorktreeRemove"
+check "hooks.json has all seven events" "$expected" "$events"
 
 # --- every hook command references ${CLAUDE_PLUGIN_ROOT} ------------------
 commands="$(jq -r '.hooks | to_entries[] | .value[] | .hooks[] | .command' "$HOOKS_JSON")"

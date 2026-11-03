@@ -61,6 +61,16 @@
           }
         ]
       }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/handoff_worktree_remove.sh\" 2>/dev/null || true"
+          }
+        ]
+      }
     ]
   }
 }
