@@ -171,6 +171,24 @@ refuse_symlink "$repo_root/.claude" ".claude dir" || exit 0
 refuse_symlink "$backup_dir"        "backup dir"  || exit 0
 mkdir -p "$backup_dir"
 
+# Lock ownership tie-break, shared idiom with write_handoff.sh's
+# claim_mkdir_lock / release_mkdir_lock (keep the two in sync). A successful
+# mkdir no longer proves exclusive creation: uutils coreutils mkdir (Ubuntu
+# 25.10+/26.04, GitHub's ubuntu-latest) can report success to both of two
+# racing callers for the same directory (#153). The owner is whoever creates
+# the token inside the dir first, via bash's own noclobber O_EXCL open, which
+# no coreutils implementation is involved in. A loser leaves the dir alone
+# and reads as a miss. Release removes the token first: a bare rmdir would
+# fail on the non-empty dir and leak the lock.
+ta_claim_lock() {  # <lock_dir>; 0 = this process owns it
+  ( set -o noclobber; printf '%s\n' "$$" > "$1/owner" ) 2>/dev/null
+}
+ta_release_lock() {  # <lock_dir>
+  [[ -L "$1" ]] && return 0
+  rm -f "$1/owner" 2>/dev/null || true
+  rmdir "$1" 2>/dev/null || true
+}
+
 # Ensure the backup dir is git-ignored BEFORE we write any dump into it. The
 # dumps can carry secrets, and this Stop hook fires on the first prompt — long
 # before write_handoff.sh (SessionEnd) bootstraps the .gitignore — so without
@@ -194,7 +212,9 @@ if (( in_git )) \
   # a lock older than the same generous window the session lock uses.
   gi_lock="$repo_root/.claude/.handoff_gitignore.lock"
   gi_held=0
-  if mkdir "$gi_lock" 2>/dev/null; then
+  # mkdir ok but claim lost = a racing peer owns the fresh dir; the else
+  # branch then sees a fresh mtime, so the staleness reclaim stays off.
+  if mkdir "$gi_lock" 2>/dev/null && ta_claim_lock "$gi_lock"; then
     gi_held=1
   else
     gi_stale="${HANDOFF_LOCK_STALE_SECS:-300}"
@@ -209,8 +229,10 @@ if (( in_git )) \
     gi_now="$(date +%s)"
     if [[ "$gi_mtime" =~ ^[0-9]+$ ]] \
        && (( gi_now - gi_mtime >= gi_stale )) \
-       && rmdir "$gi_lock" 2>/dev/null \
-       && mkdir "$gi_lock" 2>/dev/null; then
+       && [[ ! -L "$gi_lock" ]] \
+       && { rm -f "$gi_lock/owner" 2>/dev/null || true; rmdir "$gi_lock" 2>/dev/null; } \
+       && mkdir "$gi_lock" 2>/dev/null \
+       && ta_claim_lock "$gi_lock"; then
       gi_held=1
     fi
   fi
@@ -254,7 +276,7 @@ if (( in_git )) \
   # session mkdir-lock branch below installs its own trap, which would
   # replace any set here). No exit path exists between acquire and here.
   if (( gi_held )); then
-    rmdir "$gi_lock" 2>/dev/null || true
+    ta_release_lock "$gi_lock"
   fi
 fi
 
@@ -279,7 +301,8 @@ refuse_symlink "$lock_file" "lock file" || exit 0
 #     this session at a time. If another instance is already running,
 #     we exit cleanly — it will pick up our turn.
 #     flock (util-linux) ships on Linux and Git Bash but not macOS; there we
-#     fall back to an atomic mkdir lock released by an EXIT trap.
+#     fall back to a mkdir lock (ownership settled by ta_claim_lock, see
+#     above) released by an EXIT trap.
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$lock_file"
   if ! flock -n 9; then
@@ -299,7 +322,7 @@ else
     echo "handoff_turn_append.sh: $lock_mkdir is a symlink; refusing to use it as a lock (it would wedge this session's dumps permanently). Remove it to restore the raw dump." >&2
     exit 0
   fi
-  if ! mkdir "$lock_mkdir" 2>/dev/null; then
+  if ! { mkdir "$lock_mkdir" 2>/dev/null && ta_claim_lock "$lock_mkdir"; }; then
     # The mkdir lock is released by the EXIT trap below, but a hard kill
     # (SIGKILL, OOM, power loss) skips traps and leaves the dir behind —
     # which would freeze appends for this session forever. If the existing
@@ -325,8 +348,9 @@ else
     now="$(date +%s)"
     if [[ "$lock_mtime" =~ ^[0-9]+$ ]] \
        && (( now - lock_mtime >= stale_secs )) \
-       && rmdir "$lock_mkdir" 2>/dev/null \
-       && mkdir "$lock_mkdir" 2>/dev/null; then
+       && { rm -f "$lock_mkdir/owner" 2>/dev/null || true; rmdir "$lock_mkdir" 2>/dev/null; } \
+       && mkdir "$lock_mkdir" 2>/dev/null \
+       && ta_claim_lock "$lock_mkdir"; then
       :   # reclaimed a stale lock; proceed under the trap below
     else
       exit 0
@@ -355,7 +379,7 @@ tmp_cursor=""; tmp_ctx=""; tmp_tokens=""; tmp_model=""
 # fail in CI (it did).
 # shellcheck disable=SC2329,SC2317  # invoked indirectly by the EXIT trap below
 ta_cleanup() {
-  if (( ${lock_mkdir_held:-0} )); then rmdir "$lock_mkdir" 2>/dev/null || true; fi
+  if (( ${lock_mkdir_held:-0} )); then ta_release_lock "$lock_mkdir"; fi
   rm -f "${tmp_cursor:-}" "${tmp_ctx:-}" "${tmp_tokens:-}" "${tmp_model:-}" 2>/dev/null || true
   return 0
 }
