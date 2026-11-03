@@ -78,7 +78,7 @@ check "leftover lock: nothing rotated into history" 0 \
   "$(find "$repo/.claude/handoff_history" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
 check "leftover lock: the miss is visible on stderr" yes "$(has "$err" "may be stale")"
 check "leftover lock: not reported as a write" "" "$out"
-check "leftover lock: message points at the remedy" yes "$(has "$err" "rmdir")"
+check "leftover lock: message points at the remedy" yes "$(has "$err" "rm -rf")"
 rm -rf "$repo"
 
 # --- Held write lock: explicit run waits, warns, and still writes -----------
@@ -283,7 +283,7 @@ printf '%s' "$out" | grep -q 'write lock is left over' \
   && printf '%s' "$out" | grep -q 'handoff_write.lock' && named=yes
 check "leftover lock reported at SessionStart" yes "$named"
 check "and says how to clear it"               yes \
-  "$(printf '%s' "$out" | grep -q 'rmdir' && echo yes || echo no)"
+  "$(printf '%s' "$out" | grep -q 'rm -rf' && echo yes || echo no)"
 check "SessionStart still exits 0"             0   "$rc"
 # No lock, no noise — this must not fire on a normal project.
 must rmdir "$lk/.claude/.handoff_write.lock"

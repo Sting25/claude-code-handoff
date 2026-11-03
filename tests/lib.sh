@@ -85,6 +85,15 @@ export HANDOFF_SECRET_FILE
 # id set it explicitly with `env CLAUDE_CODE_SESSION_ID=...`.
 unset CLAUDE_CODE_SESSION_ID
 
+# Same jail for the desktop-app markers (issue #144): a suite run from a shell
+# inside the Claude desktop app inherits CLAUDE_CODE_ENTRYPOINT=claude-desktop
+# and CLAUDE_CODE_DESKTOP_APP_VERSION, and handoff_ctx_check.sh keys its
+# desktop mode (token count only, no inferred percentage) on the former. Left
+# in place, every percentage assertion in test_ctx_check*.sh would fail there
+# and pass in a terminal. Tests that want desktop mode set the variable
+# explicitly per case with `env CLAUDE_CODE_ENTRYPOINT=claude-desktop`.
+unset CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_DESKTOP_APP_VERSION
+
 _pass=0
 _fail=0
 
