@@ -180,7 +180,7 @@ check "fallback picks the _2 (newer) archive under UTF-8 locale" yes "$(has "$ou
 check "older base archive not chosen"                            no  "$(has "$out" "OLDER_SNAPSHOT_MARK")"
 rm -rf "$d"
 
-echo "root resolution — desktop worktree session follows the payload cwd (#142)"
+echo "root resolution: desktop worktree session follows the payload cwd (#142)"
 
 # The Claude Code desktop app runs a worktree session with CLAUDE_PROJECT_DIR =
 # the MAIN checkout and the payload cwd = the linked worktree (process cwd =

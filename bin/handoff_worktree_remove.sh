@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# handoff_worktree_remove.sh — WorktreeRemove hook (#142).
+# handoff_worktree_remove.sh: WorktreeRemove hook (#142).
 #
 # Claude Code fires WorktreeRemove (plugin hooks since 2.1.300, only for the
 # worktrees Claude Code itself created, which covers desktop worktree
