@@ -550,18 +550,46 @@ if [[ -L "$history_dir" ]]; then
 fi
 
 # ----- mkdir-based mutual-exclusion locks ------------------------------------
-# Shared idiom with handoff_turn_append.sh's flock-less fallback (keep the two
-# in sync): mkdir(2) is the one atomic test-and-create primitive available
-# everywhere this script runs (flock ships on Linux and Git Bash but not
-# macOS), so a lock is "held" while the lock DIRECTORY exists. A hard kill
-# (SIGKILL, OOM, power loss) skips EXIT traps and would leave the dir behind
-# forever, so acquisition includes the same mtime-based staleness reclaim as
-# the turn-append hook: a lock older than HANDOFF_LOCK_STALE_SECS (default
-# 300s — comfortably above Claude Code's 60s hook timeout, so a slow-but-alive
-# holder can't have its lock stolen) is presumed orphaned and reclaimed.
-# Returns 0 with the lock held, 1 otherwise; each call site documents how it
-# degrades on a miss. The lock paths live under .claude/, whose non-symlink
-# status is enforced above.
+# Shared idiom with handoff_turn_append.sh (keep the two in sync): a lock is
+# "held" while the lock DIRECTORY exists. mkdir was chosen as the
+# test-and-create primitive because it is available everywhere this script
+# runs (flock ships on Linux and Git Bash but not macOS) and because GNU and
+# BSD mkdir let exactly one of two racing callers succeed. That second
+# property no longer holds everywhere: uutils coreutils mkdir (the default
+# coreutils on Ubuntu 25.10+/26.04, and on GitHub's ubuntu-latest runner) can
+# report success to BOTH racing callers for the same directory (measured
+# 2026-11-02 for #153: 151 of 1000 concurrent pairs both got exit 0, same
+# inode). So a successful mkdir only proves the directory exists; OWNERSHIP
+# is settled by claim_mkdir_lock below, which does not depend on coreutils.
+# A hard kill (SIGKILL, OOM, power loss) skips EXIT traps and would leave the
+# dir behind forever, so acquisition includes the same mtime-based staleness
+# reclaim as the turn-append hook: a lock older than HANDOFF_LOCK_STALE_SECS
+# (default 300s, comfortably above Claude Code's 60s hook timeout, so a
+# slow-but-alive holder can't have its lock stolen) is presumed orphaned and
+# reclaimed. try_mkdir_lock returns 0 with the lock held, 1 otherwise; each
+# call site documents how it degrades on a miss. The lock paths live under
+# .claude/, whose non-symlink status is enforced above.
+
+# Ownership tie-break: the owner of a lock dir is whoever creates the token
+# file INSIDE it first. The create is bash's own noclobber redirection, an
+# O_CREAT|O_EXCL open performed by the shell itself, so it has exactly one
+# winner whatever coreutils is installed (measured 0 of 1000 double-successes
+# on bash 3.2). A loser must leave the directory alone, it is the winner's,
+# and report a miss. The token holds the owner's pid for diagnosis only;
+# nothing reads it back.
+claim_mkdir_lock() {  # <lock_dir>; 0 = this process owns the lock
+  ( set -o noclobber; printf '%s\n' "$$" > "$1/owner" ) 2>/dev/null
+}
+# Release = token first, then the directory. Every release site goes through
+# here: a bare rmdir fails on the non-empty dir and would leak the lock until
+# the staleness window reclaimed it, skipping every safety-net write in the
+# repo meanwhile. Never through a symlink (the lock dir is ours, but stay
+# consistent with the acquisition guard).
+release_mkdir_lock() {  # <lock_dir>
+  [[ -L "$1" ]] && return 0
+  rm -f "$1/owner" 2>/dev/null || true
+  rmdir "$1" 2>/dev/null || true
+}
 try_mkdir_lock() {  # <lock_dir>
   local lock_dir="$1" stale_secs lock_mtime now
   # A symlink planted at the lock path (a malicious repo could ship one) makes
@@ -572,8 +600,12 @@ try_mkdir_lock() {  # <lock_dir>
     echo "write_handoff.sh: $lock_dir is a symlink; refusing to use it as a lock." >&2
     return 1
   fi
-  mkdir "$lock_dir" 2>/dev/null && return 0
-  # Held (or leftover). Reclaim only when older than the staleness window.
+  if mkdir "$lock_dir" 2>/dev/null && claim_mkdir_lock "$lock_dir"; then
+    return 0
+  fi
+  # Held, or leftover, or mkdir reported success for a dir someone else owns
+  # (a racing peer's, which is fresh and stays theirs; or a dead holder's,
+  # which the staleness check below reclaims). Only age decides.
   # Age via GNU `stat -c` with a BSD `stat -f` fallback, like turn_append.
   stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
   # Numeric guard before the (( )) below: bash arithmetic recursively
@@ -587,9 +619,10 @@ try_mkdir_lock() {  # <lock_dir>
   now="$(date +%s)"
   if [[ "$lock_mtime" =~ ^[0-9]+$ ]] \
      && (( now - lock_mtime >= stale_secs )) \
-     && rmdir "$lock_dir" 2>/dev/null \
-     && mkdir "$lock_dir" 2>/dev/null; then
-    return 0   # reclaimed a stale lock
+     && { rm -f "$lock_dir/owner" 2>/dev/null || true; rmdir "$lock_dir" 2>/dev/null; } \
+     && mkdir "$lock_dir" 2>/dev/null \
+     && claim_mkdir_lock "$lock_dir"; then
+    return 0   # reclaimed a stale lock (the dead holder's token had to go first)
   fi
   return 1
 }
@@ -611,8 +644,8 @@ cleanup() {
   if [[ -n "${handoff_tmp:-}" ]]; then rm -f "$handoff_tmp" 2>/dev/null || true; fi
   if [[ -n "${restamp_tmp:-}" ]]; then rm -f "$restamp_tmp" 2>/dev/null || true; fi
   if [[ -n "${restamp_src:-}" ]]; then rm -f "$restamp_src" 2>/dev/null || true; fi
-  if (( ${write_lock_held:-0} )); then rmdir "$write_lock_dir" 2>/dev/null || true; fi
-  if (( ${gitignore_lock_held:-0} )); then rmdir "$gitignore_lock" 2>/dev/null || true; fi
+  if (( ${write_lock_held:-0} )); then release_mkdir_lock "$write_lock_dir"; fi
+  if (( ${gitignore_lock_held:-0} )); then release_mkdir_lock "$gitignore_lock"; fi
   return 0
 }
 trap cleanup EXIT
@@ -725,7 +758,7 @@ if (( RESTAMP )); then
   if [[ "$raw_bytes" != "$stripped_bytes" ]]; then
     echo "write_handoff.sh: --restamp: $handoff_relpath contains a NUL byte, which BSD/macOS awk silently truncates a line at — refusing to restamp. $handoff_relpath is unchanged and keeps its previous signature; its rules load as reference data, not binding. Remove the NUL byte (or any binary content) and re-run /handoff." >&2
     if (( write_lock_held )); then
-      rmdir "$write_lock_dir" 2>/dev/null || true
+      release_mkdir_lock "$write_lock_dir"
       write_lock_held=0
     fi
     exit 0
@@ -763,7 +796,7 @@ if (( RESTAMP )); then
     esac
     echo "write_handoff.sh: --restamp: $handoff_relpath $skel_reason; refusing to re-sign it as binding. It is unchanged and keeps its previous signature, so its rules load as reference data, not binding. Re-run /handoff to regenerate a fresh, structurally-stamped handoff." >&2
     if (( write_lock_held )); then
-      rmdir "$write_lock_dir" 2>/dev/null || true
+      release_mkdir_lock "$write_lock_dir"
       write_lock_held=0
     fi
     exit 0
@@ -807,7 +840,7 @@ if (( RESTAMP )); then
     echo "write_handoff.sh: --restamp: the bind-region guard did not return the document intact (${src_lines} lines in, ${out_lines} out); refusing to publish. $handoff_relpath is unchanged and keeps its previous signature — its rules load as reference data, not binding. Check that awk is on PATH, then re-run /handoff." >&2
     rm -f "$restamp_src"; restamp_src=""
     if (( write_lock_held )); then
-      rmdir "$write_lock_dir" 2>/dev/null || true
+      release_mkdir_lock "$write_lock_dir"
       write_lock_held=0
     fi
     exit 0
@@ -866,7 +899,7 @@ if (( RESTAMP )); then
   # Normal-path lock release, mirroring the main path's; the cleanup trap is
   # only the abort backstop.
   if (( write_lock_held )); then
-    rmdir "$write_lock_dir" 2>/dev/null || true
+    release_mkdir_lock "$write_lock_dir"
     write_lock_held=0
   fi
   # The path on stdout is this script's "the job was done" signal, and every
@@ -1233,7 +1266,7 @@ if [[ "${HANDOFF_NO_GITIGNORE_BOOTSTRAP:-0}" != "1" ]]; then
     fi
     # Release promptly (the doc build below is slow); the cleanup trap is
     # only the abort backstop.
-    rmdir "$gitignore_lock" 2>/dev/null || true
+    release_mkdir_lock "$gitignore_lock"
     gitignore_lock_held=0
   fi
 fi
@@ -1888,7 +1921,7 @@ elif (( IF_CURATED )); then
   # cleanup trap) — but SAY SO, and print nothing on stdout.
   #
   # The silent version of this skip could void the safety net outright. The
-  # lock is a bare directory with no owner recorded, so a writer that took a
+  # lock dir records only its owner's pid, which nothing reaps, so a writer that took a
   # SIGKILL, met the OOM killer, or lost the machine mid-sequence leaves one
   # behind with nothing to reap it; until it ages past
   # HANDOFF_LOCK_STALE_SECS (default 300s) EVERY SessionEnd and PreCompact
@@ -1904,7 +1937,7 @@ elif (( IF_CURATED )); then
   #
   # The remedy goes in the message because the operator is the only one who
   # can tell a wedged lock from a live writer.
-  echo "write_handoff.sh: write lock $write_lock_dir is held; SKIPPING this safety-net write (no rotation, no publish) — $handoff_relpath is unchanged and may be stale. A lock left by a killed writer clears itself after ${HANDOFF_LOCK_STALE_SECS:-300}s; if no other writer is running, remove it: rmdir '$write_lock_dir'" >&2
+  echo "write_handoff.sh: write lock $write_lock_dir is held; SKIPPING this safety-net write (no rotation, no publish): $handoff_relpath is unchanged and may be stale. A lock left by a killed writer clears itself after ${HANDOFF_LOCK_STALE_SECS:-300}s; if no other writer is running, remove it: rm -rf '$write_lock_dir'" >&2
   exit 0
 else
   # Explicit (/handoff or manual) run: the user asked for THIS write, so
@@ -1939,7 +1972,7 @@ mv -f "$handoff_tmp" "$handoff_path"
 
 # Normal-path lock release; the cleanup trap is only the abort backstop.
 if (( write_lock_held )); then
-  rmdir "$write_lock_dir" 2>/dev/null || true
+  release_mkdir_lock "$write_lock_dir"
   write_lock_held=0
 fi
 

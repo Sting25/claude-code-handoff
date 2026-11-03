@@ -984,7 +984,7 @@ handoff_newest_raw_dump() {  # <backup_dir> <exclude_session_id>
 # Advisory only — the next writer reclaims a stale lock on its own, and this
 # must never block loading.
 if [ -d "$repo/.claude/.handoff_write.lock" ]; then
-  echo "⚠️  handoff: a write lock is left over at .claude/.handoff_write.lock — a previous writer was killed before it could release it. Until it ages out (HANDOFF_LOCK_STALE_SECS, default 300s), SessionEnd/PreCompact safety-net writes in this repo are being SKIPPED, so the handoff can go stale without any sign. If no writer is running now: rmdir '$repo/.claude/.handoff_write.lock'"
+  echo "⚠️  handoff: a write lock is left over at .claude/.handoff_write.lock: a previous writer was killed before it could release it. Until it ages out (HANDOFF_LOCK_STALE_SECS, default 300s), SessionEnd/PreCompact safety-net writes in this repo are being SKIPPED, so the handoff can go stale without any sign. If no writer is running now: rm -rf '$repo/.claude/.handoff_write.lock'"
   echo
 fi
 
