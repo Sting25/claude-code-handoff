@@ -13,6 +13,10 @@
 #   2. If handoff_history/ has any entries, append a one-line pointer
 #      so the assistant knows older snapshots exist and can run
 #      /handoff-more to pull them in.
+#   3. In a LINKED git worktree that has no handoff of its own, load the
+#      main checkout's handoff_current.md as inherited context (#143):
+#      same tiers as a local load, nothing written anywhere, and never
+#      the /handoff-recover banner or the auto-rebuild for it.
 #
 # Env overrides (rare):
 #   HANDOFF_SS_DISABLE_FALLBACK=1  — never auto-include the previous
@@ -656,6 +660,49 @@ EOF_WT
   echo
 }
 
+# --- Inherited handoff from the main checkout (#143) --------------------------
+# A LINKED worktree starts with no handoff of its own, so its first session
+# used to see nothing of the main checkout's notes and rules. When this root
+# is a linked worktree (handoff_linked_worktree_main in
+# bin/handoff_provenance.sh: never the main checkout, a submodule, a bare
+# repo's worktree, or HANDOFF_ANCHOR=common, where the root already IS the
+# main checkout) and it has no handoff_current.md at all (absent: not a
+# refused symlink, not a present file, corrupted or not), load the main
+# checkout's doc instead, exactly as a local load would: it was written on
+# this machine, so its provenance verifies and its rules bind. Nothing is
+# written into either checkout on this path; this worktree's own sidecars
+# (origin marker, orphan sweep) ran above exactly as before. The main
+# checkout's .claude/ and doc get the same symlink refusal as this root's
+# own doc. A main doc that turns out to be corrupted is dropped again below,
+# before the missing/corrupted branch: nothing is ever rebuilt from the main
+# checkout's history or raw dumps for this worktree (a dump there can belong
+# to a live sibling session, #104), and the recover banner never fires for
+# an inherited doc, placeholder or not: there is nothing to recover HERE.
+# The second inherited shape, a COPY of the main checkout's doc sitting in
+# this worktree (Claude Code's .worktreeinclude copies git-ignored files at
+# worktree creation), is recognised further down by the doc's own
+# HANDOFF_ROOT record and gets the same banner/rebuild exemption.
+inherited=0        # loading the main checkout's doc, or a copy of it
+inherit_main=""    # main checkout root when this root is a linked worktree
+wt_current="$current"
+prov_root="$repo"
+fallback_history_dir="$history_dir"
+if [ "${in_git:-0}" = "1" ] && type handoff_linked_worktree_main >/dev/null 2>&1; then
+  inherit_main="$(handoff_linked_worktree_main "$repo" 2>/dev/null)" || inherit_main=""
+fi
+if [ -n "$inherit_main" ] && [ "$current_is_symlink" = "0" ] && [ ! -e "$current" ]; then
+  main_doc="$inherit_main/.claude/handoff_current.md"
+  if [ -L "$inherit_main/.claude" ] || [ -L "$main_doc" ]; then
+    echo "⚠️  handoff: the main checkout's $main_doc is a symlink (or sits under a symlinked .claude/); refusing to inherit it, for the same reason this worktree's own handoff would be refused."
+    echo
+  elif [ -f "$main_doc" ]; then
+    inherited=1
+    current="$main_doc"
+    prov_root="$inherit_main"
+    fallback_history_dir="$inherit_main/.claude/handoff_history"
+  fi
+fi
+
 # --- Tiered rules loading (issue #42) ----------------------------------------
 # The handoff carries two content kinds with opposite trust needs: narrative
 # (reference DATA — the framing above is correct for it) and an explicit rules
@@ -672,7 +719,9 @@ prov_ok=0
 # also gates here: even the HMAC computation would read through the link.)
 if type handoff_provenance_ok >/dev/null 2>&1 \
    && [ "$current_is_symlink" = "0" ] && [ -f "$current" ]; then
-  if handoff_provenance_ok "$current" "$repo" "$current_relpath" \
+  # prov_root: the checkout the doc belongs to (the main checkout for an
+  # inherited load, #143), so the untracked check asks the right index.
+  if handoff_provenance_ok "$current" "$prov_root" "$current_relpath" \
      && handoff_bind_has_content "$current"; then
     prov_ok=1
   fi
@@ -960,6 +1009,21 @@ current_corrupt_reason=""
 if [ "$current_is_symlink" = "0" ] && [ -f "$current" ]; then
   current_corrupt_reason="$(handoff_current_is_corrupted "$current" || true)"
 fi
+# An inherited main-checkout doc that is corrupted (#143): nothing usable to
+# inherit, and nothing to rebuild for THIS worktree from the main checkout's
+# artifacts. Back to this worktree's own, absent, doc: the fresh-worktree
+# behaviour below, with the corrupted main doc left for a main-checkout
+# session to deal with.
+if [ "$inherited" = "1" ] && [ -n "$current_corrupt_reason" ]; then
+  echo "ℹ️ handoff: the main checkout's handoff ($current) looks corrupted ($current_corrupt_reason); not inheriting it. A session in the main checkout will offer to rebuild it."
+  echo
+  inherited=0
+  current="$wt_current"
+  prov_root="$repo"
+  prov_ok=0
+  fallback_history_dir="$history_dir"
+  current_corrupt_reason=""
+fi
 
 if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ] || [ -n "$current_corrupt_reason" ]; then
   history_hit="$(find "$history_dir" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | head -n 1 || true)"
@@ -1094,7 +1158,11 @@ fi
 # above already exited otherwise), so it never fires on a project's first
 # session. Stays jq-free: session_id comes from the payload via the same sed
 # extraction as hook_source/hook_cwd above.
-if [ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]; then
+# Skipped on an inherited load (#143): this check is about THIS checkout's
+# previous session, and a worktree with no handoff of its own never reached
+# it before (the no-handoff exit above); the inherited doc changes nothing
+# about that.
+if [ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ] && [ "$inherited" = "0" ]; then
   hb="$repo/.claude/handoff_backups"
   if [ -d "$hb" ] && [ ! -L "$hb" ]; then
     # Recover a session id from one of this family's filenames: longest/most-
@@ -1218,12 +1286,41 @@ fi
 # docs have no such line — every extraction below tolerates absence and stays
 # silent. Both sides are compared in physical form (pwd -P) so a mere symlink
 # alias (/var vs /private/var on macOS) can't fake a mismatch.
+#
+# Worktrees (#143): an inherited load says so first, in one line. A doc that
+# sits in this worktree but records the MAIN checkout as its root is a copy
+# of the main checkout's doc (e.g. Claude Code's .worktreeinclude), not a
+# moved project: say that instead, and treat it as inherited (no recover
+# banner, the main checkout's history for the Notes fallback). A doc whose
+# recorded root is this worktree was written by a session here and behaves
+# exactly as before, banner included.
+if [ "$inherited" = "1" ]; then
+  echo "ℹ️ handoff: this worktree has no handoff yet; loading the main checkout's handoff as inherited context: $current"
+  echo
+fi
 recorded_root="$(LC_ALL=C sed -nE 's/^<!-- HANDOFF_ROOT: (.*) in_git=[01] -->[[:space:]]*$/\1/p' "$current" 2>/dev/null | head -n 1 || true)"
 recorded_in_git="$(LC_ALL=C sed -nE 's/^<!-- HANDOFF_ROOT: .* in_git=([01]) -->[[:space:]]*$/\1/p' "$current" 2>/dev/null | head -n 1 || true)"
 if [ -n "$recorded_root" ]; then
   recorded_phys="$(cd "$recorded_root" 2>/dev/null && pwd -P || printf '%s' "$recorded_root")"
   repo_phys="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
-  if [ "$recorded_phys" != "$repo_phys" ]; then
+  main_phys=""
+  if [ -n "$inherit_main" ]; then
+    main_phys="$(cd "$inherit_main" 2>/dev/null && pwd -P || printf '%s' "$inherit_main")"
+  fi
+  if [ "$inherited" = "1" ]; then
+    # The inherited doc is expected to record the main checkout; anything
+    # else means the MAIN checkout's doc was moved or copied in.
+    if [ "$recorded_phys" != "$main_phys" ]; then
+      echo "⚠️  handoff: this doc was written for '$recorded_root' but is loading at '$inherit_main' (the main checkout of this worktree): likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
+      echo
+    fi
+  elif [ -n "$main_phys" ] && [ "$recorded_phys" = "$main_phys" ] \
+       && [ "$recorded_phys" != "$repo_phys" ]; then
+    inherited=1
+    fallback_history_dir="$inherit_main/.claude/handoff_history"
+    echo "ℹ️ handoff: this handoff was inherited from the main checkout ($inherit_main); it was copied into this worktree"
+    echo
+  elif [ "$recorded_phys" != "$repo_phys" ]; then
     echo "⚠️  handoff: this doc was written for '$recorded_root' but is loading at '$repo' — likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
     echo
   fi
@@ -1364,20 +1461,31 @@ if [ "$is_placeholder" = "1" ] \
   # fallback needs curated content specifically, plus handoff_newest_history_
   # snapshot's comment for the shared LC_ALL=C / rotation-shape / symlink-
   # exclusion reasoning both selectors build on.
-  prev="$(handoff_newest_curated_history_snapshot "$history_dir")"
+  # fallback_history_dir is this checkout's own history, or the main
+  # checkout's for an inherited doc (#143): an inherited placeholder's
+  # curated predecessor lives there, never here.
+  prev="$(handoff_newest_curated_history_snapshot "$fallback_history_dir")"
   if [ -n "$prev" ] && [ -f "$prev" ]; then
     echo
     echo "---"
     echo
     echo "## Also loaded: previous handoff (current one had no curated Notes)"
     echo
-    echo "_From \`$(basename "$prev")\` — the most recent handoff with potentially curated prose._"
+    if [ "$inherited" = "1" ]; then
+      echo "_From \`$prev\` (the main checkout's history): the most recent handoff with potentially curated prose._"
+    else
+      echo "_From \`$(basename "$prev")\`: the most recent handoff with potentially curated prose._"
+    fi
     echo
     emit_untrusted "$prev" 4 strip_bind_markers
   fi
 fi
 
-if [ "$is_placeholder" = "1" ] \
+# Never for an inherited doc (#143): the placeholder came from the main
+# checkout (its session may still be live), so there is nothing to recover
+# in this worktree. A placeholder this worktree's own safety net writes
+# later records this worktree as its root and gets the banner as before.
+if [ "$is_placeholder" = "1" ] && [ "$inherited" = "0" ] \
    && [ "${HANDOFF_SS_DISABLE_RECOVER:-0}" != "1" ]; then
   echo
   echo "---"
