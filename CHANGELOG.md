@@ -12,7 +12,18 @@ are appended).
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+- `write_handoff.sh` no longer blocks forever on an open, silent stdin
+  (#158). The `/handoff` skill runs `--restamp` through the Claude Code
+  Bash tool, whose stdin is a unix socket that is not a tty and never
+  sends EOF; the unconditional `cat` behind the `-t 0` guard waited for
+  minutes until the process was killed by hand. The payload read is now
+  bounded: it waits `HANDOFF_STDIN_TIMEOUT` whole seconds (default 2,
+  minimum 1) for the first line and drains to EOF only once bytes or EOF
+  arrived. Hook payloads (SessionEnd / PreCompact JSON, with or without
+  a trailing newline, multi-line, or written a moment after spawn) are
+  still read in full; a timeout degrades to the always-write path. The
+  skill snippets now also pass `</dev/null`, which skips the wait.
 
 ## [0.19.0] - 2026-11-03
 

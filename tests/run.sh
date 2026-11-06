@@ -28,8 +28,13 @@ for t in "$dir"/test_*.sh; do
   [[ -e "$t" ]] || continue
   echo "== $(basename "$t") =="
   # tee so output still streams live while we inspect it for SKIP lines;
-  # PIPESTATUS[0] is the test's own status, not tee's.
-  bash "$t" 2>&1 | tee "$out"
+  # PIPESTATUS[0] is the test's own status, not tee's. Each test gets
+  # /dev/null as stdin: several subjects read an optional hook payload from
+  # stdin, and a test that forgets to redirect would otherwise inherit the
+  # runner's stdin, which under the Claude Code Bash tool is an open socket
+  # that may never send EOF (issue #158; a full run hung in
+  # test_git_optional.sh on handoff_session_start.sh that way).
+  bash "$t" </dev/null 2>&1 | tee "$out"
   if [[ "${PIPESTATUS[0]}" -ne 0 ]]; then
     failed=$((failed + 1))
   fi

@@ -393,6 +393,13 @@ export HANDOFF_CTX_NO_STATUSLINE=1
 # Curated /handoff and manual runs never consult this list.
 export HANDOFF_SESSIONEND_SKIP_REASONS=resume
 
+# Whole seconds write_handoff.sh waits for the first line of that stdin
+# payload before giving up (default 2, minimum 1). Hooks deliver the JSON
+# at spawn, so the wait never triggers for them; it exists so an open stdin
+# that never sends EOF (the Claude Code Bash tool's socket, issue #158)
+# cannot hang the script. A timeout degrades to the always-write path.
+export HANDOFF_STDIN_TIMEOUT=2
+
 # --- Trusted-rules tier (issue #42) ---
 
 # Path of the per-machine HMAC secret used to sign handoffs so the next
