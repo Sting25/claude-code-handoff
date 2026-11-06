@@ -81,7 +81,7 @@ fifo_dir="$(mktemp -d)"; cleanup_on_exit "$fifo_dir"
 must mkfifo "$fifo_dir/open_stdin"
 exec 3<>"$fifo_dir/open_stdin"
 
-echo "write_handoff.sh — bounded stdin read (issue #158)"
+echo "write_handoff.sh: bounded stdin read (issue #158)"
 
 # --- 1. plain write with an open, silent stdin returns and writes -----------
 repo="$(mk_repo)"
