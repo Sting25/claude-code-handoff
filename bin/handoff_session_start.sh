@@ -38,9 +38,31 @@ set -euo pipefail
 # block. No jq: this script stays dependency-light by contract, and the field
 # is a fixed lowercase enum, so a sed extraction is exact enough. Read before
 # root resolution below because the payload's "cwd" feeds the resolver.
+# --- Bounded stdin read (issue #160). Canonical copy: read_hook_payload() in
+# bin/write_handoff.sh (rationale there); tests/test_stdin_readers_bounded.sh
+# diffs this copy against it. Duplicated, not sourced, because the plugin
+# (${CLAUDE_PLUGIN_ROOT}/bin) and install.sh ($HOME/.claude/bin) layouts differ
+# and this hook must stay dependency-light. Waits HANDOFF_STDIN_TIMEOUT whole
+# seconds (default 2, min 1) for a first line, then drains to EOF; a closed
+# pipe returns EOF at once.
+read_hook_payload() {
+  local first="" timeout="${HANDOFF_STDIN_TIMEOUT:-2}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=2
+  (( timeout < 1 )) && timeout=1
+  if IFS= read -r -t "$timeout" first; then
+    # A newline-terminated first line arrived: the rest ends at EOF.
+    printf '%s\n%s' "$first" "$(cat 2>/dev/null || true)"
+  else
+    # EOF (possibly with an unterminated last line: a payload printed
+    # without a trailing newline) or timeout (first stays empty). bash 3.2
+    # returns 1 for both; bash 4+ returns >128 on timeout. Either way the
+    # partial content is the whole payload and nothing more is read.
+    printf '%s' "$first"
+  fi
+}
 payload=""
 if [ ! -t 0 ]; then
-  payload="$(cat 2>/dev/null || true)"
+  payload="$(read_hook_payload)"
 fi
 hook_source="$(printf '%s' "$payload" \
   | LC_ALL=C sed -nE 's/.*"source"[[:space:]]*:[[:space:]]*"([a-z]+)".*/\1/p' \
