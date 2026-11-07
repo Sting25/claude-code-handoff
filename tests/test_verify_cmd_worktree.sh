@@ -28,6 +28,13 @@ doc="$(cat "$wt/.claude/handoff_current.md" 2>/dev/null)"
 check "verify cmd names the worktree path"       yes "$(has "$doc" "git -C $wt status && git -C $wt log --oneline -5")"
 check "no main-checkout verify line"             no  "$(has "$doc" "git -C $main status")"
 
+echo "verify command: SessionEnd shape (CLAUDE_PROJECT_DIR=main, payload cwd=worktree)"
+rm -rf "$wt/.claude" "$main/.claude"
+printf '{"reason":"other","cwd":"%s"}' "$wt" | ( cd "$main" && CLAUDE_PROJECT_DIR="$main" HANDOFF_ANCHOR=common bash "$WH" >/dev/null 2>&1 )
+doc="$(cat "$main/.claude/handoff_current.md" 2>/dev/null)"
+first="$(grep -m1 'git -C .* status &&' <<<"$doc")"
+check "worktree line comes first"                yes "$(has "$first" "git -C $wt status && git -C $wt log")"
+
 git -C "$main" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
 rm -rf "$main"
 
