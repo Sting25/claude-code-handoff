@@ -188,6 +188,56 @@ ta_release_lock() {  # <lock_dir>
   rm -f "$1/owner" 2>/dev/null || true
   rmdir "$1" 2>/dev/null || true
 }
+# Stale reclaim, single winner (#155): the same body as write_handoff.sh's
+# reclaim_stale_mkdir_lock (keep the two in sync; the reasoning is written
+# out there). In short: the lock dir's age gates entry; the owner token is
+# captured by an atomic rename to a per-process name, put straight back if
+# the captured token is newer than the dir mtime the age check judged stale
+# (a peer reclaimed after our check), removed with rm -rf
+# otherwise; then the ordinary O_EXCL claim decides the single winner, and
+# the winner sweeps owner.reap.* orphans older than the window. The lock dir
+# is never removed or recreated here. 0 = reclaimed and held, 1 = a miss.
+ta_reclaim_stale_lock() {  # <lock_dir>
+  local lock_dir="$1" stale_secs lock_mtime now reap reap_mtime g g_mtime
+  [[ -L "$lock_dir" || ! -d "$lock_dir" ]] && return 1
+  stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
+  # Numeric guard before the (( )) below: bash arithmetic recursively
+  # expands its operand, so a non-numeric payload (e.g. an array subscript
+  # with command substitution) delivered via a clone's .claude/settings.json
+  # env would execute. Fall back to the default on anything non-numeric,
+  # matching every other arithmetic env var in this script.
+  [[ "$stale_secs" =~ ^[0-9]+$ ]] || stale_secs=300
+  # Age via GNU `stat -c` with a BSD `stat -f` fallback.
+  lock_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null \
+                || stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  [[ "$lock_mtime" =~ ^[0-9]+$ ]] || return 1
+  (( lock_mtime + stale_secs <= now )) || return 1
+  reap="$lock_dir/owner.reap.$$.$RANDOM$RANDOM"
+  # The target must not exist: mv into an existing directory (or through a
+  # symlink to one) would nest the token instead of renaming it.
+  if [[ ! -e "$reap" && ! -L "$reap" ]] \
+     && mv "$lock_dir/owner" "$reap" 2>/dev/null; then
+    reap_mtime="$(stat -c %Y "$reap" 2>/dev/null \
+                  || stat -f %m "$reap" 2>/dev/null || echo 0)"
+    if [[ -f "$reap" && ! -L "$reap" && "$reap_mtime" =~ ^[0-9]+$ ]] \
+       && (( reap_mtime > lock_mtime )); then
+      ( set -o noclobber; cat "$reap" > "$lock_dir/owner" ) 2>/dev/null </dev/null || true
+      rm -rf "$reap" 2>/dev/null || true
+      return 1
+    fi
+    rm -rf "$reap" 2>/dev/null || true
+  fi
+  ta_claim_lock "$lock_dir" || return 1
+  for g in "$lock_dir"/owner.reap.*; do
+    [[ -e "$g" || -L "$g" ]] || continue
+    g_mtime="$(stat -c %Y "$g" 2>/dev/null || stat -f %m "$g" 2>/dev/null || echo 0)"
+    if [[ "$g_mtime" =~ ^[0-9]+$ ]] && (( g_mtime + stale_secs <= now )); then
+      rm -rf "$g" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
 
 # Ensure the backup dir is git-ignored BEFORE we write any dump into it. The
 # dumps can carry secrets, and this Stop hook fires on the first prompt — long
@@ -204,9 +254,10 @@ if (( in_git )) \
   # shared mkdir lock around their check+append. On lock-miss skip silently:
   # the peer is bootstrapping right now, and if it somehow fails the next
   # fire retries. mkdir/rmdir never follow a symlink, so a planted link at
-  # the lock path can't be written through — it just reads as "held" (its
-  # rmdir fails) and the bootstrap is skipped, same degraded-but-safe outcome
-  # as the symlinked-.gitignore skip below. No staleness machinery is needed
+  # the lock path can't be written through: it just reads as "held" (the
+  # stale reclaim refuses a symlink) and the bootstrap is skipped, same
+  # degraded-but-safe outcome as the symlinked-.gitignore skip below. No
+  # staleness machinery is needed
   # for a micro-critical-section this small, but a holder that died mid-append
   # (hard kill skips cleanup) would wedge the bootstrap forever — so reclaim
   # a lock older than the same generous window the session lock uses.
@@ -216,25 +267,10 @@ if (( in_git )) \
   # branch then sees a fresh mtime, so the staleness reclaim stays off.
   if mkdir "$gi_lock" 2>/dev/null && ta_claim_lock "$gi_lock"; then
     gi_held=1
-  else
-    gi_stale="${HANDOFF_LOCK_STALE_SECS:-300}"
-    # Numeric guard BEFORE the value reaches (( )) below: bash arithmetic
-    # recursively expands its operand, so an array-subscript payload in this
-    # env var would execute command substitution. A clone-delivered
-    # .claude/settings.json can set env, so treat it as untrusted; fall back
-    # to the default on anything non-numeric (matches HISTORY_KEEP et al.).
-    [[ "$gi_stale" =~ ^[0-9]+$ ]] || gi_stale=300
-    gi_mtime="$(stat -c %Y "$gi_lock" 2>/dev/null \
-                || stat -f %m "$gi_lock" 2>/dev/null || echo 0)"
-    gi_now="$(date +%s)"
-    if [[ "$gi_mtime" =~ ^[0-9]+$ ]] \
-       && (( gi_now - gi_mtime >= gi_stale )) \
-       && [[ ! -L "$gi_lock" ]] \
-       && { rm -f "$gi_lock/owner" 2>/dev/null || true; rmdir "$gi_lock" 2>/dev/null; } \
-       && mkdir "$gi_lock" 2>/dev/null \
-       && ta_claim_lock "$gi_lock"; then
-      gi_held=1
-    fi
+  elif ta_reclaim_stale_lock "$gi_lock"; then
+    # Stale (older than HANDOFF_LOCK_STALE_SECS, numerically validated
+    # inside) and won single-winner (#155); a symlink there reads as held.
+    gi_held=1
   fi
   # Re-check under the lock: the peer may have completed the bootstrap between
   # our unlocked fast-path check above and our acquisition. Without this the
@@ -339,18 +375,9 @@ else
     # content and clobbered the cursor). Age via GNU `stat -c` with a BSD
     # `stat -f` fallback (this branch only runs where flock is absent —
     # typically macOS/BSD).
-    stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
-    # Numeric guard before (( )) — see the gitignore-lock site above; an
-    # array-subscript payload here would otherwise execute.
-    [[ "$stale_secs" =~ ^[0-9]+$ ]] || stale_secs=300
-    lock_mtime="$(stat -c %Y "$lock_mkdir" 2>/dev/null \
-                  || stat -f %m "$lock_mkdir" 2>/dev/null || echo 0)"
-    now="$(date +%s)"
-    if [[ "$lock_mtime" =~ ^[0-9]+$ ]] \
-       && (( now - lock_mtime >= stale_secs )) \
-       && { rm -f "$lock_mkdir/owner" 2>/dev/null || true; rmdir "$lock_mkdir" 2>/dev/null; } \
-       && mkdir "$lock_mkdir" 2>/dev/null \
-       && ta_claim_lock "$lock_mkdir"; then
+    # The age check, its numeric guard on HANDOFF_LOCK_STALE_SECS and the
+    # single-winner takeover (#155) all live in ta_reclaim_stale_lock.
+    if ta_reclaim_stale_lock "$lock_mkdir"; then
       :   # reclaimed a stale lock; proceed under the trap below
     else
       exit 0
