@@ -35,8 +35,9 @@ echo "handoff_ctx_check.sh — Stop-hook health detector A"
 fire_a() {  # <repo> <sid> [ENV=VAL ...]
   local repo="$1" sid="$2"; shift 2
   local tp="$repo/transcript_$sid.jsonl"
+  local n; n="$( (wc -l < "$tp") 2>/dev/null || echo 0)"; n="${n//[[:space:]]/}"
   printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' \
-    '{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}' >> "$tp"
+    "{\"type\":\"assistant\",\"message\":{\"id\":\"msg_${sid}_$n\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}" >> "$tp"
   fire_raw "$repo" "$sid" "$@"
 }
 # One prompt fire with NO new completed turn (transcript left as is).
@@ -69,7 +70,7 @@ check "prompt counter incremented"        yes "$(exists "$repo/.claude/handoff_b
 # At threshold (3rd fire), .ctx_<sid> absent -> warns.
 out3="$(fire_a "$repo" BELOW)"
 check "at threshold, .ctx_ absent -> warns"       yes "$(has "$out3" "does not appear to be running")"
-check "warning names likely causes (jq)"          yes "$(has "$out3" "jq not on PATH")"
+check "warning names likely causes (hooks)"       yes "$(has "$out3" "hooks not registered")"
 check "warning points to doctor"                  yes "$(has "$out3" "--doctor")"
 check "warn flag recorded"                        yes "$(exists "$repo/.claude/handoff_backups/.ctx_health_BELOW")"
 
@@ -139,8 +140,8 @@ repo="$(mk_repo)"; cleanup_on_exit "$repo"
 bd="$repo/.claude/handoff_backups"; must mkdir -p "$bd"
 must printf 'window=1000\ntokens=600\n' > "$bd/.ctx_sl_LEDGER"
 must printf '2\n' > "$bd/.ctx_prompts_LEDGER"
-for _ in 1 2; do   # two completed turns already in the transcript (issue #159)
-  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn","content":[]}}' >> "$repo/transcript_LEDGER.jsonl"
+for i in 1 2; do   # two completed turns already in the transcript (issue #159)
+  printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"id\":\"msg_seed_$i\",\"stop_reason\":\"end_turn\",\"content\":[]}}" >> "$repo/transcript_LEDGER.jsonl"
 done
 out="$(fire_a "$repo" LEDGER HANDOFF_CTX_WINDOW_TOKENS=1000)"
 check "coexistence: health warning present"   yes "$(has "$out" "does not appear to be running")"
@@ -150,7 +151,7 @@ nudge_pos=$(printf '%s' "$out" | grep -bo "<system-reminder>" | head -1 | cut -d
 check "coexistence: warning precedes the nudge" yes "$([[ "$health_pos" -lt "$nudge_pos" ]] && echo yes || echo no)"
 rm -rf "$repo"
 
-# Issue #159 (a): three prompts with no completed turn between them (API error,
+# Issue #159 (a): repeated prompts with no completed turn between them (API error,
 # interrupt, queued prompts) must NOT warn, even well past the threshold.
 repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
 out=""
@@ -166,8 +167,32 @@ out="$(fire_raw "$repo" NOTURNS)"
 check "#159a: sidechain/tool_use lines do not count"  no "$(has "$out" "does not appear to be running")"
 # Missing transcript_path: no warning.
 out=""
-for _ in 1 2 3 4; do out="$(cd "$repo" && bash "$CC" <<<'{"session_id":"NOPATH"}' 2>/dev/null)"; done
+for _ in 1 2 3 4; do out="$out$(cd "$repo" && bash "$CC" <<<'{"session_id":"NOPATH"}' 2>/dev/null)"; done
 check "#159a: no transcript_path -> silent"           no "$(has "$out" "does not appear to be running")"
+check "#159a: no transcript_path -> no health flag"   no "$(exists "$repo/.claude/handoff_backups/.ctx_health_NOPATH")"
+rm -rf "$repo"
+
+# Issue #159 D3: real-shaped thinking+text turns. Each turn is TWO assistant
+# lines sharing one message.id, both end_turn; a synthetic API-error line and
+# a tool_use line must not count either. 2 turns -> silent, 3rd turn -> warns.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+tp="$repo/transcript_DUPID.jsonl"
+dup_turn() {  # <message-id>
+  printf '%s\n' \
+    "{\"type\":\"assistant\",\"uuid\":\"u-$1-a\",\"message\":{\"id\":\"$1\",\"model\":\"claude-x\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"hm\"}]}}" \
+    "{\"type\":\"assistant\",\"uuid\":\"u-$1-b\",\"message\":{\"id\":\"$1\",\"model\":\"claude-x\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}" >> "$tp"
+}
+printf '%s\n' '{"type":"assistant","uuid":"u-syn","message":{"id":"msg_syn","model":"<synthetic>","stop_reason":"stop_sequence","content":[]}}' \
+  '{"type":"assistant","uuid":"u-syn2","message":{"id":"msg_syn2","model":"<synthetic>","stop_reason":"end_turn","content":[]}}' \
+  '{"type":"assistant","uuid":"u-tu","message":{"id":"msg_tu","model":"claude-x","stop_reason":"tool_use","content":[]}}' >> "$tp"
+fire_raw "$repo" DUPID >/dev/null; fire_raw "$repo" DUPID >/dev/null   # prompts 1-2, so the next fire is at the prompt threshold
+dup_turn msg_1; dup_turn msg_2
+out="$(fire_raw "$repo" DUPID)"
+check "#159 D3: 2 duplicate-id turns (4 end_turn lines) -> silent" no "$(has "$out" "does not appear to be running")"
+dup_turn msg_3
+out="$(fire_raw "$repo" DUPID)"
+check "#159 D3: 3rd distinct turn -> warns"                       yes "$(has "$out" "does not appear to be running")"
+check "#159 D3: warning counts 3 turns"                           yes "$(has "$out" "3 completed turns")"
 rm -rf "$repo"
 
 # Issue #159 (b): three completed turns, no dump marker -> warns once the third

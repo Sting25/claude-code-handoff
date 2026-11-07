@@ -412,15 +412,23 @@ if [[ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]]; then
        && [[ ! -f "$health_flag" ]] && [[ ! -L "$health_flag" ]]; then
       health_tp="$(jq -r '.transcript_path // empty' <<<"$payload" 2>/dev/null || true)"
       if [[ -n "$health_tp" && -f "$health_tp" && -r "$health_tp" ]]; then
+        # Measured stop_reason shapes in real transcripts: tool_use (turn
+        # continues), end_turn (turn complete), null (streaming snapshot), and
+        # stop_sequence on model "<synthetic>" (API-error placeholder; no
+        # Stop fires for it). A turn with thinking is written as TWO assistant
+        # lines sharing one message.id, both end_turn, so count DISTINCT ids
+        # (uuid as fallback), never lines.
         done_turns="$(grep -F '"end_turn"' "$health_tp" 2>/dev/null \
           | jq -R 'fromjson? | select(.type == "assistant" and .isSidechain != true
-                                      and .message.stop_reason == "end_turn") | 1' 2>/dev/null \
-          | wc -l | tr -d ' ')"
+                                      and .message.stop_reason == "end_turn"
+                                      and .message.model != "<synthetic>")
+                   | (.message.id // .uuid // empty)' 2>/dev/null \
+          | sort -u | grep -c . || true)"
         [[ "$done_turns" =~ ^[0-9]+$ ]] || done_turns=0
       fi
     fi
     if (( done_turns >= HEALTH_PROMPTS )); then
-      echo "⚠️  handoff: the Stop hook does not appear to be running this session: no per-turn backup has been recorded after ${done_turns} completed turns. /handoff will have no incremental dump to fall back on if invoked under context pressure. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
+      echo "⚠️  handoff: the Stop hook does not appear to be running this session: no per-turn backup has been recorded after ${done_turns} completed turns. /handoff will have no incremental dump to fall back on if invoked under context pressure. Likely causes, in order: hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
       if mkdir -p "$backup_dir" 2>/dev/null; then
         : > "$health_flag" 2>/dev/null || true
       fi
