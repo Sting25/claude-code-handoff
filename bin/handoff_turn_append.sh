@@ -186,15 +186,21 @@ ta_claim_lock() {  # <lock_dir>; 0 = this process owns it
 ta_release_lock() {  # <lock_dir>
   [[ -L "$1" ]] && return 0
   rm -f "$1/owner" 2>/dev/null || true
+  rmdir "$1" 2>/dev/null && return 0
+  # Still there: a stale reclaimer may hold a capture of our token
+  # (owner.reap.*, see the reclaim below). Remove captures and retry, so the
+  # lock is freed now and the reclaimer finds nothing to hand back.
+  rm -f "$1"/owner.reap.* 2>/dev/null || true
   rmdir "$1" 2>/dev/null || true
 }
 # Stale reclaim, single winner (#155): the same body as write_handoff.sh's
 # reclaim_stale_mkdir_lock (keep the two in sync; the reasoning is written
 # out there). In short: the lock dir's age gates entry; the owner token is
 # captured by an atomic rename to a per-process name, put straight back if
-# the captured token is newer than the dir mtime the age check judged stale
-# (a peer reclaimed after our check), removed with rm -rf
-# otherwise; then the ordinary O_EXCL claim decides the single winner, and
+# the captured token is more than 1 s newer than the dir mtime the age
+# check judged stale (a peer reclaimed after our check), removed with rm -rf
+# otherwise; a caller with nothing to capture goes on only if the dir mtime
+# is unchanged; then the ordinary O_EXCL claim decides the single winner, and
 # the winner sweeps owner.reap.* orphans older than the window. The lock dir
 # is never removed or recreated here. 0 = reclaimed and held, 1 = a miss.
 ta_reclaim_stale_lock() {  # <lock_dir>
@@ -221,12 +227,29 @@ ta_reclaim_stale_lock() {  # <lock_dir>
     reap_mtime="$(stat -c %Y "$reap" 2>/dev/null \
                   || stat -f %m "$reap" 2>/dev/null || echo 0)"
     if [[ -f "$reap" && ! -L "$reap" && "$reap_mtime" =~ ^[0-9]+$ ]] \
-       && (( reap_mtime > lock_mtime )); then
-      ( set -o noclobber; cat "$reap" > "$lock_dir/owner" ) 2>/dev/null </dev/null || true
-      rm -rf "$reap" 2>/dev/null || true
+       && (( reap_mtime > lock_mtime + 1 )); then
+      # A live holder's token: hand it back. ln (link(2)) is atomic, fails
+      # if an owner exists, and fails if the capture is gone, which is how
+      # a release by that holder in the meantime shows up (the release
+      # removes captures, see release_mkdir_lock); then there is nothing
+      # to hand back and the lock is already free.
+      if ! ln "$reap" "$lock_dir/owner" 2>/dev/null && [[ -e "$reap" ]]; then
+        echo "lock reclaim: could not hand a live holder's token back to $lock_dir (another process claimed it meanwhile)." >&2
+      fi
+      rm -f "$reap" 2>/dev/null || true
       return 1
     fi
     rm -rf "$reap" 2>/dev/null || true
+  else
+    # Nothing to capture: no token, or a peer captured it. Claim only if
+    # the dir is untouched since our age check. Any capture, claim or
+    # release changes its mtime, and a stale lock_mtime is at least the
+    # window in the past, so an equal reading means nobody acted in
+    # between (review of #155: without this, C claimed while B held a
+    # capture of A's fresh token, and A and C both owned the lock).
+    g_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null \
+               || stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
+    [[ "$g_mtime" == "$lock_mtime" ]] || return 1
   fi
   ta_claim_lock "$lock_dir" || return 1
   for g in "$lock_dir"/owner.reap.*; do

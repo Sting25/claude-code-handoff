@@ -20,6 +20,13 @@
 #      window #155 describes. B must miss and A's token must survive.
 #   3. A non-empty `owner/` directory is reclaimed (the wedge).
 #   4. Orphaned owner.reap.* entries older than the window are swept.
+#   5. Three reclaimers, deterministic: B captures the token A just won while
+#      C, holding the same stale view, finds nothing to capture. C must not
+#      go on to claim (that made A and C both owners in review).
+#   6. A releases while B holds a capture of A's token: the release must
+#      still remove the lock, and B must not leave A's token behind.
+#   7. A hand-back blocked by a token that appeared meanwhile is reported on
+#      stderr and never replaces that token.
 set -u
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 WH="$REPO_ROOT/bin/write_handoff.sh"
@@ -33,13 +40,13 @@ work="$(mktemp -d)"; cleanup_on_exit "$work"
 work="$(cd "$work" && pwd -P)"
 funcs="$work/funcs.sh"
 : > "$funcs"
-for fn in claim_mkdir_lock reclaim_stale_mkdir_lock try_mkdir_lock; do
+for fn in claim_mkdir_lock release_mkdir_lock reclaim_stale_mkdir_lock try_mkdir_lock; do
   sed -n "/^$fn() {/,/^}/p" "$WH" >> "$funcs"
 done
-for fn in ta_claim_lock ta_reclaim_stale_lock; do
+for fn in ta_claim_lock ta_release_lock ta_reclaim_stale_lock; do
   sed -n "/^$fn() {/,/^}/p" "$TA" >> "$funcs"
 done
-defined="$(bash -c 'source "$1"; for f in claim_mkdir_lock reclaim_stale_mkdir_lock try_mkdir_lock ta_claim_lock ta_reclaim_stale_lock; do declare -F "$f" >/dev/null || echo "$f"; done' _ "$funcs" </dev/null)"
+defined="$(bash -c 'source "$1"; for f in claim_mkdir_lock release_mkdir_lock reclaim_stale_mkdir_lock try_mkdir_lock ta_claim_lock ta_release_lock ta_reclaim_stale_lock; do declare -F "$f" >/dev/null || echo "$f"; done' _ "$funcs" </dev/null)"
 check "every reclaim function extracted from the scripts" "" "$defined"
 
 # One racer = one bash process (distinct $$, as two hook fires would be).
@@ -57,8 +64,10 @@ if [[ -n "$go" ]]; then
   done
 fi
 case "$site" in
-  wh) try_mkdir_lock "$lock" 2>/dev/null; rc=$? ;;
+  wh) try_mkdir_lock "$lock"; rc=$? ;;
   ta) { mkdir "$lock" 2>/dev/null && ta_claim_lock "$lock"; } || ta_reclaim_stale_lock "$lock"; rc=$? ;;
+  wh-release) release_mkdir_lock "$lock"; rc=$? ;;
+  ta-release) ta_release_lock "$lock"; rc=$? ;;
   *)  rc=99 ;;
 esac
 if [[ -n "$fin" ]]; then : > "$fin"; fi
@@ -131,6 +140,24 @@ fi
 exec "$real_date" "\$@"
 SHIM
 chmod +x "$shim/date"
+# The mv shim runs the real mv, then parks a racer that has RACE_MV_HOLD set
+# (first call only) until that file exists, keeping B between its capture
+# and its hand-back.
+real_mv="$(command -v mv)"
+cat > "$shim/mv" <<SHIM
+#!/usr/bin/env bash
+"$real_mv" "\$@"; r=\$?
+if [[ -n "\${RACE_MV_HOLD:-}" && ! -e "\${RACE_MV_HOLD}.passed" ]]; then
+  : > "\${RACE_MV_HOLD}.parked"
+  n=0
+  while [[ ! -e "\$RACE_MV_HOLD" ]] && (( n < 1000 )); do
+    sleep 0.01 2>/dev/null || sleep 1; n=\$((n + 1))
+  done
+  : > "\${RACE_MV_HOLD}.passed"
+fi
+exit \$r
+SHIM
+chmod +x "$shim/mv"
 for site in wh ta; do
   d="$work/inter.$site"; mkdir -p "$d"; lock="$d/the.lock"
   must age_lock "$lock"
@@ -195,6 +222,76 @@ for site in wh ta; do
   read -r rc _ < <(bash "$drv" "$funcs" "$site" "$d/the.lock" "" "" "" 2>/dev/null </dev/null)
   check "$site symlinked lock: miss" 1 "$rc"
   check "$site symlinked lock: target's token untouched" 424242 "$(cat "$d/target/owner")"
+done
+
+# --- 5. three reclaimers: the capture-less one must not claim ---------------
+# B and C both read the stale age and park at `date`. A reclaims to
+# completion. B resumes, captures A's fresh token and parks after its mv.
+# C resumes: nothing to capture. Without a re-check C went straight to the
+# O_EXCL claim, won it, and A and C both owned the lock. Then B resumes and
+# hands A's token back.
+for site in wh ta; do
+  d="$work/three.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  must age_lock "$lock"
+  PATH="$shim:$PATH" RACE_HOLD_UNTIL="$d/b_go" RACE_MV_HOLD="$d/b_mv" \
+    bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/ob" 2>/dev/null </dev/null & pb=$!
+  PATH="$shim:$PATH" RACE_HOLD_UNTIL="$d/c_go" \
+    bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/oc" 2>/dev/null </dev/null & pc=$!
+  parked=no; wait_for "$d/b_go.parked" "$d/c_go.parked" && parked=yes
+  check "$site three: B and C parked after their age checks" yes "$parked"
+  bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null
+  : > "$d/b_go"
+  parked=no; wait_for "$d/b_mv.parked" && parked=yes
+  check "$site three: B parked holding its capture" yes "$parked"
+  : > "$d/c_go"; wait "$pc"
+  : > "$d/b_mv"; wait "$pb"
+  read -r rca pida < "$d/oa"; read -r rcb _ < "$d/ob"; read -r rcc _ < "$d/oc"
+  check "$site three: only A owns (A B C)" "0 1 1" "$rca $rcb $rcc"
+  check "$site three: A's token is back in place" "$pida" "$(cat "$lock/owner" 2>/dev/null)"
+  check "$site three: no captured token left behind" 0 \
+    "$(find "$lock" -name 'owner.reap.*' 2>/dev/null | wc -l | tr -d ' ')"
+done
+
+# --- 6. A releases while B holds a capture of A's token ---------------------
+# B parks at `date` with the stale view, A reclaims, B captures A's token
+# and parks. A now releases: its token is not at owner (B has it), so the
+# old release's rmdir failed on B's capture and B then put A's token back,
+# leaving an ownerless lock for a whole staleness window.
+for site in wh ta; do
+  d="$work/rel.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  must age_lock "$lock"
+  PATH="$shim:$PATH" RACE_HOLD_UNTIL="$d/b_go" RACE_MV_HOLD="$d/b_mv" \
+    bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/ob" 2>"$d/eb" </dev/null & pb=$!
+  wait_for "$d/b_go.parked"
+  bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null
+  : > "$d/b_go"
+  parked=no; wait_for "$d/b_mv.parked" && parked=yes
+  check "$site release: B parked holding A's token" yes "$parked"
+  bash "$drv" "$funcs" "$site-release" "$lock" "" "" "" >/dev/null 2>&1 </dev/null
+  : > "$d/b_mv"; wait "$pb"
+  read -r rca _ < "$d/oa"; read -r rcb _ < "$d/ob"
+  check "$site release: A won, B missed" "0 1" "$rca $rcb"
+  check "$site release: lock gone after A's release" no \
+    "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
+  check "$site release: B printed nothing (a vanished capture is normal)" "" "$(cat "$d/eb")"
+done
+
+# --- 7. hand-back blocked by a token that appeared meanwhile: say so --------
+for site in wh ta; do
+  d="$work/blocked.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  must age_lock "$lock"
+  PATH="$shim:$PATH" RACE_HOLD_UNTIL="$d/b_go" RACE_MV_HOLD="$d/b_mv" \
+    bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/ob" 2>"$d/eb" </dev/null & pb=$!
+  wait_for "$d/b_go.parked"
+  bash "$drv" "$funcs" "$site" "$lock" "" "" "" > /dev/null 2>&1 </dev/null
+  : > "$d/b_go"; wait_for "$d/b_mv.parked"
+  echo 777 > "$lock/owner"            # someone else's token, in the gap
+  : > "$d/b_mv"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site blocked hand-back: B misses" 1 "$rcb"
+  check "$site blocked hand-back: the newer token is not replaced" 777 "$(cat "$lock/owner")"
+  check "$site blocked hand-back: one stderr line" 1 \
+    "$(grep -c 'could not hand a live holder' "$d/eb")"
 done
 
 finish
