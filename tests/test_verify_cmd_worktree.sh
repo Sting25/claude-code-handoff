@@ -11,6 +11,7 @@ has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 
 echo "verify command: linked worktree, HANDOFF_ANCHOR=common"
 main="$(mk_repo)"
+cleanup_on_exit "$main" "$main.wt"
 must git -C "$main" worktree add -q "$main.wt" -b wt-verify
 wt="$(cd "$main.wt" && pwd -P)"
 ( cd "$wt" && env -u CLAUDE_PROJECT_DIR HANDOFF_ANCHOR=common bash "$WH" </dev/null >/dev/null 2>&1 )
@@ -35,7 +36,5 @@ doc="$(cat "$main/.claude/handoff_current.md" 2>/dev/null)"
 first="$(grep -m1 'git -C .* status &&' <<<"$doc")"
 check "worktree line comes first"                yes "$(has "$first" "git -C $wt status && git -C $wt log")"
 
-git -C "$main" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
-rm -rf "$main"
 
 finish
