@@ -28,9 +28,23 @@ exists() { [[ -e "$1" ]] && echo yes || echo no; }
 # --- Detector A: handoff_ctx_check.sh ---------------------------------------
 echo "handoff_ctx_check.sh — Stop-hook health detector A"
 
+# Issue #159: the warning counts COMPLETED turns (assistant end_turn lines in
+# the transcript), not prompts. fire_a simulates a healthy-transcript session
+# whose Stop hook wrote nothing: each call appends one completed turn to a
+# fixture transcript, then fires the prompt hook with a real-shaped payload.
 fire_a() {  # <repo> <sid> [ENV=VAL ...]
   local repo="$1" sid="$2"; shift 2
-  ( cd "$repo" && env "$@" bash "$CC" <<<"{\"session_id\":\"$sid\"}" 2>/dev/null )
+  local tp="$repo/transcript_$sid.jsonl"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' \
+    '{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}' >> "$tp"
+  fire_raw "$repo" "$sid" "$@"
+}
+# One prompt fire with NO new completed turn (transcript left as is).
+fire_raw() {  # <repo> <sid> [ENV=VAL ...]
+  local repo="$1" sid="$2"; shift 2
+  local tp="$repo/transcript_$sid.jsonl"
+  ( cd "$repo" && env "$@" bash "$CC" \
+      <<<"{\"session_id\":\"$sid\",\"transcript_path\":\"$tp\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"continue\"}" 2>/dev/null )
 }
 
 # F1 regression: handoff_backups/ does NOT pre-exist (the flagship scenario —
@@ -125,12 +139,44 @@ repo="$(mk_repo)"; cleanup_on_exit "$repo"
 bd="$repo/.claude/handoff_backups"; must mkdir -p "$bd"
 must printf 'window=1000\ntokens=600\n' > "$bd/.ctx_sl_LEDGER"
 must printf '2\n' > "$bd/.ctx_prompts_LEDGER"
+for _ in 1 2; do   # two completed turns already in the transcript (issue #159)
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn","content":[]}}' >> "$repo/transcript_LEDGER.jsonl"
+done
 out="$(fire_a "$repo" LEDGER HANDOFF_CTX_WINDOW_TOKENS=1000)"
 check "coexistence: health warning present"   yes "$(has "$out" "does not appear to be running")"
 check "coexistence: token-ledger nudge present too" yes "$(has "$out" "<system-reminder>")"
 health_pos=$(printf '%s' "$out" | grep -bo "does not appear to be running" | head -1 | cut -d: -f1)
 nudge_pos=$(printf '%s' "$out" | grep -bo "<system-reminder>" | head -1 | cut -d: -f1)
 check "coexistence: warning precedes the nudge" yes "$([[ "$health_pos" -lt "$nudge_pos" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# Issue #159 (a): three prompts with no completed turn between them (API error,
+# interrupt, queued prompts) must NOT warn, even well past the threshold.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+out=""
+for _ in 1 2 3 4; do out="$out$(fire_raw "$repo" NOTURNS)"; done
+check "#159a: 4 prompts, 0 completed turns -> silent" no "$(has "$out" "does not appear to be running")"
+check "#159a: no health flag recorded"               no "$(exists "$repo/.claude/handoff_backups/.ctx_health_NOTURNS")"
+# Sidechain and non-end_turn assistant lines are not completed main-chain turns.
+for _ in 1 2 3; do
+  printf '%s\n' '{"type":"assistant","isSidechain":true,"message":{"stop_reason":"end_turn","content":[]}}' \
+    '{"type":"assistant","message":{"stop_reason":"tool_use","content":[]}}' >> "$repo/transcript_NOTURNS.jsonl"
+done
+out="$(fire_raw "$repo" NOTURNS)"
+check "#159a: sidechain/tool_use lines do not count"  no "$(has "$out" "does not appear to be running")"
+# Missing transcript_path: no warning.
+out=""
+for _ in 1 2 3 4; do out="$(cd "$repo" && bash "$CC" <<<'{"session_id":"NOPATH"}' 2>/dev/null)"; done
+check "#159a: no transcript_path -> silent"           no "$(has "$out" "does not appear to be running")"
+rm -rf "$repo"
+
+# Issue #159 (b): three completed turns, no dump marker -> warns once the third
+# turn has completed, not before.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+o1="$(fire_a "$repo" TURNS3)"; o2="$(fire_a "$repo" TURNS3)"; o3="$(fire_a "$repo" TURNS3)"
+check "#159b: 2 completed turns -> silent"            no  "$(has "$o2" "does not appear to be running")"
+check "#159b: 3 completed turns, no dump -> warns"    yes "$(has "$o3" "does not appear to be running")"
+check "#159b: warning counts completed turns"         yes "$(has "$o3" "3 completed turns")"
 rm -rf "$repo"
 
 # --- Detector B: handoff_session_start.sh -----------------------------------

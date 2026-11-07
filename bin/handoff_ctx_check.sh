@@ -158,12 +158,14 @@
 #                               sessions (variable unset or any other value)
 #                               are unaffected either way.
 #   HANDOFF_HEALTH_PROMPTS      Stop-hook health detector A (issue #71):
-#                               number of UserPromptSubmit fires, with
+#                               number of COMPLETED turns (issue #159: main-
+#                               chain assistant transcript lines with
+#                               stop_reason end_turn, not prompts), with
 #                               .ctx_<session_id> still absent, before this
 #                               hook warns that the Stop hook appears dead
 #                               (default: 3). A Stop hook should write that
 #                               file on every turn, so surviving this many
-#                               prompts with no such file is strong evidence
+#                               turns with no such file is strong evidence
 #                               it never ran this session, rather than just
 #                               "no Stop has fired yet" (the first-prompt
 #                               case). Warns once per session; see
@@ -397,10 +399,28 @@ if [[ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]]; then
           && mv -f "$health_tmp" "$prompts_file"; } 2>/dev/null \
         || rm -f "$health_tmp" 2>/dev/null || true
     fi
+    # Issue #159: warn on COMPLETED turns, not prompts. A prompt can arrive
+    # with no turn ever ending (API error: Stop does not fire; user interrupt;
+    # queued prompts; background-subagent or cross-session messages), so the
+    # prompt counter alone gave false positives. A completed turn is a
+    # main-chain assistant transcript line with stop_reason end_turn. Counted
+    # in one jq pass, and only once every cheaper marker check has passed.
+    # Missing or unreadable transcript_path means 0 turns, so no warning.
+    done_turns=0
     if (( prompt_count >= HEALTH_PROMPTS )) && [[ ! -f "$size_file" ]] \
        && [[ ! -f "$model_file" ]] \
        && [[ ! -f "$health_flag" ]] && [[ ! -L "$health_flag" ]]; then
-      echo "⚠️  handoff: the Stop hook does not appear to be running this session — no per-turn backup has been recorded after ${prompt_count} prompts. /handoff will have no incremental dump to fall back on if invoked under context pressure. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
+      health_tp="$(jq -r '.transcript_path // empty' <<<"$payload" 2>/dev/null || true)"
+      if [[ -n "$health_tp" && -f "$health_tp" && -r "$health_tp" ]]; then
+        done_turns="$(grep -F '"end_turn"' "$health_tp" 2>/dev/null \
+          | jq -R 'fromjson? | select(.type == "assistant" and .isSidechain != true
+                                      and .message.stop_reason == "end_turn") | 1' 2>/dev/null \
+          | wc -l | tr -d ' ')"
+        [[ "$done_turns" =~ ^[0-9]+$ ]] || done_turns=0
+      fi
+    fi
+    if (( done_turns >= HEALTH_PROMPTS )); then
+      echo "⚠️  handoff: the Stop hook does not appear to be running this session: no per-turn backup has been recorded after ${done_turns} completed turns. /handoff will have no incremental dump to fall back on if invoked under context pressure. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
       if mkdir -p "$backup_dir" 2>/dev/null; then
         : > "$health_flag" 2>/dev/null || true
       fi
