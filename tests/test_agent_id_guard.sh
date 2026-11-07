@@ -24,15 +24,23 @@ WR="$REPO_ROOT/bin/handoff_worktree_remove.sh"
 
 exists() { if [[ -e "$1" ]]; then echo yes; else echo no; fi; }
 nonempty() { if [[ -n "$1" ]]; then echo yes; else echo no; fi; }
-# One checksum over the names and contents of everything under <dir>.
+# Sandboxed HOME and TMPDIR for every hook run, so a stray write there shows up
+# in snap() instead of landing in the real home or /tmp.
+SB="$(mktemp -d)"; cleanup_on_exit "$SB"
+must mkdir -p "$SB/home" "$SB/tmp"
+# One checksum over the names and contents of everything under <dir> AND the
+# sandbox HOME/TMPDIR.
 snap() {
-  ( cd "$1" && { find . -not -path './.git/*' -not -name .git | LC_ALL=C sort
-                 find . -type f -not -path './.git/*' -exec cksum {} + | LC_ALL=C sort; } | cksum )
+  local d
+  for d in "$1" "$SB"; do
+    ( cd "$d" && { find . -not -path './.git/*' -not -name .git | LC_ALL=C sort
+                   find . -type f -not -path './.git/*' -exec cksum {} + | LC_ALL=C sort; } )
+  done | cksum
 }
 # fire <script> <repo> <payload> [env...]: stdout of the hook (stderr dropped).
 fire() {
   local s="$1" r="$2" p="$3"; shift 3
-  ( cd "$r" && env CLAUDE_PROJECT_DIR="$r" "$@" bash "$s" <<<"$p" 2>/dev/null )
+  ( cd "$r" && env HOME="$SB/home" TMPDIR="$SB/tmp" CLAUDE_PROJECT_DIR="$r" "$@" bash "$s" <<<"$p" 2>/dev/null )
 }
 
 AGENT_FIELDS='"agent_id":"agent-abc123","agent_type":"Explore"'
@@ -102,23 +110,31 @@ echo "agent_id guard: handoff_ctx_check.sh"
 # drops a marker; that path runs before any parse, so it exercises the guard
 # placement (the guard must precede it) without a token fixture.
 shim="$(path_without jq)"; cleanup_on_exit "$shim"
+cc_pay() {  # <repo> <sid> <fields>
+  printf '{"session_id":"%s","cwd":"%s","prompt":"hi",%s}' "$2" "$1" "$3"
+}
+# no jq: agent_id payload in its own repo
 r="$(mk_repo)"; cleanup_on_exit "$r"
-pay='{"session_id":"CCA1","cwd":"'"$r"'","prompt":"hi",'
 before="$(snap "$r")"
-out="$(fire "$CC" "$r" "${pay}${AGENT_FIELDS}}" PATH="$shim")"
+out="$(fire "$CC" "$r" "$(cc_pay "$r" CCA1 "$AGENT_FIELDS")" PATH="$shim")"
 check "ctx_check: agent_id (no jq) -> no stdout"    no  "$(nonempty "$out")"
 check "ctx_check: agent_id (no jq) -> unchanged"    "$before" "$(snap "$r")"
-out="$(fire "$CC" "$r" "${pay}${TYPE_ONLY_FIELDS}}" PATH="$shim")"
+# no jq: agent_type-only payload in a separate repo and session
+r="$(mk_repo)"; cleanup_on_exit "$r"
+out="$(fire "$CC" "$r" "$(cc_pay "$r" CCA2 "$TYPE_ONLY_FIELDS")" PATH="$shim")"
 check "ctx_check: agent_type only (no jq) -> warns" yes "$(nonempty "$out")"
-# With jq: agent payload leaves a seeded session untouched and silent.
-r3="$(mk_repo)"; cleanup_on_exit "$r3"
-mkdir -p "$r3/.claude/handoff_backups"
-printf 'window=1000\ntokens=990\n' > "$r3/.claude/handoff_backups/.ctx_sl_CCA3"
-before="$(snap "$r3")"
-out="$(fire "$CC" "$r3" '{"session_id":"CCA3","cwd":"'"$r3"'","prompt":"hi",'"$AGENT_FIELDS}" HANDOFF_CTX_WINDOW_TOKENS=1000)"
+# With jq: an agent payload leaves a seeded session untouched and silent.
+seed_cc() {  # <repo> <sid>
+  mkdir -p "$1/.claude/handoff_backups" \
+    && printf 'window=1000\ntokens=990\n' > "$1/.claude/handoff_backups/.ctx_sl_$2"
+}
+r="$(mk_repo)"; cleanup_on_exit "$r"; must seed_cc "$r" CCA3
+before="$(snap "$r")"
+out="$(fire "$CC" "$r" "$(cc_pay "$r" CCA3 "$AGENT_FIELDS")" HANDOFF_CTX_WINDOW_TOKENS=1000)"
 check "ctx_check: agent_id (jq) -> no stdout"       no  "$(nonempty "$out")"
-check "ctx_check: agent_id (jq) -> unchanged"       "$before" "$(snap "$r3")"
-out="$(fire "$CC" "$r3" '{"session_id":"CCA3","cwd":"'"$r3"'","prompt":"hi",'"$TYPE_ONLY_FIELDS}" HANDOFF_CTX_WINDOW_TOKENS=1000)"
+check "ctx_check: agent_id (jq) -> unchanged"       "$before" "$(snap "$r")"
+r="$(mk_repo)"; cleanup_on_exit "$r"; must seed_cc "$r" CCA4
+out="$(fire "$CC" "$r" "$(cc_pay "$r" CCA4 "$TYPE_ONLY_FIELDS")" HANDOFF_CTX_WINDOW_TOKENS=1000)"
 check "ctx_check: agent_type only (jq) -> nudge"    yes "$(nonempty "$out")"
 
 echo "agent_id guard: handoff_worktree_remove.sh"
@@ -146,5 +162,20 @@ check "worktree_remove: agent_type only -> salvage" 1   "$(raws "$m")"
 m2="$(mk_main)"; cleanup_on_exit "$m2"
 fire "$WR" "$m2" "$(wr_pay "$m2" "$AGENT_FIELDS")" HANDOFF_HOOKS_ALLOW_AGENTS=1 >/dev/null
 check "worktree_remove: ALLOW_AGENTS=1 -> salvage"  1   "$(raws "$m2")"
+
+echo "agent_id guard: the six copies stay identical"
+# Each script carries the guard between AGENT_ID_GUARD markers. Normalize the
+# payload variable (write_handoff names it hook_payload) and diff pairwise, so
+# an edit to one copy that is not made in the others fails here.
+guard_of() {  # <script>: the marked block, payload variable normalized
+  sed -n '/^# >>> AGENT_ID_GUARD/,/^# <<< AGENT_ID_GUARD/p' "$1" | sed 's/hook_payload/payload/g'
+}
+ref="$SS"; guard_of "$ref" > "$SB/guard.ref"
+check "guard block found in session_start"  yes "$(nonempty "$(cat "$SB/guard.ref")")"
+for s in "$WH" "$CR" "$TA" "$CC" "$WR"; do
+  guard_of "$s" > "$SB/guard.cur"
+  check "guard identical: ${s##*/}" same "$(cmp -s "$SB/guard.ref" "$SB/guard.cur" && echo same || echo differs)"
+  check "guard marked once: ${s##*/}" 1 "$(grep -c '^# >>> AGENT_ID_GUARD' "$s")"
+done
 
 finish
