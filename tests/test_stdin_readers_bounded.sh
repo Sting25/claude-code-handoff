@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The five remaining hook-side stdin readers must never block on an OPEN,
+# The six remaining hook-side stdin readers must never block on an OPEN,
 # SILENT stdin (issue #160; same defect and fix as write_handoff.sh, #158):
 #   handoff_session_start.sh, handoff_compact_reset.sh, handoff_ctx_check.sh,
-#   handoff_worktree_remove.sh, handoff_statusline.sh
+#   handoff_worktree_remove.sh, handoff_statusline.sh, handoff_turn_append.sh
 # Claude Code writes the JSON and closes stdin, so this only bites hand runs,
 # the Bash tool and test runners (hardening, not a hook fix). Each reader now
 # carries a copy of read_hook_payload() from write_handoff.sh (the canonical
@@ -11,7 +11,7 @@
 # Proves, per reader: (a) an open FIFO that never delivers returns within
 # HANDOFF_STDIN_TIMEOUT+1 s, (b) a real payload is still read with and without
 # a trailing newline, (c) the statusline (300 ms cadence) does not wait on an
-# empty CLOSED pipe, (d) the five copies have not drifted from the canonical.
+# empty CLOSED pipe, (d) the six copies have not drifted from the canonical.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BIN="$REPO_ROOT/bin"
@@ -48,7 +48,7 @@ exec 3<>"$fifo_dir/open_stdin"
 
 echo "stdin readers: bounded first read (issue #160)"
 
-NAMES="session_start compact_reset ctx_check worktree_remove statusline"
+NAMES="session_start compact_reset ctx_check worktree_remove statusline turn_append"
 
 # --- 1. open, silent stdin: returns within HANDOFF_STDIN_TIMEOUT+1 s ---------
 # HANDOFF_STDIN_TIMEOUT=1, so the ceiling is 2 s; the unbounded cat never
@@ -102,6 +102,17 @@ for mode in nl nonl; do
   check "2 worktree_remove ($mode): payload read" yes "$(has "$out" "wt160")"
   rm -rf "$repo"
 
+  # turn_append: creates the per-session dump only if the payload was parsed.
+  if command -v jq >/dev/null 2>&1; then
+    repo="$(mk_repo)"; tx="$repo/tx.jsonl"
+    printf '{"type":"user","message":{"content":"hello"}}\n' > "$tx"
+    ( cd "$repo" && feed "$mode" "{\"session_id\":\"TA\",\"transcript_path\":\"$tx\"}" \
+        | bash "$BIN/handoff_turn_append.sh" >/dev/null 2>&1 )
+    check "2 turn_append ($mode): payload read" yes \
+      "$([[ -f "$repo/.claude/handoff_backups/handoff_raw_TA.md" ]] && echo yes || echo no)"
+    rm -rf "$repo"
+  fi
+
   # statusline: renders a line only if a payload arrived.
   repo="$(mk_repo)"
   out="$( cd "$repo" && feed "$mode" '{"session_id":"SL"}' | bash "$BIN/handoff_statusline.sh" 2>/dev/null )"
@@ -125,6 +136,15 @@ ms=$((t1-t0))
 echo "  (info) statusline empty closed pipe: ${ms} ms (default HANDOFF_STDIN_TIMEOUT)"
 check "3 statusline: empty closed pipe -> no output" "" "$out"
 check "3 statusline: empty closed pipe returns < 1000 ms" yes "$([[ $ms -lt 1000 ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# --- 3b. oversized HANDOFF_STDIN_TIMEOUT falls back to the default ----------
+# 20 digits passes a bare digit test but `read -t` rejects it; the payload
+# must still be read (statusline renders a line only when it was).
+repo="$(mk_repo)"
+out="$( cd "$repo" && printf '{"session_id":"BIGT"}\n' \
+    | HANDOFF_STDIN_TIMEOUT=99999999999999999999 bash "$BIN/handoff_statusline.sh" 2>/dev/null )"
+check "3b oversized HANDOFF_STDIN_TIMEOUT -> payload still read" yes "$(has "$out" "handoff:")"
 rm -rf "$repo"
 
 # --- 4. drift: each copy equals the canonical read_hook_payload() -----------
