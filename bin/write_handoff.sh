@@ -108,6 +108,19 @@ read_hook_payload() {
 }
 hook_payload=""
 [[ -t 0 ]] || hook_payload="$(read_hook_payload)"
+
+# --- Subagent guard (issue #145). Hook payloads from inside a subagent carry a
+# non-empty "agent_id"; the handoff state belongs to the main session, so do
+# nothing (no writes, no stdout) there. Guard on agent_id ONLY: "agent_type"
+# is also set for main sessions started with `--agent`. No jq (extraction is
+# the same fixed-shape sed used elsewhere in this script). Opt back in with
+# HANDOFF_HOOKS_ALLOW_AGENTS=1.
+if [ "${HANDOFF_HOOKS_ALLOW_AGENTS:-}" != "1" ]; then
+  hook_agent_id="$(printf '%s' "$hook_payload" \
+    | LC_ALL=C sed -nE 's/.*"agent_id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' \
+    | head -n 1 || true)"
+  [ -z "$hook_agent_id" ] || exit 0
+fi
 session_end_reason=""
 payload_cwd=""
 payload_session_id=""
