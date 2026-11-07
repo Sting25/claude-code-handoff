@@ -89,11 +89,14 @@ nothing gets lost across the restart boundary.
    exactly as before:
    ```bash
    if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
-     bash "$hb/write_handoff.sh" --session-id "$CLAUDE_CODE_SESSION_ID"
+     bash "$hb/write_handoff.sh" --session-id "$CLAUDE_CODE_SESSION_ID" </dev/null
    else
-     bash "$hb/write_handoff.sh"
+     bash "$hb/write_handoff.sh" </dev/null
    fi
    ```
+   The `</dev/null` matters: the Bash tool's stdin is an open socket that
+   never sends EOF, and the script reads an optional hook payload from
+   stdin. Installs from 0.19.1 on bound that read; older ones hang on it.
    If it prints MISSING, **stop here** — tell the user to clone
    https://github.com/Sting25/claude-code-handoff and run `./install.sh`
    (or install the plugin), then re-invoke `/handoff`. Do NOT attempt to
@@ -229,7 +232,7 @@ nothing gets lost across the restart boundary.
        fi
      done
    fi
-   bash "$hb/write_handoff.sh" --restamp
+   bash "$hb/write_handoff.sh" --restamp </dev/null
    ```
    This re-signs `handoff_current.md` in place with the per-machine
    secret so the next session loads the Rules/pinned blocks as binding.

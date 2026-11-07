@@ -259,7 +259,7 @@ final turns.
        fi
      done
    fi
-   bash "$hb/write_handoff.sh" --restamp
+   bash "$hb/write_handoff.sh" --restamp </dev/null
    ```
    Best-effort — if it warns (no openssl, older install), continue; the
    handoff still works, the rules just load as data. Re-run it after any

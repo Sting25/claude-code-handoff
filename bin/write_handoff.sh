@@ -75,13 +75,39 @@ set -euo pipefail
 # version on upgrade.
 umask 077
 
-# --- Hook payload (optional). The `-t 0` tty guard prevents a hang when the
-# script is run by hand in a terminal (stdin open, nothing coming); hook
-# invocations pipe JSON, and /handoff-skill Bash invocations see /dev/null ->
-# instant empty read. Everything about this payload is optional: no payload,
-# no jq, or no parseable reason all degrade to today's always-write behavior.
+# --- Hook payload (optional). Two guards, because two things can hold stdin
+# open with nothing coming: a terminal (`-t 0`, manual runs) and a socket or
+# pipe whose writer never closes its end. The second is the Claude Code Bash
+# tool: the /handoff skill runs `--restamp` through it, its stdin is a unix
+# socket that is not a tty and never sends EOF, and a bare `cat` here waited
+# for minutes until the process was killed by hand (issue #158). The fd type
+# cannot tell the cases apart (Node hands hooks a socket pair too); what
+# differs is that a hook's writer has already written the JSON and closed its
+# end, so bytes or EOF arrive at once. So: wait a bounded time for the first
+# line, and only after something arrived drain to EOF (then guaranteed to
+# terminate). HANDOFF_STDIN_TIMEOUT is whole seconds (bash 3.2 has no
+# fractional -t), default 2, minimum 1. A timeout, EOF, a bad value, no jq,
+# or no parseable reason all degrade to the always-write behavior: the skill
+# paths (plain write, --restamp, --takeover) never carry a payload anyway, and
+# the SessionEnd/PreCompact skip can only ever be ADDED by a payload that
+# did arrive. The skill snippets also pass </dev/null, which skips the wait.
+read_hook_payload() {
+  local first="" timeout="${HANDOFF_STDIN_TIMEOUT:-2}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=2
+  (( timeout < 1 )) && timeout=1
+  if IFS= read -r -t "$timeout" first; then
+    # A newline-terminated first line arrived: the rest ends at EOF.
+    printf '%s\n%s' "$first" "$(cat 2>/dev/null || true)"
+  else
+    # EOF (possibly with an unterminated last line: a payload printed
+    # without a trailing newline) or timeout (first stays empty). bash 3.2
+    # returns 1 for both; bash 4+ returns >128 on timeout. Either way the
+    # partial content is the whole payload and nothing more is read.
+    printf '%s' "$first"
+  fi
+}
 hook_payload=""
-[[ -t 0 ]] || hook_payload="$(cat 2>/dev/null || true)"
+[[ -t 0 ]] || hook_payload="$(read_hook_payload)"
 session_end_reason=""
 payload_cwd=""
 payload_session_id=""
