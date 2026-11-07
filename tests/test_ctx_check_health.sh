@@ -173,7 +173,7 @@ rm -rf "$repo"
 # Issue #159 (b): three completed turns, no dump marker -> warns once the third
 # turn has completed, not before.
 repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
-o1="$(fire_a "$repo" TURNS3)"; o2="$(fire_a "$repo" TURNS3)"; o3="$(fire_a "$repo" TURNS3)"
+fire_a "$repo" TURNS3 >/dev/null; o2="$(fire_a "$repo" TURNS3)"; o3="$(fire_a "$repo" TURNS3)"
 check "#159b: 2 completed turns -> silent"            no  "$(has "$o2" "does not appear to be running")"
 check "#159b: 3 completed turns, no dump -> warns"    yes "$(has "$o3" "does not appear to be running")"
 check "#159b: warning counts completed turns"         yes "$(has "$o3" "3 completed turns")"
