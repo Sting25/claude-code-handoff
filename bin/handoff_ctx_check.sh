@@ -417,9 +417,13 @@ if [[ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]]; then
         # stop_sequence on model "<synthetic>" (API-error placeholder; no
         # Stop fires for it). A turn with thinking is written as TWO assistant
         # lines sharing one message.id, both end_turn, so count DISTINCT ids
-        # (uuid as fallback), never lines.
+        # (uuid as fallback), never lines. A resumed or forked session's
+        # transcript also carries earlier sessions' lines with their own
+        # sessionId; only this session's lines count (absent sessionId counts).
         done_turns="$(grep -F '"end_turn"' "$health_tp" 2>/dev/null \
-          | jq -R 'fromjson? | select(.type == "assistant" and .isSidechain != true
+          | jq -R --arg sid "$session_id" 'fromjson?
+                   | select(.type == "assistant" and .isSidechain != true
+                                      and (.sessionId // $sid) == $sid
                                       and .message.stop_reason == "end_turn"
                                       and .message.model != "<synthetic>")
                    | (.message.id // .uuid // empty)' 2>/dev/null \
