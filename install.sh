@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: a338b573a0b49b28fc256ee8f6c2fb2a0b103fe39dcd452f34519dc7bfb452f3
+# SOURCE-SHA256: e039bab80097539c3b198a0ed70a24715796adeeb2523e9f941ad74472250326
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1349,7 +1349,7 @@ doctor() {
       fi
     elif [[ -L "$dst" ]]; then
       tgt="$(readlink "$dst" 2>/dev/null || true)"
-      echo "  BROKEN  $dst -> $tgt (dangling symlink — hook is silently disabled)"
+      echo "  BROKEN  $dst -> $tgt (dangling symlink: hook is silently disabled)"
       broken=$((broken + 1))
     else
       echo "  MISSING $dst (not installed)"

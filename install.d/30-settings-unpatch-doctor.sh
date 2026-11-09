@@ -380,7 +380,7 @@ doctor() {
       fi
     elif [[ -L "$dst" ]]; then
       tgt="$(readlink "$dst" 2>/dev/null || true)"
-      echo "  BROKEN  $dst -> $tgt (dangling symlink — hook is silently disabled)"
+      echo "  BROKEN  $dst -> $tgt (dangling symlink: hook is silently disabled)"
       broken=$((broken + 1))
     else
       echo "  MISSING $dst (not installed)"

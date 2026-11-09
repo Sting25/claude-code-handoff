@@ -1308,7 +1308,7 @@ if [ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ] && [ "$inherited" = "0" ]; then
       # mid-session.
       ss_flag="$hb/.ss_health_${ss_sid}"
       if [ ! -f "$ss_flag" ] && [ ! -L "$ss_flag" ]; then
-        echo "⚠️  handoff: the Stop hook does not appear to have run last session — no .ctx_tokens_/.ctx_model_/.ctx_ sidecar or handoff_raw_ dump was recorded for it in .claude/handoff_backups/. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone."
+        echo "⚠️  handoff: the Stop hook does not appear to have run last session: no .ctx_tokens_/.ctx_model_/.ctx_ sidecar or handoff_raw_ dump was recorded for it in .claude/handoff_backups/. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone."
         echo
         : > "$ss_flag" 2>/dev/null || true
       fi
