@@ -853,6 +853,19 @@ matters when the payload `cwd` is inside a linked worktree of
 or a non-git directory never trigger it. `HANDOFF_ANCHOR=common`
 still applies afterwards.
 
+**`HANDOFF_HOOKS_ALLOW_AGENTS`** (default off). Every hook script
+exits 0 without acting (no file writes, no output) when its payload
+carries a non-empty `agent_id`, the field Claude Code sets for hook
+calls made inside a subagent, so a subagent cannot write, reset or
+inject into the main session's handoff state. Only `agent_id` counts:
+`agent_type` is also set for main sessions started with `--agent`, and
+those must keep working. Set `HANDOFF_HOOKS_ALLOW_AGENTS=1` to run the
+hooks for subagents too. As of Claude Code 2.1.319 none of the events this plugin binds
+(SessionStart, SessionEnd, PreCompact, PostCompact, Stop,
+UserPromptSubmit, WorktreeRemove) carries `agent_id`, so the guard is
+defence in depth against a future CLI threading it in, not proof the
+hooks are agent-safe today.
+
 **`HANDOFF_DEBUG=1`** — prints a one-line root-resolution trace to
 stderr (which precedence rung won, the anchor, the resolved root). The
 first thing to reach for when a handoff is written somewhere the loader
