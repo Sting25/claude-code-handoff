@@ -176,24 +176,23 @@ Manual install:
      sized from the session's own model), and the
      transcript JSONL byte size into `.ctx_<session_id>` as a fallback.
    - **`UserPromptSubmit`** reads those files on the next prompt and,
-     past a configurable threshold (default 40% of the context
-     window — auto-detected as 1M tokens if the session's recorded
-     model matches the 1M-model regex (`[1m]` suffix or 1M-native
-     Claude 5 family id; see `HANDOFF_CTX_1M_MODEL_REGEX`), else 200k,
-     probing `~/.claude.json` when no model is recorded), injects a
+     together with the transcript's last usage record, at 30% of the
+     context window and then every 5 percentage points, injects a
      `<system-reminder>` telling the assistant to flag a `/handoff`
-     moment passively. The signal is the actual token count, not an
-     estimate — same precision as `/context`. When the statusLine is
-     wired, the window and count come from Claude Code's own numbers
-     (the `.ctx_sl_*` cache) instead of the model-regex detection;
-     `HANDOFF_CTX_WINDOW_TOKENS` still overrides everything.
+     moment passively. The signal is the actual token count, the same
+     precision as `/context`. The window comes from
+     `HANDOFF_CTX_WINDOW_TOKENS`, Claude Code's own numbers when the
+     statusLine is wired (the `.ctx_sl_*` cache), or the session's
+     model id checked against a built-in model table; when none
+     applies the reminder says the window is unknown, gives no
+     percentage, and fires at 100,000 tokens instead.
    - **`PreCompact`** fires the same safety net as `SessionEnd`
      before auto or manual compaction — compaction destroys the
      conversation just like an ending, and `SessionEnd` doesn't
      cover it.
    - **`PostCompact`** runs `handoff_compact_reset.sh` to clear the
      session's ctx sidecars, so the freed window starts fresh and the
-     once-per-session nudge can legitimately re-fire.
+     nudge cadence starts over from 30%.
    - **`statusLine`** (not a hook — its own settings key) runs
      `handoff_statusline.sh`: renders
      `model | ctx N% (usedk/windowk) | handoff: <state>` where state
@@ -310,37 +309,37 @@ export HANDOFF_SS_DISABLE_RECOVER=1
 
 # --- Context-usage system-reminder hook (handoff_ctx_check.sh) ---
 
-# Total context budget the threshold is calculated against (tokens).
-# Default: auto-detected — if the session's recorded model
-# (.ctx_model_<session_id>, written by the Stop hook) matches the
-# 1M-model regex below, defaults to 1000000; a recorded non-matching
-# model means 200000; with no recorded model yet, ~/.claude.json's
-# lastModelUsage is probed against the same regex. Set explicitly to
-# override the auto-detection (e.g. to force 1M before any model has
-# been recorded, or to force 200k while testing on a 1M tier).
+# Total context budget the percentages are calculated against (tokens).
+# Default: unset. The window then comes from the status line's
+# context_window_size while that cache is live, else from the session's
+# own model id: a "[1m]" suffix means 1M, an id matching
+# HANDOFF_CTX_1M_MODEL_REGEX (if set) means 1M, otherwise a built-in table
+# checked against the model docs (Claude 5 family and Opus 4.7 and later:
+# 1M; 4.5 models: 200k). When nothing applies the window is unknown: the
+# reminder says so and gives no percentage. Set this to pin a budget.
 export HANDOFF_CTX_WINDOW_TOKENS=200000
 
-# POSIX ERE matching model ids known to run a 1M-token context window.
-# Default: '\[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])'.
-# That is the `[1m]` beta suffix, plus Claude 5 and later ids, which are
-# 1M-native without any suffix. Claude 4 ids without `[1m]` stay 200k.
-# Extend when other new 1M models ship. (A measured token count above 200k
-# also ratchets the window to 1M regardless, since a 200k window
-# provably can't hold it.)
-export HANDOFF_CTX_1M_MODEL_REGEX='\[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])'
+# Extra model ids (POSIX ERE) to treat as 1M-token models, for ids the
+# built-in table does not list yet. Default: unset.
+export HANDOFF_CTX_1M_MODEL_REGEX='my-1m-model'
 
-# Percent of the window at which the reminder fires.
-# Default: 40 — fire at 40% used (lowered from 50 in 0.8.4). Drop to 30
-# for a more conservative nudge, raise (e.g. 60) if 40% feels too eager.
-export HANDOFF_CTX_THRESHOLD_PCT=40
+# Percent of a known window at which the first reminder fires. Default: 30.
+export HANDOFF_CTX_THRESHOLD_PCT=30
 
-# Transcript growth (in KB) required between consecutive reminders.
-# Default: 100 — once the hook has flagged, it won't flag again until
-# the transcript JSONL has grown another 100KB. Prevents nagging on
-# every turn after the threshold trips. The first crossing always
-# fires; the cooldown only spaces RE-flags, and re-flags only exist at
-# all when HANDOFF_CTX_MAX_FLAGS (below) allows them — with the default
-# suggest-mode cap of 1 there is nothing for the cooldown to gate.
+# After the first reminder, one more fires each time usage reaches the next
+# step of this many percentage points (30, 35, 40, ...). Default: 5.
+# 0 means no step re-flags.
+export HANDOFF_CTX_STEP_PCT=5
+
+# Absolute token count that triggers when the window is UNKNOWN (no
+# percentage to step on). Ignored whenever the window is known.
+# Default: 100000. 0 disables it.
+export HANDOFF_CTX_THRESHOLD_TOKENS=100000
+
+# Transcript growth (in KB) required between consecutive reminders when the
+# window is unknown (a known window steps by HANDOFF_CTX_STEP_PCT instead).
+# Default: 100: once the hook has flagged, it won't flag again until the
+# transcript JSONL has grown another 100KB.
 export HANDOFF_CTX_COOLDOWN_KB=100
 
 # Same spacing, for the token-denominated ledger the nudge falls back to
@@ -360,14 +359,10 @@ export HANDOFF_CTX_COOLDOWN_TOKENS=25600
 # .ctx_<session_id> silenced the nudge outright.
 export HANDOFF_CTX_SL_MAX_AGE_SECS=900
 
-# Hard cap on how many times a single session flags, regardless of
-# growth. Default: 1 in "suggest" mode (one nudge per session, then
-# silence — a long or idle session won't keep nagging; added in 0.8.4),
-# 0 (= unlimited, gated only by the cooldown) in "act" mode, where the
-# assistant is expected to keep refreshing its own context. Set 0 to
-# restore the pre-0.8.4 cooldown-spaced repeating behavior; set N>1 to
-# allow up to N cooldown-spaced nudges.
-export HANDOFF_CTX_MAX_FLAGS=1
+# Hard cap on how many times a single session flags. Default: 0
+# (uncapped) in both modes; the 5-point step spaces the reminders. Set 1
+# for one reminder per session, N>1 for up to N.
+export HANDOFF_CTX_MAX_FLAGS=0
 
 # Reminder behavior when the threshold trips. "suggest" (default) emits a
 # passive system-reminder for the assistant to flag a /handoff moment to
@@ -476,8 +471,9 @@ hook command in `settings.json` to drop the `echo` lines.
   shows. The byte-size estimate is kept only as a fallback for the
   first prompt of a fresh session before any Stop hook has fired,
   or for older installs that haven't pulled the updated turn-append
-  script. Tune `HANDOFF_CTX_THRESHOLD_PCT` if 40% fires too eagerly
-  or too late for your workloads.
+  script. Tune `HANDOFF_CTX_THRESHOLD_PCT` (default 30) and
+  `HANDOFF_CTX_STEP_PCT` (default 5) if the reminders come too early,
+  too late or too often for your workloads.
 - **`SessionEnd` fires on `/clear` too, and writes by default.** The
   hook receives a `reason` and only skips the ones listed in
   `HANDOFF_SESSIONEND_SKIP_REASONS`, which defaults to `resume` alone —

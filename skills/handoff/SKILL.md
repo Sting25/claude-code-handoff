@@ -381,30 +381,29 @@ yourself; the user has the meter, the user is the source of truth.
 ### Trigger 3: transcript-size system-reminder
 
 The `handoff_ctx_check.sh` `UserPromptSubmit` hook measures context
-usage each turn and emits a `<system-reminder>` past a threshold
-(default 40% of the detected window — 200k, or 1M for 1M-native
-models; both configurable). When the handoff statusLine is wired, the
-numbers are Claude Code's own (window size and current usage, cached
-by `handoff_statusline.sh` — the same status line that shows
-`handoff: curated/auto/none` to the user). This is a **real
-measurement**, not a fabricated %, so it's a
-legitimate signal to act on.
+usage each turn and emits a `<system-reminder>` at 30% of the context
+window, then again every 5 percentage points (both configurable). The
+token count is measured: Claude Code's own numbers when the handoff
+statusLine is wired (cached by `handoff_statusline.sh`, the same status
+line that shows `handoff: curated/auto/none` to the user), else the
+transcript's last usage record. The reminder names where each number
+came from; when the window size is unknown it says so and gives no
+percentage. This is a **real measurement**, not a fabricated %, so it's
+a legitimate signal to act on.
 
 When the reminder lands, surface it to the user as a **passive
 mention** — not a choice, not a question. One line, no question mark,
 no "want me to?". Example:
 
-> Flagging: ~40% of context used — natural /handoff moment if you want
-> to lock in the prose while I'm still sharp.
+> Flagging: ~30% of context used (1000000-token window from this hook's
+> model table for claude-opus-5-5): natural /handoff moment.
 
 Then continue answering the user's actual prompt. By default the hook
-nudges ONCE per session (`HANDOFF_CTX_MAX_FLAGS=1` in suggest mode) —
-if the user lets it pass, no second reminder is coming, so don't
-assume the hook will catch it again later. When the user has raised or
-removed the cap (`HANDOFF_CTX_MAX_FLAGS=0` or `N>1`), re-flags are
-spaced by a ~100KB-growth cooldown; if a fresh reminder lands later,
-surface it again — don't ration yourself. The reminder itself states
-which case applies.
+re-fires at every 5-point step (35%, 40%, ...) with no per-session cap,
+so if a fresh reminder lands later, surface it again; don't ration
+yourself. A user who set `HANDOFF_CTX_MAX_FLAGS=1` gets one reminder per
+session, so if they let it pass no second one is coming. The reminder
+itself states which case applies.
 
 ### What NOT to trigger on
 

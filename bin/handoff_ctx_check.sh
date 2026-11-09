@@ -20,8 +20,10 @@
 # This script itself writes the sidecars below, one pair per ledger (see
 # "Progress ledger", issue #69) so a byte count and a token count are never
 # compared as if they were the same quantity:
-#   .ctx_flagged_<session_id>     — byte-ledger nudge cap/cooldown state.
-#   .ctx_flagged_tok_<session_id> — token-ledger nudge cap/cooldown state.
+#   .ctx_flagged_<session_id>     : byte-ledger nudge cap/cadence state, one
+#                                    line per nudge, "<progress>" or
+#                                    "<progress> <pct step>" (issue #173).
+#   .ctx_flagged_tok_<session_id> : token-ledger nudge cap/cadence state.
 #   .fences_<session_id>          — byte-ledger rules re-injection cooldown
 #                                    (issue #42).
 #   .fences_tok_<session_id>      — token-ledger rules re-injection cooldown.
@@ -45,49 +47,33 @@
 # to passively flag a /handoff moment.
 #
 # Configurable via env (set in ~/.bashrc or ~/.zshrc):
-#   HANDOFF_CTX_WINDOW_TOKENS   total context budget in tokens. When unset,
-#                               auto-detected: if the session's recorded model
-#                               (.ctx_model_*) matches the 1M-model regex
-#                               below, defaults to 1000000; a recorded
-#                               non-matching model means 200000; with no
-#                               recorded model, falls back to probing
-#                               ~/.claude.json lastModelUsage against the
-#                               same regex.
-#   HANDOFF_CTX_1M_MODEL_REGEX  POSIX ERE matching model ids known to run a
-#                               1M-token context window. Default:
-#                                 \[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])
-#                               i.e. the `[1m]` beta suffix, plus Claude 5
-#                               family ids which are 1M-native WITHOUT any
-#                               suffix (the pre-regex detection assumed
-#                               [1m]-or-200k and over-reported usage 5x on
-#                               those models). Opus/Sonnet match from major
-#                               version 5 up, so a new release does not
-#                               silently fall back to 200k: the fable-only
-#                               list did exactly that for claude-opus-5-5 in
-#                               the desktop app, where no statusline cache
-#                               exists to supply the real window. Claude 4
-#                               ids without [1m] stay 200k.
-#   HANDOFF_CTX_THRESHOLD_PCT   percent of window that triggers (default: 40).
-#                               Lower (e.g. 30) is recommended for projects
-#                               that opt into REMINDER_MODE=act below — the
-#                               model needs runway to find a clean boundary
-#                               before context quality degrades.
-#   HANDOFF_CTX_THRESHOLD_TOKENS absolute token count that triggers (default:
-#                               100000). The nudge fires at whichever gate is
-#                               reached FIRST: this figure or THRESHOLD_PCT of
-#                               the window. Why both (issue #119): the 40%
-#                               default was calibrated on 200k windows, where
-#                               it meant ~80k tokens. Once 1M-window models
-#                               were detected correctly, the same 40% became
-#                               400k tokens (five times later in absolute
-#                               terms), and the nudge effectively stopped
-#                               firing. Quality degrades as a function of
-#                               tokens in context, not of the fraction of the
-#                               window, so the absolute gate is the one that
-#                               tracks what the nudge exists to catch. On a
-#                               200k window 80k < 100k, so behavior there is
-#                               unchanged. Set 0 to disable the absolute gate
-#                               and restore the pure percentage rule.
+#   HANDOFF_CTX_WINDOW_TOKENS   total context budget in tokens. Wins over
+#                               every other window source. When unset, the
+#                               window comes from the status line's
+#                               context_window_size while that cache is live,
+#                               else from the session's own model id (a
+#                               "[1m]" suffix, HANDOFF_CTX_1M_MODEL_REGEX, or
+#                               the model table in the "Window" section,
+#                               checked against the model docs). When none
+#                               applies the window is UNKNOWN: the reminder
+#                               says so and prints no percentage (issue #173;
+#                               the old chain guessed 200k or 1M and printed
+#                               the guess as a reading).
+#   HANDOFF_CTX_1M_MODEL_REGEX  optional POSIX ERE of model ids you know run
+#                               a 1M window, for ids the table does not list
+#                               yet. Unset by default (the table decides).
+#   HANDOFF_CTX_THRESHOLD_PCT   percent of a known window at which the first
+#                               nudge fires (default: 30).
+#   HANDOFF_CTX_STEP_PCT        after the first nudge, one more fires each
+#                               time usage reaches the next step of this many
+#                               percentage points (default: 5, i.e. 30, 35,
+#                               40, ...). 0 means no step re-flags.
+#   HANDOFF_CTX_THRESHOLD_TOKENS absolute token count that triggers when the
+#                               window is UNKNOWN (default: 100000). Ignored
+#                               whenever the window is known (issue #173: on
+#                               a 1M window issue #119's "first gate wins"
+#                               rule nudged at 10%). Set 0 to disable it; an
+#                               unknown window then never nudges.
 #   HANDOFF_CTX_REMINDER_MODE   "suggest" (default) emits a reminder that
 #                               instructs the assistant to surface a passive
 #                               mention to the user, who decides whether to
@@ -103,8 +89,9 @@
 #   HANDOFF_CTX_COOLDOWN_KB     transcript growth required between re-flags
 #                               (default: 100, i.e. wait ~100KB before
 #                               flagging again so we don't nag every turn).
-#                               Only relevant once re-flags are allowed —
-#                               see HANDOFF_CTX_MAX_FLAGS.
+#                               Since issue #173 this spaces re-flags only
+#                               when the window is unknown (no percentage to
+#                               step on); a known window uses STEP_PCT.
 #   HANDOFF_CTX_COOLDOWN_TOKENS same, for the token-denominated ledger used
 #                               when the Stop hook has recorded nothing and the
 #                               nudge is running off the statusline cache alone
@@ -113,9 +100,10 @@
 #                               4:1 bytes-per-token ratio this script already
 #                               uses for its estimate fallback, so one knob
 #                               governs both ledgers unless you split them.
-#   HANDOFF_CTX_SL_MAX_AGE_SECS how recent .ctx_sl_<sid> must be to drive the
-#                               nudge on its own, with no Stop-hook data to
-#                               cross-check it against (default: 900). A
+#   HANDOFF_CTX_SL_MAX_AGE_SECS how recent .ctx_sl_<sid> must be for any of
+#                               its numbers (tokens, pct, window) to count as
+#                               live (default: 900). Past it, usage is
+#                               measured from the transcript instead. A
 #                               statusLine that stops rendering leaves a frozen
 #                               cache behind; without an age horizon the hook
 #                               would keep nudging off a number that can no
@@ -127,15 +115,11 @@
 #                               block (default: 200; 0 disables). See the
 #                               "Rules re-injection" section below.
 #   HANDOFF_CTX_MAX_FLAGS       hard cap on how many times a single session
-#                               flags, regardless of growth. Defaults: 1 in
-#                               "suggest" mode (one gentle nudge per session,
-#                               then silence — a session left idle or running
-#                               long won't keep nagging), 0 (= unlimited, gated
-#                               only by the cooldown) in "act" mode, where the
-#                               assistant is expected to keep refreshing its own
-#                               context as it fills. Set 0 to restore the old
-#                               always-cooldown-gated behavior; set N>1 to allow
-#                               up to N nudges spaced by the cooldown.
+#                               flags. Default 0 (uncapped) in both modes
+#                               since issue #173: the STEP_PCT cadence (or the
+#                               cooldown, window unknown) spaces the nudges.
+#                               Set 1 for the old one-nudge-per-session
+#                               behavior, N>1 for up to N nudges.
 #   HANDOFF_CTX_NO_STATUSLINE   set to 1 to ignore the .ctx_sl_* statusline
 #                               cache entirely, restoring the pre-statusline
 #                               detection chain exactly. Debugging / regression
@@ -149,14 +133,12 @@
 #                               run there. So when that variable is set, no
 #                               fresh statusline pct exists, and the window was
 #                               not pinned by HANDOFF_CTX_WINDOW_TOKENS, the
-#                               reminder reports the token estimate only,
-#                               points the model at the app's meter as the
-#                               authoritative figure, and omits the inferred
-#                               percentage and its window NOTE. Threshold,
-#                               cooldown and cap logic are unchanged. Set 1 to
-#                               print the inferred percentage anyway. Terminal
-#                               sessions (variable unset or any other value)
-#                               are unaffected either way.
+#                               reminder (same line as a terminal since PR
+#                               #177: percentage and its source) adds one
+#                               sentence that the app's meter is the
+#                               authoritative figure. Set 1 to drop that
+#                               sentence. Terminal sessions (variable unset or
+#                               any other value) are unaffected either way.
 #   HANDOFF_HEALTH_PROMPTS      Stop-hook health detector A (issue #71):
 #                               number of COMPLETED turns (issue #159: main-
 #                               chain assistant transcript lines with
@@ -177,11 +159,11 @@
 #                               runs without a per-turn safety net. Default
 #                               unset (detectors active).
 #
-# Token count comes from the latest assistant turn's `usage` — the same
-# number Claude Code's /context shows. When that file is absent (first
-# prompt of a fresh session, or an older install that hasn't refreshed
-# the Stop hook yet) we fall back to a 4:1 bytes-per-token estimate
-# against the transcript JSONL size.
+# Token count, in order: the live status line cache; the transcript's last
+# usage record for this session (the same number Claude Code's /context
+# shows); the Stop hook's record of it; and only as the last fallback a 4:1
+# bytes-per-token estimate against the transcript JSONL size, labeled as an
+# estimate in the output.
 
 set -euo pipefail
 
@@ -190,31 +172,33 @@ set -euo pipefail
 # creation time, protecting against unintended disclosure.
 umask 077
 
-THRESHOLD_PCT="${HANDOFF_CTX_THRESHOLD_PCT:-40}"
+THRESHOLD_PCT="${HANDOFF_CTX_THRESHOLD_PCT:-30}"
+STEP_PCT="${HANDOFF_CTX_STEP_PCT:-5}"
 THRESHOLD_TOKENS="${HANDOFF_CTX_THRESHOLD_TOKENS:-100000}"
 COOLDOWN_KB="${HANDOFF_CTX_COOLDOWN_KB:-100}"
-# Validate both numerically, mirroring the MAX_FLAGS guard below. A slightly-
+# Validate numerically, mirroring the MAX_FLAGS guard below. A slightly-
 # wrong override ("40%", "100KB", a negative) previously reached the $((...))
 # arithmetic raw: bash errored, set -e killed the hook before the emit, and the
 # `2>/dev/null || true` hook wiring made the nudge silently disappear for every
 # session. Fall back to the defaults instead (a negative THRESHOLD_PCT would
 # otherwise also pass and make the threshold always-fire).
-[[ "$THRESHOLD_PCT" =~ ^[0-9]+$ ]] || THRESHOLD_PCT=40
+[[ "$THRESHOLD_PCT" =~ ^[0-9]+$ ]] || THRESHOLD_PCT=30
+[[ "$STEP_PCT" =~ ^[0-9]+$ ]] || STEP_PCT=5
 [[ "$THRESHOLD_TOKENS" =~ ^[0-9]+$ ]] || THRESHOLD_TOKENS=100000
 [[ "$COOLDOWN_KB"   =~ ^[0-9]+$ ]] || COOLDOWN_KB=100
 REMINDER_MODE="${HANDOFF_CTX_REMINDER_MODE:-suggest}"
-# Per-session flag cap. Default depends on mode: "suggest" nudges once and then
-# stays quiet (the common complaint is over-nagging on long/idle sessions);
-# "act" leaves it uncapped so an autonomous project keeps self-refreshing.
-if [[ -n "${HANDOFF_CTX_MAX_FLAGS:-}" ]]; then
-  MAX_FLAGS="$HANDOFF_CTX_MAX_FLAGS"
-elif [[ "$REMINDER_MODE" == "act" ]]; then
-  MAX_FLAGS=0
-else
-  MAX_FLAGS=1
-fi
+# Per-session flag cap. Default 0 (uncapped) in both modes since issue #173:
+# when the window is known the 5-point step (STEP_PCT) is what spaces the
+# nudges, so a cap would only hide the later, more urgent ones. Set
+# HANDOFF_CTX_MAX_FLAGS=1 for the old once-per-session behavior.
+MAX_FLAGS="${HANDOFF_CTX_MAX_FLAGS:-0}"
 # Non-numeric override -> treat as the safe "uncapped" sentinel rather than abort.
 [[ "$MAX_FLAGS" =~ ^[0-9]+$ ]] || MAX_FLAGS=0
+# How recent the statusline cache must be to count as live (see the
+# statusline block below); defined here because both that block and the
+# progress ledger read it.
+SL_MAX_AGE="${HANDOFF_CTX_SL_MAX_AGE_SECS:-900}"
+[[ "$SL_MAX_AGE" =~ ^[0-9]+$ ]] || SL_MAX_AGE=900
 
 # --- Bounded stdin read (issue #160). Canonical copy: read_hook_payload() in
 # bin/write_handoff.sh (rationale there); tests/test_stdin_readers_bounded.sh
@@ -338,9 +322,8 @@ session_id="$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)"
 # clean otherwise.
 [[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]] || exit 0
 
-# Payload `cwd`: second-rung anchor for the shared root resolver below, and
-# the primary key for the ~/.claude.json .projects lookup (Claude Code keys
-# .projects by LAUNCH cwd, not by git toplevel). Directory-validated.
+# Payload `cwd`: second-rung anchor for the shared root resolver below.
+# Directory-validated.
 payload_cwd="$(jq -r '.cwd // empty' <<<"$payload" 2>/dev/null || true)"
 [[ -n "$payload_cwd" && -d "$payload_cwd" ]] || payload_cwd=""
 
@@ -517,16 +500,114 @@ if [[ "${HANDOFF_CTX_NO_STATUSLINE:-0}" != "1" && -f "$sl_file" ]]; then
   # a frozen count forever while the Stop hook keeps measuring. If the tokens
   # file is absent, the sl cache wins outright. (Portable mtime: GNU stat -c
   # with BSD stat -f fallback, same idiom as handoff_turn_append.sh.) The
-  # cached pct is from the same payload snapshot, so it goes stale with it.
+  # cached pct is from the same payload snapshot, so it goes stale with it,
+  # and so does its window (PR #177 review: a kept window paired with a newer
+  # count from elsewhere printed 125%). The status line supplies both or
+  # neither.
   if [[ ( -n "$sl_tokens" || -n "$sl_pct" ) && -f "$tokens_file" ]]; then
     sl_mtime="$(stat -c %Y "$sl_file" 2>/dev/null || stat -f %m "$sl_file" 2>/dev/null || echo 0)"
     tk_mtime="$(stat -c %Y "$tokens_file" 2>/dev/null || stat -f %m "$tokens_file" 2>/dev/null || echo 0)"
     if [[ "$sl_mtime" =~ ^[0-9]+$ && "$tk_mtime" =~ ^[0-9]+$ ]] && (( sl_mtime < tk_mtime )); then
       sl_tokens=""
       sl_pct=""
+      sl_window=""
+    fi
+  fi
+  # Age horizon (issue #173): a statusLine that stopped rendering, or the
+  # desktop app (which never runs it) after a terminal session, leaves a
+  # frozen cache behind. Past HANDOFF_CTX_SL_MAX_AGE_SECS none of its numbers
+  # (tokens, pct, window) is treated as live, and the transcript measurement
+  # below takes over. 0 skips this check here (it then only disables the
+  # tokens ledger, as documented).
+  if [[ -n "$sl_tokens$sl_pct$sl_window" ]] && (( SL_MAX_AGE > 0 )); then
+    sl_age_mtime="$(stat -c %Y "$sl_file" 2>/dev/null || stat -f %m "$sl_file" 2>/dev/null || echo 0)"
+    sl_now="$(date +%s 2>/dev/null || echo 0)"
+    [[ "$sl_age_mtime" =~ ^[0-9]+$ ]] || sl_age_mtime=0
+    [[ "$sl_now" =~ ^[0-9]+$ ]] || sl_now=0
+    # An unreadable mtime (0) is treated as stale: fail quiet, not fail loud.
+    if ! (( sl_age_mtime > 0 && sl_now > 0 && sl_now-sl_age_mtime <= SL_MAX_AGE )); then
+      sl_tokens=""
+      sl_pct=""
+      sl_window=""
     fi
   fi
 fi
+
+# --- Transcript usage (issue #173) -------------------------------------------
+# With no live statusline number, measure the context straight from the
+# transcript instead of trusting a byte-size guess: the last main-chain
+# assistant line carrying message.usage gives input_tokens +
+# cache_read_input_tokens + cache_creation_input_tokens, which is the context
+# occupied at that turn (output_tokens is not part of it). Measured
+# 2026-11-09 on a real Claude Code transcript (5,054,004 bytes, 229 assistant
+# lines, one sessionId, no sidechain lines): last usage 32 + 181548 + 3063 =
+# 184,643 tokens, while bytes/4 would have said 1,263,501. Scoping rules, each
+# seen in real transcripts: a resumed transcript carries the earlier session's
+# lines under its own sessionId (only this session counts; an absent sessionId
+# counts as ours); "<synthetic>" API-error placeholders carry all-zero usage
+# and would read as an empty context; isSidechain lines are a subagent's own
+# context.
+#
+# Compaction (PR #177 review): Claude Code appends a "compact_boundary"
+# system line (it carries sessionId and isSidechain like any other line) and
+# writes no assistant usage until the next turn, so the last usage record is
+# the PRE-compact size. A usage line older than this session's last boundary
+# is therefore not a measurement. When the boundary is the newest relevant
+# line, nothing in the transcript measures the post-compact context, and
+# the byte size and the Stop hook's record are pre-compact too: tx_compacted
+# makes the hook stay silent until the next assistant turn, exactly as main
+# does once handoff_compact_reset.sh has cleared the ledger.
+#
+# Cost (PR #177 review: every usage line was parsed, 580 ms per prompt on a
+# 50 MB transcript): only the last 64 lines are read (`tail -n` seeks from
+# the end). Measured on macOS, 10 prompts each: 5 MB transcripts 64-67 ms per
+# prompt (main 58-63 ms), a 50 MB one with 40 KB lines 91 ms (main 62 ms).
+# Byte-bounded tails were slower: `tail -c 2097152` alone cost about 56 ms
+# per call, and 400 lines of 40 KB cost 209 ms. The whole file is scanned only
+# when those 64 lines hold no line of this session at all (a resumed
+# transcript whose current session ended earlier, a long sidechain run). The
+# model id on the measured line is the session's own model for the window
+# table further down.
+tx_tokens=""
+tx_model=""
+tx_compacted=0
+tx_scan() {  # <max lines> ; stdin: transcript. Prints the last "B" or "U<TAB>tokens<TAB>model".
+  LC_ALL=C grep -F -e '"usage"' -e 'compact_boundary' 2>/dev/null | tail -n "$1" \
+    | jq -rR --arg sid "$session_id" 'fromjson?
+        | select(.isSidechain != true and (.sessionId // $sid) == $sid)
+        | if (.type == "system" and .subtype == "compact_boundary") then "B"
+          elif (.type == "assistant" and .message.usage != null
+                and (.message.model // "") != "<synthetic>") then
+            [ "U",
+              ( (.message.usage.input_tokens // 0)
+                + (.message.usage.cache_read_input_tokens // 0)
+                + (.message.usage.cache_creation_input_tokens // 0) ),
+              (.message.model // "") ] | @tsv
+          else empty end' 2>/dev/null \
+    | grep -E $'^(B$|U\t[0-9]+\t)' | tail -n 1 || true
+}
+if [[ -z "$sl_tokens" ]]; then
+  tx_path="$(jq -r '.transcript_path // empty' <<<"$payload" 2>/dev/null || true)"
+  if [[ -n "$tx_path" && -f "$tx_path" && -r "$tx_path" ]]; then
+    tx_row="$(tail -n 64 "$tx_path" 2>/dev/null | tx_scan 64)"
+    # Nothing of this session in the last 64 candidate lines of the tail:
+    # widen to the whole file (resumed transcript, long sidechain run).
+    [[ -n "$tx_row" ]] || tx_row="$(tx_scan 1000000 < "$tx_path")"
+    if [[ "$tx_row" == "B" ]]; then
+      tx_compacted=1
+    elif [[ "$tx_row" == U$'\t'* ]]; then
+      tx_row="${tx_row#U$'\t'}"
+      tx_t="${tx_row%%$'\t'*}"
+      if [[ "$tx_t" =~ ^[0-9]+$ ]] && (( tx_t > 0 )); then
+        tx_tokens="$tx_t"
+        tx_model="${tx_row#*$'\t'}"
+      fi
+    fi
+  fi
+fi
+# Compacted with no post-compact measurement yet: every remaining number
+# (bytes, Stop-hook tokens) describes the pre-compact context. Silent.
+(( tx_compacted )) && exit 0
 
 # --- Progress ledger (issue #69) --------------------------------------------
 # Everything below — the nudge cooldown, the flag file, and the fences
@@ -549,7 +630,8 @@ fi
 #   bytes  — .ctx_<sid> present. IDENTICAL to the previous behavior in every
 #            respect: same numbers, same flag files, same cooldown semantics.
 #   tokens — .ctx_<sid> absent, but the statusline cache carries a usable token
-#            count AND is recent enough to still be live. Cooldowns are then
+#            count AND is recent enough to still be live, or (issue #173) the
+#            transcript's own usage record measured one. Cooldowns are then
 #            denominated in tokens, and the flag/fences ledgers use SEPARATE
 #            paths (.ctx_flagged_tok_/.fences_tok_) so a byte count and a token
 #            count can never be compared as if they were the same quantity.
@@ -565,26 +647,19 @@ fi
 # there is nothing to compare against, so a statusline that stopped rendering
 # would otherwise freeze a count and keep nudging off it forever. Hence an
 # absolute age horizon.
-SL_MAX_AGE="${HANDOFF_CTX_SL_MAX_AGE_SECS:-900}"
-[[ "$SL_MAX_AGE" =~ ^[0-9]+$ ]] || SL_MAX_AGE=900
-
 ledger="bytes"
 current_bytes=0
 if [[ -f "$size_file" ]]; then
   current_bytes="$(cat "$size_file" 2>/dev/null || echo 0)"
   [[ "$current_bytes" =~ ^[0-9]+$ ]] || exit 0
-elif [[ -n "$sl_tokens" ]] && (( sl_tokens > 0 )) && (( SL_MAX_AGE > 0 )); then
-  # Portable mtime, same GNU/BSD idiom as the freshness guard above. An
-  # unreadable mtime (0) is treated as stale — fail quiet, not fail loud.
-  sl_age_mtime="$(stat -c %Y "$sl_file" 2>/dev/null || stat -f %m "$sl_file" 2>/dev/null || echo 0)"
-  sl_now="$(date +%s 2>/dev/null || echo 0)"
-  [[ "$sl_age_mtime" =~ ^[0-9]+$ ]] || sl_age_mtime=0
-  [[ "$sl_now" =~ ^[0-9]+$ ]] || sl_now=0
-  if (( sl_age_mtime > 0 && sl_now > 0 && sl_now - sl_age_mtime <= SL_MAX_AGE )); then
-    ledger="tokens"
-  else
-    exit 0
-  fi
+elif (( SL_MAX_AGE > 0 )) && [[ -n "$sl_tokens" ]] && (( sl_tokens > 0 )); then
+  # sl_tokens survived the age horizon above, so it is live.
+  ledger="tokens"
+elif (( SL_MAX_AGE > 0 )) && [[ -n "$tx_tokens" ]]; then
+  # No Stop-hook byte count and no statusline, but the transcript itself
+  # says how full the context is (issue #173): a measurement, so it may
+  # drive the token ledger exactly like a statusline count.
+  ledger="tokens"
 else
   exit 0
 fi
@@ -593,7 +668,7 @@ fi
 # below measures growth in; the flag paths are disjoint per ledger so the two
 # numbering systems never meet in one file.
 if [[ "$ledger" == "tokens" ]]; then
-  progress="$sl_tokens"
+  progress="${sl_tokens:-$tx_tokens}"
   cooldown_units="${HANDOFF_CTX_COOLDOWN_TOKENS:-$((COOLDOWN_KB * 1024 / 4))}"
   [[ "$cooldown_units" =~ ^[0-9]+$ ]] || cooldown_units=$((COOLDOWN_KB * 1024 / 4))
   flag_file="$backup_dir/.ctx_flagged_tok_${session_id}"
@@ -606,9 +681,16 @@ if [[ "$ledger" == "tokens" ]]; then
   # clear it and let the next crossing be treated as unflagged. Byte path is
   # untouched: transcript bytes only grow, so this can't fire there.
   if [[ -f "$flag_file" ]]; then
+    # First field only: since issue #173 a line may carry "<progress> <step>".
+    # A line that carries a step is handled by the step cadence further down,
+    # which re-arms only after a full-step drop (PR #177 review: clearing the
+    # file here on any drop made 35, 34, 35, 34 fire every time).
     last_flagged_tok="$(tail -n 1 "$flag_file" 2>/dev/null || echo 0)"
+    tok_has_step=0
+    [[ "$last_flagged_tok" == *" "* ]] && tok_has_step=1
+    last_flagged_tok="${last_flagged_tok%% *}"
     [[ "$last_flagged_tok" =~ ^[0-9]+$ ]] || last_flagged_tok=0
-    if (( progress < last_flagged_tok )); then
+    if (( ! tok_has_step && progress < last_flagged_tok )); then
       rm -f -- "$flag_file" 2>/dev/null || true
     fi
   fi
@@ -697,186 +779,218 @@ elif (( FENCES_KB > 0 )) && [[ -f "$handoff_doc" ]] \
   fi
 fi
 
-# --- Window: explicit env wins; otherwise auto-detect.
-#
-#     Detection order:
-#       1. HANDOFF_CTX_WINDOW_TOKENS override (positive integer)   → as given
-#       2. .ctx_model_<session_id> recorded by the Stop hook — the session's
-#          OWN model, strictly better evidence than lastModelUsage:
-#          matches the 1M regex → 1M; valid but no match → 200k (still
-#          subject to the measured-tokens ratchet below).
-#       3. No model file (first prompt, or a stale Stop hook) — probe
-#          ~/.claude.json, where Claude Code stamps the active model
-#          (e.g. "claude-opus-4-7[1m]") into .projects[<cwd>].lastModelUsage:
-#          a. This project's lastModelUsage has a 1M-regex match → 1M
-#          b. This project's lastModelUsage exists but no match  → 200k
-#             (explicit signal that this project does NOT use 1M)
-#          c. This project's lastModelUsage missing/empty        → check
-#             globally: if ANY project has a matching model, treat the user
-#             as a 1M user → 1M; else → 200k. Handles renames (cwd changed,
-#             no usage yet) and fresh projects where the user is a 1M user
-#             but hasn't typed here yet.
-#
-# The regex is a POSIX ERE, used both with bash `=~` and jq `test()`; the
-# bash-escaped default passes through --arg with single backslashes, which is
-# exactly the ERE jq expects. See the header for what the default matches.
-ONE_M_MODEL_RE="${HANDOFF_CTX_1M_MODEL_REGEX:-\[1m\]|claude-(fable|mythos)-|claude-(opus|sonnet)-([5-9]|[1-9][0-9])}"
-window_tokens="${HANDOFF_CTX_WINDOW_TOKENS:-}"
-window_source="env"
-# A non-positive-integer override (0, negative, or garbage) would make the
-# threshold/pct arithmetic below divide by zero — fatal under `set -e`. Treat
-# any such value as unset and fall through to auto-detection. The regex test
-# short-circuits the `(( ))` so a non-numeric value never reaches arithmetic.
-if [[ ! "$window_tokens" =~ ^[0-9]+$ ]] || (( window_tokens == 0 )); then
-  window_source="auto"
-  window_tokens=200000
-  # window_detail records WHICH auto-detection step actually decided the
-  # window, so the emitted note can name its real source instead of always
-  # claiming "inferred from the model id" (issue: wrong wording off the
-  # happy path for claude.json / ratchet / no-evidence-at-all cases).
-  window_detail="default"
-  # Step 1.5: CC's OWN window from the statusline cache. This is authority,
-  # not inference — Claude Code reported context_window_size itself — so when
-  # present it wins over every probe below (which are all guesses from model
-  # ids) and the regex/jq steps are skipped entirely. The env pin above still
-  # beats it: the documented contract is that HANDOFF_CTX_WINDOW_TOKENS
-  # always wins (a user may pin a sub-1M budget on purpose).
-  if [[ -n "$sl_window" ]] && (( sl_window > 0 )); then
-    window_tokens="$sl_window"
-    window_source="statusline"
-  fi
-  if [[ "$window_source" != "statusline" ]]; then
-    # Step 2: the session's own recorded model. Charset-validated with the same
-    # guard the Stop hook applies before writing (ids can carry "[1m]"), so a
-    # tampered file degrades to "no model recorded" rather than being trusted.
-    session_model=""
-    model_charset_re='^[]A-Za-z0-9._[-]+$'
-    if [[ -f "$model_file" ]]; then
-      session_model="$(cat "$model_file" 2>/dev/null || true)"
-      [[ "$session_model" =~ $model_charset_re ]] || session_model=""
-    fi
-    if [[ -n "$session_model" ]]; then
-      window_detail="session_model"
-      if [[ "$session_model" =~ $ONE_M_MODEL_RE ]]; then
-        window_tokens=1000000
-      fi
-    elif [[ -f "$HOME/.claude.json" ]]; then
-      window_detail="claude_json"
-      # ~/.claude.json's .projects map is keyed by the LAUNCH cwd — the dir
-      # Claude Code was started from — not by the git toplevel this script
-      # resolves, so indexing with $repo_root missed the entry whenever the
-      # two differ (subdir launch, worktree). Key precedence mirrors the
-      # launch reality: the payload's cwd first (the actual session cwd),
-      # else CLAUDE_PROJECT_DIR, else the resolved root as a last resort.
-      # Each probe tries the key as-is AND its physical (pwd -P) form: on
-      # macOS case-aliasing filesystems ~/.claude.json accumulates both
-      # spellings of the same dir (~/Dev vs ~/dev), and symlinked launch
-      # paths record the logical form. Identical forms just probe twice,
-      # harmlessly.
-      claude_key="$payload_cwd"
-      if [[ -z "$claude_key" && -n "${CLAUDE_PROJECT_DIR:-}" && -d "${CLAUDE_PROJECT_DIR:-}" ]]; then
-        claude_key="$CLAUDE_PROJECT_DIR"
-      fi
-      [[ -n "$claude_key" ]] || claude_key="$repo_root"
-      claude_key_phys="$(cd "$claude_key" 2>/dev/null && pwd -P || printf '%s' "$claude_key")"
-      # Step 3a: per-project has a 1M-regex match. The two key forms' maps
-      # are MERGED (not //-short-circuited) so a k1 entry that exists but
-      # carries no lastModelUsage can't mask a populated k2 entry.
-      if jq -e --arg k1 "$claude_key" --arg k2 "$claude_key_phys" --arg re "$ONE_M_MODEL_RE" '
-            ((.projects[$k1].lastModelUsage // {}) + (.projects[$k2].lastModelUsage // {}))
-            | keys
-            | map(select(test($re)))
-            | length > 0
-          ' "$HOME/.claude.json" >/dev/null 2>&1; then
-        window_tokens=1000000
-      # Step 3b/3c: per-project missing or empty → fall back to global.
-      #          (jq returns true when lastModelUsage is null OR keys array is empty.)
-      elif jq -e --arg k1 "$claude_key" --arg k2 "$claude_key_phys" --arg re "$ONE_M_MODEL_RE" '
-            (((.projects[$k1].lastModelUsage // {}) + (.projects[$k2].lastModelUsage // {})) | keys | length) == 0
-            and
-            ([.projects[]?.lastModelUsage // {} | keys[]] | map(select(test($re))) | length > 0)
-          ' "$HOME/.claude.json" >/dev/null 2>&1; then
-        window_tokens=1000000
-      fi
-    fi
-  fi
-fi
-WINDOW_TOKENS="$window_tokens"
-
-# --- Tokens: statusline cache first (CC's own current_usage — same sum, but
-#     fresher: it updates mid-turn while the Stop hook only fires at turn
-#     end), then the Stop hook's measurement, then bytes/4. ---
-# token_source records which path won so the emitted reminder can say so. A
-# bytes/4 estimate runs high — transcript bytes include tool results, thinking
-# blocks, and reminder injections that aren't in the real context window — so a
-# reader must not treat an estimated pct as ground truth (this is the "reports
-# ~40% when /context shows ~9%" surprise). Both "statusline" and "measured"
-# are real measurements, so est_note stays empty for both and normal reminders
-# are byte-for-byte unchanged.
+# --- Tokens: what is in context right now, and where that number came from.
+#     Order (issue #173): the live statusline cache (Claude Code's own
+#     current_usage, updated mid-turn), then the transcript's last usage
+#     record (measured above), then the Stop hook's record of the same sum
+#     (.ctx_tokens_, written at turn end), and only then the bytes/4 guess,
+#     which is the LAST fallback and is labeled as such in the output: bytes
+#     include tool results, thinking blocks and reminder injections, so it
+#     runs high (the "reports ~40% when /context shows ~9%" surprise).
 est_tokens=0
-token_source="measured"
+token_source=""
 if [[ -n "$sl_tokens" ]] && (( sl_tokens > 0 )); then
   est_tokens="$sl_tokens"
   token_source="statusline"
+elif [[ -n "$tx_tokens" ]]; then
+  est_tokens="$tx_tokens"
+  token_source="transcript"
 elif [[ -f "$tokens_file" ]]; then
   est_tokens="$(cat "$tokens_file" 2>/dev/null || echo 0)"
   [[ "$est_tokens" =~ ^[0-9]+$ ]] || est_tokens=0
+  token_source="stophook"
 fi
 # The bytes/4 estimate exists only on the bytes ledger; on the tokens ledger
-# sl_tokens is non-zero by construction (it is what selected that ledger), so
-# est_tokens is already a real measurement and there is no byte count to
+# a real count is what selected the ledger, so there is no byte count to
 # estimate from.
 if (( est_tokens == 0 )) && [[ "$ledger" == "bytes" ]]; then
   est_tokens=$((current_bytes / 4))
   token_source="estimated"
 fi
-# Tokens-ledger only: sl_tokens is validated > 0 by construction (it is what
-# selected this ledger), so this is unreachable in practice, but it keeps the
-# tokens path from ever emitting on a zero measurement. The byte path has no
-# such guard on main and must not gain one here: a tiny (even zero-byte)
-# .ctx_<sid> with THRESHOLD_PCT=0 still emits, exactly as before #69.
+# Tokens-ledger only: unreachable in practice (a positive count selected the
+# ledger), but it keeps that path from ever emitting on a zero measurement.
+# The byte path has no such guard and must not gain one: a tiny (even
+# zero-byte) .ctx_<sid> with THRESHOLD_PCT=0 still emits, exactly as before #69.
 [[ "$ledger" == "tokens" ]] && (( est_tokens == 0 )) && exit 0
 
-# --- Ratchet: a MEASURED count above 200k tokens cannot fit a 200k window, so
-#     a smaller AUTO-DETECTED window is provably wrong (e.g. a 1M-native model
-#     the regex doesn't know yet). Widen to 1M; never narrow, never ratchet on
-#     the bytes/4 estimate (it routinely overshoots the real count), and never
-#     second-guess an explicit HANDOFF_CTX_WINDOW_TOKENS — a user may pin a
-#     sub-1M budget on purpose (e.g. to rehearse 200k behavior on a 1M tier),
-#     and the documented contract is that the env override always wins.
-#     A statusline-reported window is CC's own authority — never ratcheted
-#     (window_source "statusline" fails the "auto" check below); a statusline
-#     token count is a real measurement, so it MAY drive the ratchet when the
-#     window itself still came from auto-detection.
-if [[ "$window_source" == "auto" ]] \
-   && [[ "$token_source" == "measured" || "$token_source" == "statusline" ]] \
-   && (( est_tokens > 200000 && WINDOW_TOKENS < 1000000 )); then
-  WINDOW_TOKENS=1000000
-  # The ratchet is what actually decided the window here, not the model-id
-  # guess that picked the pre-ratchet value: name it accurately below.
-  window_detail="ratchet"
+# --- Window: how big the context is, and where that number came from.
+#
+#     Order (issue #173). A percentage is only ever computed against one of
+#     these; when none applies the window is UNKNOWN, the reminder says so
+#     and prints no percentage, and the absolute HANDOFF_CTX_THRESHOLD_TOKENS
+#     gate drives the nudge instead. The old chain guessed (a 200k default,
+#     another project's lastModelUsage in ~/.claude.json, a broad model-id
+#     regex, a >200k "ratchet" to 1M) and printed the result as if it were a
+#     reading: with Opus it "looks wrong all the time".
+#       1. HANDOFF_CTX_WINDOW_TOKENS (positive integer): the user's own
+#          number, so it wins, as documented since the knob existed (a user
+#          may pin a sub-1M budget on purpose).
+#       2. The statusline cache's window= (Claude Code's own
+#          context_window_size), while the cache is live.
+#       3. The session's own model id (the transcript line measured above,
+#          else the Stop hook's .ctx_model_): a "[1m]" suffix means 1M; a
+#          match for HANDOFF_CTX_1M_MODEL_REGEX (only when the user set it)
+#          means 1M; otherwise the table below.
+#       4. Otherwise: unknown.
+window_tokens=""
+window_source="unknown"
+window_unknown_why=""
+session_model=""
+# ':' and '@' are in the charset for provider id shapes (Bedrock
+# "anthropic.claude-opus-4-8-v1:0", Vertex "claude-opus-4-8@20260101").
+model_charset_re='^[]A-Za-z0-9._:@[-]+$'
+model_present=0
+env_window="${HANDOFF_CTX_WINDOW_TOKENS:-}"
+# A non-positive-integer override (0, negative, or garbage) would make the
+# pct arithmetic below divide by zero, fatal under `set -e`. Treat any such
+# value as unset. The regex test short-circuits the `(( ))` so a non-numeric
+# value never reaches arithmetic.
+if [[ "$env_window" =~ ^[0-9]+$ ]] && (( env_window > 0 )); then
+  window_tokens="$env_window"
+  window_source="env"
+elif [[ -n "$sl_window" ]] && (( sl_window > 0 )); then
+  window_tokens="$sl_window"
+  window_source="statusline"
+else
+  # Charset-validated (ids can carry "[1m]"), so a tampered value is never
+  # printed or trusted. An id that is present but fails the charset is still
+  # reported as present (PR #177 review: it used to say "no model id
+  # recorded").
+  if [[ -n "$tx_model" ]]; then
+    model_present=1
+    [[ "$tx_model" =~ $model_charset_re ]] && session_model="$tx_model"
+  elif [[ -f "$model_file" ]]; then
+    session_model="$(cat "$model_file" 2>/dev/null || true)"
+    [[ -n "$session_model" ]] && model_present=1
+    [[ "$session_model" =~ $model_charset_re ]] || session_model=""
+  fi
+  if [[ -z "$session_model" ]] && (( model_present )); then
+    window_unknown_why="the recorded model id is not in this hook's model table (it has characters this hook will not print)"
+  elif [[ -z "$session_model" ]]; then
+    window_unknown_why="no status line, no HANDOFF_CTX_WINDOW_TOKENS, no model id recorded"
+  elif [[ "$session_model" == *"[1m]"* ]]; then
+    window_tokens=1000000
+    window_source="model_1m"
+  elif [[ -n "${HANDOFF_CTX_1M_MODEL_REGEX:-}" ]] \
+       && [[ "$session_model" =~ ${HANDOFF_CTX_1M_MODEL_REGEX} ]]; then
+    window_tokens=1000000
+    window_source="model_regex"
+  else
+    # Model table, checked 2026-11-09 against:
+    #   https://platform.claude.com/docs/en/about-claude/models/overview
+    #   https://platform.claude.com/docs/en/build-with-claude/context-windows
+    #   https://code.claude.com/docs/en/model-config
+    # 1M by default with no suffix (API docs; Claude Code: "Fable 5.1, Fable
+    # 5, Sonnet 5 and later, Haiku 5.5, and Opus 4.7 and later run with the
+    # 1M window by default"): Fable 5.1/5, Mythos 5.1/5/Preview, Opus 5.5/5/
+    # 4.8/4.7, Sonnet 5.5/5, Haiku 5.5. 200k: Opus 4.5, Sonnet 4.5, Haiku
+    # 4.5. Opus 4.6 and Sonnet 4.6 are deliberately NOT listed: in Claude
+    # Code they run at 200k unless the "[1m]" variant was picked, and the
+    # transcript's model id never carries that suffix (measured 2026-11-09:
+    # 0 of 53,604 assistant lines across 400 local transcripts), so the id
+    # alone cannot tell. CLAUDE_CODE_DISABLE_1M_CONTEXT=1 makes Claude Code
+    # treat the 1M-default models as 200k, so the table follows it.
+    #
+    # Matching is ANCHORED to the listed family and version (PR #177 review:
+    # substring globs gave 1M to unlisted ids such as claude-opus-5-1,
+    # claude-sonnet-5-9 and claude-opus-50). Accepted around a listed id: a
+    # provider prefix ending in "anthropic." ("us.anthropic.", Bedrock), a
+    # "-YYYYMMDD" snapshot date, a Bedrock "-vN" or "-vN:M" suffix and a
+    # Vertex "@..." suffix. A model not listed is UNKNOWN, never assumed:
+    # add it here once the docs list it.
+    tbl=""
+    model_base="$session_model"
+    if [[ "$model_base" =~ ^([a-z0-9-]+\.)*anthropic\.(.+)$ ]]; then
+      model_base="${BASH_REMATCH[2]}"
+    fi
+    model_base="${model_base%%@*}"
+    if [[ "$model_base" =~ ^(.+)-v[0-9]+(:[0-9]+)?$ ]]; then
+      model_base="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$model_base" =~ ^(.+)-[0-9]{8}$ ]]; then
+      model_base="${BASH_REMATCH[1]}"
+    fi
+    case "$model_base" in
+      claude-fable-5-1|claude-fable-5|claude-mythos-5-1|claude-mythos-5|claude-mythos-preview|\
+      claude-opus-5-5|claude-opus-5|claude-opus-4-8|claude-opus-4-7|\
+      claude-sonnet-5-5|claude-sonnet-5|claude-haiku-5-5)
+        tbl=1000000
+        [[ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-}" == "1" ]] && tbl=200000
+        ;;
+      claude-opus-4-6|claude-sonnet-4-6)
+        window_unknown_why="model id ${session_model} runs at 200k or 1M depending on whether its [1m] variant was picked, which the id does not record" ;;
+      claude-opus-4-5|claude-sonnet-4-5|claude-haiku-4-5)
+        tbl=200000 ;;
+      *)
+        window_unknown_why="model id ${session_model} is not in this hook's model table" ;;
+    esac
+    if [[ -n "$tbl" ]]; then
+      window_tokens="$tbl"
+      window_source="model_table"
+    fi
+  fi
+fi
+# A MEASURED count above an inferred window proves the inference wrong (the
+# old code "ratcheted" to 1M here, which was just another guess). Say unknown.
+# Never second-guess the env pin or Claude Code's own window, and never act
+# on the bytes/4 estimate, which routinely overshoots.
+if [[ "$window_source" == model_* && "$token_source" != "estimated" ]] \
+   && (( est_tokens > window_tokens )); then
+  window_unknown_why="measured ${est_tokens} tokens exceed the ${window_tokens}-token window listed for ${session_model}"
+  window_tokens=""
+  window_source="unknown"
 fi
 
-# --- Threshold check: first gate reached wins (issue #119) ---
-# The percentage gate scales with the window; the absolute gate does not. A
-# 1M window at 40% is 400k tokens, far past the point where summary quality
-# has already degraded, so the absolute gate (default 100k) fires first there
-# while a 200k window still hits its 80k percentage gate first. Ties and
-# THRESHOLD_TOKENS=0 keep the percentage rule, so every pinned-window test
-# contract (window 1000 -> gate 400) is byte-for-byte unchanged.
-threshold_tokens=$((WINDOW_TOKENS * THRESHOLD_PCT / 100))
-if (( THRESHOLD_TOKENS > 0 && THRESHOLD_TOKENS < threshold_tokens )); then
-  threshold_tokens="$THRESHOLD_TOKENS"
+# --- Gate and cadence (issue #173) -------------------------------------------
+# Window known: the first nudge comes at THRESHOLD_PCT (default 30) and then
+# one more each time usage reaches the next STEP_PCT (default 5) step above
+# it: 30, 35, 40, ... The absolute THRESHOLD_TOKENS gate does NOT apply, so a
+# 1M window no longer nudges at 10% (issue #119's 100k gate fired first
+# there). Window unknown: no percentage exists, so THRESHOLD_TOKENS (default
+# 100000) is the gate and the KB/token cooldown spaces the re-flags, as
+# before. Claude Code's own used_percentage is the figure whenever it is live
+# and the window was not pinned by the user (a pin is a different budget, so
+# CC's pct would contradict it).
+pct=""
+pct_from_sl=0
+if [[ "$window_source" != "env" && -n "$sl_pct" ]]; then
+  # A live used_percentage is a reading even when the cache carried no
+  # window= (the size is then unreported, but the fraction is not a guess).
+  pct="${sl_pct%%.*}"
+  pct_from_sl=1
+elif [[ -n "$window_tokens" ]]; then
+  pct=$((est_tokens * 100 / window_tokens))
 fi
-if (( est_tokens < threshold_tokens )); then
-  exit 0
+# Never print a percentage above 100 (PR #177 review: bytes/4 printed 126%
+# and 631%, an env pin 125%). A count above the window is reported as such
+# with no percentage; internally it gates and steps as 100.
+pct_over=0
+if [[ -n "$pct" ]] && (( pct > 100 )); then
+  pct_over=1
+  pct=100
+fi
+if [[ -n "$pct" ]]; then
+  (( pct < THRESHOLD_PCT )) && exit 0
+  # The step this reading sits on: THRESHOLD_PCT + k * STEP_PCT.
+  if (( STEP_PCT > 0 )); then
+    cur_step=$(( THRESHOLD_PCT + (pct-THRESHOLD_PCT) / STEP_PCT * STEP_PCT ))
+  else
+    cur_step="$THRESHOLD_PCT"
+  fi
+else
+  (( THRESHOLD_TOKENS == 0 )) && exit 0
+  (( est_tokens < THRESHOLD_TOKENS )) && exit 0
+  cur_step=""
 fi
 
-# --- Per-session cap + cooldown.
+# --- Per-session cap + cadence.
 #     flag_file holds one line per flag emitted this session: its line count is
-#     how many times we've flagged, its last line is the byte size at the most
-#     recent flag. The first crossing always fires (no prior flag); subsequent
-#     ones are gated by (a) the MAX_FLAGS cap and (b) the cooldown growth.
+#     how many times we've flagged. Each line is "<progress>" (window unknown)
+#     or "<progress> <step>" (window known), so the step ledger lives in the
+#     same per-session file as the cooldown ledger, never a second one. The
+#     first crossing always fires (no prior flag); later ones are gated by the
+#     MAX_FLAGS cap and then by the step (window known) or the cooldown growth
+#     (window unknown, or a prior line with no step to compare against).
 flag_count=0
 if [[ -f "$flag_file" ]]; then
   flag_count="$(grep -c '' "$flag_file" 2>/dev/null || echo 0)"
@@ -885,151 +999,143 @@ if [[ -f "$flag_file" ]]; then
   if (( MAX_FLAGS > 0 && flag_count >= MAX_FLAGS )); then
     exit 0
   fi
-  last_flagged="$(tail -n 1 "$flag_file" 2>/dev/null || echo 0)"
+  last_line="$(tail -n 1 "$flag_file" 2>/dev/null || echo 0)"
+  last_flagged="${last_line%% *}"
+  last_step=""
+  [[ "$last_line" == *" "* ]] && last_step="${last_line##* }"
   [[ "$last_flagged" =~ ^[0-9]+$ ]] || last_flagged=0
-  if (( progress < last_flagged + cooldown_units )); then
+  [[ "$last_step" =~ ^[0-9]+$ ]] || last_step=""
+  if [[ -n "$cur_step" && -n "$last_step" ]]; then
+    # Same step as the last nudge: wait for the next one. A lower reading
+    # re-arms only once it is a full STEP_PCT below the last flagged step (a
+    # compaction drop qualifies): PR #177 review, 35, 34, 35, 34, 35 fired
+    # five times when any drop re-armed.
+    (( cur_step == last_step )) && exit 0
+    if (( cur_step < last_step )); then
+      rearm_step="$STEP_PCT"
+      (( rearm_step > 0 )) || rearm_step=1
+      rearm_floor=$(( last_step-rearm_step ))
+      (( pct > rearm_floor )) && exit 0
+    fi
+  elif [[ "$ledger" == "tokens" ]] && (( progress < last_flagged )); then
+    # Token occupancy dropped below the last flag (compaction): the cooldown
+    # ledger is stale, so this crossing counts as fresh (see the tokens-ledger
+    # note above; there the file is cleared for step-less lines only).
+    :
+  elif (( progress < last_flagged + cooldown_units )); then
     exit 0
   fi
 fi
 
 # --- Compose and emit the system-reminder ---
-# Which percentage to report. Claude Code's own used_percentage is the ground
-# truth, so it wins whenever it is fresh AND the window was not pinned by the
-# user (window_source != "env": both "auto" and "statusline" defer to it). An
-# env pin means the user chose a different budget, so CC's pct would
-# contradict it.
-# Otherwise we compute tokens/window; when that window was merely INFERRED from
-# the model id, the reminder says so. That is the normal case in the desktop
-# app: it does not run the statusLine, the only place Claude Code exposes
-# context_window to scripts, and a stale model list there once made a 1M
-# session report 47% at 94,637 tokens. A guess must never read as a measurement.
-# window_reason names the actual auto-detection source recorded above
-# (window_detail), so the note below never claims "inferred from the model
-# id" for a window that really came from ~/.claude.json, the >200k ratchet,
-# or no evidence at all.
-window_reason=""
-case "${window_detail:-default}" in
-  session_model)
-    window_reason="inferred from the model id (${session_model:-not recorded})" ;;
-  claude_json)
-    window_reason="inferred from the model recorded for this project in ~/.claude.json (lastModelUsage), because no model id was recorded for this session" ;;
-  ratchet)
-    # Pre-ratchet WINDOW_TOKENS is always 200000 in the auto path (every
-    # non-1M detection step, including the model-id and claude.json steps,
-    # picks that same value) but NOT always because no model id was found:
-    # say "the 200k window auto-detection had picked", never "default" -
-    # the pre-ratchet source may have been the session's own model id.
-    window_reason="widened from the 200k window auto-detection had picked, because measured usage exceeded 200,000 tokens, which a 200k window cannot fit (a 1M-native model auto-detection did not otherwise recognize)" ;;
-  *)
-    window_reason="a default (no model id was recorded for this session and ~/.claude.json had no usable lastModelUsage)" ;;
+# One line that says what was measured, against what window, and where each
+# number came from (the owner's complaint in #173 was a percentage that
+# "looks wrong all the time" with no way to tell why).
+case "$token_source" in
+  statusline) tok_src="status line" ;;
+  transcript) tok_src="measured from the transcript's last usage record" ;;
+  stophook)   tok_src="measured by the Stop hook at the end of the last turn" ;;
+  *)          tok_src="ESTIMATED from transcript byte size (bytes/4), the last fallback when no usage record exists; it runs high, treat it as a rough upper bound" ;;
 esac
-pct_label=""
-window_note=""
-# The cached pct is Claude Code's own context_window.used_percentage: use it
-# whenever it is fresh and valid, even when the cache carries no window= (a
-# pct-only cache previously fell through to a computed "~0% (estimated)" and
-# wrongly claimed used_percentage had not reached the hook). Only an explicit
-# HANDOFF_CTX_WINDOW_TOKENS pin (window_source == "env") overrides it, per the
-# documented contract that the env override always wins.
-if [[ "$window_source" != "env" && -n "$sl_pct" ]]; then
-  pct="${sl_pct%%.*}"
-  if [[ "$window_source" == "auto" ]]; then
-    window_note=" NOTE: the ${WINDOW_TOKENS}-token window was ${window_reason}. The percentage above is Claude Code's own context_window.used_percentage, not an estimate."
-  fi
+case "$window_source" in
+  env)         win_src="from HANDOFF_CTX_WINDOW_TOKENS" ;;
+  statusline)  win_src="from the status line's context_window_size" ;;
+  model_1m)    win_src="from the [1m] suffix of model id ${session_model}" ;;
+  model_regex) win_src="model id ${session_model} matches HANDOFF_CTX_1M_MODEL_REGEX" ;;
+  model_table) win_src="from this hook's model table for ${session_model}" ;;
+  *)           win_src="" ;;
+esac
+if (( pct_from_sl )); then
+  pct_src="Claude Code's own used_percentage"
 else
-  pct=$((est_tokens * 100 / WINDOW_TOKENS))
-  if [[ "$window_source" == "auto" ]]; then
-    pct_label=" (estimated)"
-    window_note=" NOTE: this percentage is an ESTIMATE: the ${WINDOW_TOKENS}-token window was ${window_reason}, because Claude Code's own context_window.used_percentage has not reached this hook (the status line, its only source for hooks, has not reported for this session; the desktop app does not run it). Say it is an estimate when you mention it."
-  fi
+  pct_src="tokens / window"
 fi
 
 # The re-fire wording must match what will actually happen. With a finite cap
-# about to be reached — and the default suggest-mode MAX_FLAGS=1 means the
-# very FIRST nudge is also the last — promising a cooldown-spaced repeat would
-# be false: the docs used to make that promise and a user who ignored the
-# single nudge waited for a second warning that never came. (audit 2026-07-17)
+# about to be reached, promising a repeat would be false: a user who ignored
+# the last nudge would wait for one that never comes. (audit 2026-07-17)
 if (( MAX_FLAGS > 0 && flag_count + 1 >= MAX_FLAGS )); then
   repeat_note="Automatic-nudge cap reached (HANDOFF_CTX_MAX_FLAGS=${MAX_FLAGS}): this reminder will not re-fire this session."
+elif (( pct_over )); then
+  repeat_note="This reminder re-fires only after usage drops and crosses a step again."
+elif [[ -n "$cur_step" ]] && (( STEP_PCT > 0 )); then
+  repeat_note="Next reminder at ${cur_step}% + ${STEP_PCT} = $((cur_step + STEP_PCT))%."
+elif [[ -n "$cur_step" ]]; then
+  repeat_note="This reminder will not re-fire unless usage drops and crosses ${THRESHOLD_PCT}% again (HANDOFF_CTX_STEP_PCT=0)."
+elif [[ "$ledger" == "tokens" ]]; then
+  repeat_note="This reminder will not re-fire for at least another ${cooldown_units} tokens of context growth."
 else
-  if [[ "$ledger" == "tokens" ]]; then
-    repeat_note="This reminder will not re-fire for at least another ${cooldown_units} tokens of context growth."
-  else
-    repeat_note="This reminder will not re-fire for at least another ${COOLDOWN_KB}KB of transcript growth."
-  fi
-fi
-
-# On the bytes/4 fallback, mark the figure as an estimate so a reader (and the
-# model acting on this reminder) knows the pct is a rough upper bound, not the
-# measured /context value. Empty in the measured path -> reminders unchanged.
-if [[ "$token_source" == "estimated" ]]; then
-  est_note=' NOTE: this figure is ESTIMATED from transcript byte size (bytes/4), not a measured token count — the per-turn Stop hook has not recorded real usage for this session (it may be uninstalled, stale from an upgrade, or this is the first turn). The byte estimate typically runs high, so the true percentage is likely lower; treat it as a rough upper bound.'
-else
-  est_note=''
+  repeat_note="This reminder will not re-fire for at least another ${COOLDOWN_KB}KB of transcript growth."
 fi
 
 # --- Desktop mode (issue #144) ---
 # In the Claude desktop app the hook environment carries
 # CLAUDE_CODE_ENTRYPOINT=claude-desktop, and the app displays the real context
-# figure in its own meter. The status line does not run there, so without a
-# cached pct every percentage this hook could print is inferred from a model-id
-# window guess, which the app's meter already contradicts or confirms on
-# screen. Measured 2026-10-27: "~10% (estimated) of a 1000000-token window"
-# plus a 60-word NOTE, beside a visible app meter. So in that situation the
-# reminder carries the token count only and points the model at the meter.
-# Conditions, each of which keeps the percentage path when it fails:
-#   - entrypoint is the desktop app (a terminal session never changes);
-#   - no fresh statusline pct (someone may wire a statusLine in the app, and
-#     CC's own used_percentage is then authoritative, exactly as today);
-#   - the window was neither pinned by HANDOFF_CTX_WINDOW_TOKENS (a pin is the
-#     user's own number, and the pct against it is what they asked for) nor
-#     read from a statusline cache (CC's own context_window_size is a measured
-#     window, so a pct against it is not a guess even without pct= in the
-#     cache); only a window INFERRED by the auto path qualifies;
-#   - HANDOFF_CTX_NO_DESKTOP_MODE is not 1 (the escape hatch).
-# Threshold, cooldown, cap and flag recording above are untouched: only the
-# wording of the emitted reminder differs. The terminal-session strings below
-# are assembled from the same pieces as before, so that path is byte-identical.
+# figure in its own meter. The status line does not run there. Issue #144
+# hid the percentage in the app because the window was then a guess from the
+# model id, which the app's meter contradicted on screen. Since PR #177 the
+# window comes from a docs-checked model table (or is reported as unknown),
+# and the owner's cadence is percentage-based (30%, then every 5 points), so
+# hiding the percentage would hide the cadence: the app now gets the same
+# line as a terminal, plus one sentence that the app's own meter is the
+# authoritative figure. Conditions for that sentence:
+#   * entrypoint is the desktop app (a terminal session never changes);
+#   * no live statusline pct (CC's own used_percentage is authoritative);
+#   * the window was neither pinned by HANDOFF_CTX_WINDOW_TOKENS nor read
+#     from a statusline cache: only a model-id window, or an unknown one,
+#     qualifies;
+#   * HANDOFF_CTX_NO_DESKTOP_MODE is not 1 (the escape hatch).
+# Gate, cadence, cap and flag recording above are untouched: only the
+# appended sentence differs.
 desktop_mode=0
 if [[ "${CLAUDE_CODE_ENTRYPOINT:-}" == "claude-desktop" ]] \
-   && [[ -z "$sl_pct" && "$window_source" == "auto" ]] \
+   && [[ -z "$sl_pct" && "$window_source" != "env" && "$window_source" != "statusline" ]] \
    && [[ "${HANDOFF_CTX_NO_DESKTOP_MODE:-0}" != "1" ]]; then
   desktop_mode=1
 fi
-if (( desktop_mode )); then
-  # One sentence: the long form explains a percentage this reminder no longer
-  # prints, and the bytes/4 caveat still matters because the app meter shows a
-  # token figure that the estimate will overshoot.
-  if [[ "$token_source" == "estimated" ]]; then
-    est_note=' NOTE: this token figure is ESTIMATED from transcript byte size (bytes/4), not a measured count, and typically runs high.'
+if (( pct_over )) && [[ "$token_source" == "estimated" ]]; then
+  ctx_head="Context at ~${est_tokens} tokens (${tok_src}), at or above the ${window_tokens}-token window (${win_src}), so no percentage is given."
+  flag_example="about ${est_tokens} tokens of context used (an estimate), at or above the ${window_tokens}-token window"
+elif (( pct_over )); then
+  if [[ "$window_source" == "env" ]]; then
+    over_what="the ${window_tokens}-token window pinned by HANDOFF_CTX_WINDOW_TOKENS"
+  else
+    over_what="the ${window_tokens}-token window (${win_src})"
   fi
-  ctx_head="Context at ~${est_tokens} tokens.${est_note} The desktop app's own context meter is the authoritative figure for how full the window is: refer to it rather than inferring a percentage."
-  flag_example="about ${est_tokens} tokens of context used (see the app's context meter)"
-  late_compare="waiting until the meter is nearly full"
+  ctx_head="Context at ~${est_tokens} tokens (${tok_src}): the measured count exceeds ${over_what}, so no percentage is given."
+  flag_example="about ${est_tokens} tokens of context used, more than ${over_what}"
+elif [[ -n "$pct" && -n "$window_tokens" ]]; then
+  ctx_head="Context at ~${est_tokens} tokens (${tok_src}), ~${pct}% of a ${window_tokens}-token window (${win_src}; percentage is ${pct_src})."
+  flag_example="~${pct}% of context used (${window_tokens}-token window ${win_src})"
+elif [[ -n "$pct" ]]; then
+  ctx_head="Context at ~${est_tokens} tokens (${tok_src}), ~${pct}% used (${pct_src}; the window size was not reported)."
+  flag_example="~${pct}% of context used (Claude Code's own figure)"
 else
-  ctx_head="Context at ~${est_tokens} tokens (~${pct}%${pct_label} of a ${WINDOW_TOKENS}-token window).${est_note}${window_note}"
-  flag_example="~${pct}%${pct_label} of context used"
-  late_compare="at 5%"
+  ctx_head="Context at ~${est_tokens} tokens (${tok_src}); window unknown (${window_unknown_why}), so no percentage is given."
+  flag_example="about ${est_tokens} tokens of context used, window unknown"
+fi
+if (( desktop_mode )); then
+  ctx_head="${ctx_head} The desktop app's own context meter is the authoritative figure for how full the window is."
 fi
 
 case "$REMINDER_MODE" in
   act)
-    cat <<EOF
+    cat <<EOT
 <system-reminder>
-${ctx_head} This is your /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than waiting. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself; do not ask the user "want me to?" and do not pause to discuss. The model acts on this signal directly. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary; do not start a long new track at this context level. ${repeat_note}
+${ctx_head} This is your /handoff window. Action: finish the current logical step (in-flight edit, tool sequence, pending commit) and then invoke /handoff yourself; do not ask the user "want me to?" and do not pause to discuss. If you are already at a clean boundary, /handoff now. If the user's most recent prompt is genuinely a new track that needs an answer first, answer it briefly and then /handoff at the next boundary. ${repeat_note}
 </system-reminder>
-EOF
+EOT
     ;;
   *)
-    cat <<EOF
+    cat <<EOT
 <system-reminder>
-${ctx_head} This is the documented /handoff window: quality degrades before the meter runs out, so capturing the prose now is more reliable than ${late_compare}. Flag to the user as a passive mention: no question mark, no "want me to?". One line, e.g. "Flagging: ${flag_example}: natural /handoff moment if you want to lock in the prose while I'm still sharp." ${repeat_note}
+${ctx_head} This is the /handoff window: flag it to the user as a passive mention: no question mark, no "want me to?". One line, e.g. "Flagging: ${flag_example}: natural /handoff moment." ${repeat_note}
 </system-reminder>
-EOF
+EOT
     ;;
 esac
 
-# --- Record this flag (append one line) so the cap + cooldown see it next
+# --- Record this flag (append one line) so the cap + cadence see it next
 #     prompt. UserPromptSubmit hooks run serially per session, so a plain append
 #     is safe here (no concurrent writers like the Stop hook). Refuse a planted
 #     symlink at the flag path, matching the Stop hook's dump guard.
@@ -1041,7 +1147,11 @@ if [[ ! -L "$flag_file" ]]; then
   if [[ -s "$flag_file" ]] && [[ "$(tail -c1 "$flag_file" | wc -l)" -eq 0 ]]; then
     printf '\n' >> "$flag_file"
   fi
-  printf '%s\n' "$progress" >> "$flag_file"
+  if [[ -n "$cur_step" ]]; then
+    printf '%s %s\n' "$progress" "$cur_step" >> "$flag_file"
+  else
+    printf '%s\n' "$progress" >> "$flag_file"
+  fi
 fi
 
 exit 0

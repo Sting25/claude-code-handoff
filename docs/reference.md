@@ -120,59 +120,97 @@ The `Stop` hook does two jobs each assistant turn:
    turn's model id into `.ctx_model_<session_id>`, and the transcript
    JSONL byte size into `.ctx_<session_id>` as a fallback.
 
-The `UserPromptSubmit` hook reads those on the next prompt
-and, if usage has crossed the nudge threshold: `HANDOFF_CTX_THRESHOLD_TOKENS`
-(default 100,000 tokens) or `HANDOFF_CTX_THRESHOLD_PCT` (default 40%) of
-the configured context window, whichever is reached first. The absolute
-gate exists because 40% of a 1M window is 400k tokens, long past the
-point where summary quality has degraded (issue #119); on a 200k window
-the 40% gate (80k) still fires first, so nothing changes there. Set
-`HANDOFF_CTX_THRESHOLD_TOKENS=0` to keep the pure percentage rule. The
-window is auto-detected (as 1,000,000 tokens if the session's recorded model
-matches the 1M-model regex — the `[1m]` beta suffix or a 1M-native
-Claude 5 family id, extendable via `HANDOFF_CTX_1M_MODEL_REGEX` —
-else 200,000, falling back to `~/.claude.json` when no model is
-recorded yet), injects a
+The `UserPromptSubmit` hook reads those on the next prompt, measures how
+full the context is, and once usage crosses the nudge threshold injects a
 `<system-reminder>` telling the assistant to flag this passively as
 a natural `/handoff` moment. That's how the assistant knows to
 mention it without you having to glance at the meter. The nudge is
-advisory — Claude Code can't force a session restart at a context
+advisory: Claude Code can't force a session restart at a context
 threshold, so the human keystroke is still required.
 
-When the [status line](#status-line) is wired, the hook prefers
-Claude Code's **own** window and usage numbers (cached from the
-statusLine payload) over the model-regex auto-detection — the env
-pin `HANDOFF_CTX_WINDOW_TOKENS` still overrides everything, and
-`HANDOFF_CTX_NO_STATUSLINE=1` restores the regex-only chain.
+**Cadence.** The first nudge comes at `HANDOFF_CTX_THRESHOLD_PCT` (default
+30%) of the context window, then one more each time usage reaches the next
+`HANDOFF_CTX_STEP_PCT` step (default 5 points): 30%, 35%, 40%, and so on
+for as long as the session runs. There is no per-session cap by default;
+`HANDOFF_CTX_MAX_FLAGS=1` restores the old one-nudge-per-session behavior.
+A lower reading re-arms a step only once it is a full step below the last
+one flagged (a compaction qualifies), so usage wobbling around 35% does not
+fire on every prompt.
 
-The percentage in the reminder is Claude Code's own
-`context_window.used_percentage` whenever the status line has cached a
-valid reading (0-100; a stale or malformed value above 100 is treated as
-absent) and no `HANDOFF_CTX_WINDOW_TOKENS` pin is set: this applies even
-when the cache has a percentage but no window size. Without a cached
-percentage, the hook computes tokens / window, and if that window was
-only auto-detected (from the session's model id, from `~/.claude.json`,
-or widened by the >200k-token ratchet), the reminder labels the figure
-"(estimated)" and names the actual source it came from.
+**Usage.** The token count comes, in order, from the live status line
+cache; from the transcript itself (the last assistant line of this session
+with a `usage` record: `input_tokens + cache_read_input_tokens +
+cache_creation_input_tokens`, which is the context occupied at that turn;
+lines from an earlier session in a resumed transcript, subagent sidechain
+lines, `<synthetic>` placeholders and anything older than this session's
+last `compact_boundary` are skipped); from the Stop hook's
+record of the same sum; and only as the last fallback from transcript bytes
+divided by 4, which runs high and is labeled as an estimate. No percentage
+above 100 is ever printed: a count above the window is reported as at or
+above it.
 
-The desktop app is the usual case for a missing cached percentage: it
-does not run the status line, and Claude Code exposes `context_window`
-to hooks only through it. The app does, however, show the real figure in
-its own context meter, so printing an inferred percentage there repeats
-a number the user can already see, with a long note explaining it is a
-guess. The hook therefore runs in **desktop mode** when the hook
-environment carries `CLAUDE_CODE_ENTRYPOINT=claude-desktop` (the app
-sets it, together with `CLAUDE_CODE_DESKTOP_APP_VERSION`), no fresh
-cached percentage exists, and `HANDOFF_CTX_WINDOW_TOKENS` is not
-pinned: the reminder reports the token count only, says the app's
-context meter is the authoritative figure, and drops the inferred
-percentage and its window note (the bytes/4 caveat stays, as one
-sentence, when the count itself is an estimate). The threshold, cooldown
-and cap logic are unchanged, so the nudge fires at the same point. A
-status line wired by hand in the app still wins: with a fresh cached
-percentage the normal wording returns. `HANDOFF_CTX_NO_DESKTOP_MODE=1`
-restores the inferred percentage in the app. Terminal sessions never
-enter desktop mode and are unchanged.
+**Window.** The window size comes from `HANDOFF_CTX_WINDOW_TOKENS` when
+set, else from the status line's `context_window_size` while that cache is
+live, else from the session's own model id: a `[1m]` suffix means 1M, an id
+matching `HANDOFF_CTX_1M_MODEL_REGEX` (if you set it) means 1M, and
+otherwise a built-in table checked against the model docs decides (Claude
+5 family models and Opus 4.7 and later: 1M; 4.5 models: 200k;
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` is honored). Opus 4.6 and Sonnet 4.6 run
+at 200k or 1M depending on the variant picked, which the model id does not
+record, so they are not in the table. When nothing applies, the window is
+**unknown**: the reminder says so, prints no percentage, and the absolute
+`HANDOFF_CTX_THRESHOLD_TOKENS` gate (default 100,000 tokens) decides
+instead, with `HANDOFF_CTX_COOLDOWN_KB` / `HANDOFF_CTX_COOLDOWN_TOKENS`
+spacing the repeats. That absolute gate never applies when the window is
+known: on a 1M window it used to fire at 10% (issue #173).
+
+If Claude Code compacts earlier than the nudge fires, the nudge never
+appears: a low `autoCompactWindow` setting or
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` (for example 200000 on a 1M model)
+compacts at about 20% of the window, before the 30% threshold is reached.
+Lower `HANDOFF_CTX_THRESHOLD_PCT` there, or pin
+`HANDOFF_CTX_WINDOW_TOKENS` to the compaction window.
+
+Every reminder says where each number came from, for example
+`Context at ~312000 tokens (measured from the transcript's last usage
+record), ~31% of a 1000000-token window (from this hook's model table for
+claude-opus-5-5; percentage is tokens / window)`.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `HANDOFF_CTX_THRESHOLD_PCT` | `30` (was 40) | Percent of a known window for the first nudge. |
+| `HANDOFF_CTX_STEP_PCT` | `5` (new) | Points between later nudges. `0`: no step re-flags. |
+| `HANDOFF_CTX_MAX_FLAGS` | `0`, uncapped (was 1 in suggest mode) | Nudges per session. `1` restores once-only. |
+| `HANDOFF_CTX_THRESHOLD_TOKENS` | `100000` | Gate for an unknown window only. `0` disables it. |
+| `HANDOFF_CTX_WINDOW_TOKENS` | unset | Pins the window; beats every other source. |
+| `HANDOFF_CTX_1M_MODEL_REGEX` | unset (was a built-in regex) | Extra model ids to treat as 1M. |
+| `HANDOFF_CTX_COOLDOWN_KB` | `100` | Byte growth between repeats, unknown window only. |
+| `HANDOFF_CTX_COOLDOWN_TOKENS` | `COOLDOWN_KB * 1024 / 4` | Token growth between repeats, unknown window only. |
+| `HANDOFF_CTX_SL_MAX_AGE_SECS` | `900` | Age after which the status line cache is not live. |
+| `HANDOFF_CTX_REMINDER_MODE` | `suggest` | `act` makes the assistant run `/handoff` itself. |
+| `HANDOFF_CTX_NO_STATUSLINE` | unset | `1` ignores the status line cache. |
+| `HANDOFF_CTX_NO_DESKTOP_MODE` | unset | `1` drops the desktop app's meter sentence. |
+
+When the [status line](#status-line) is wired, the percentage in the
+reminder is Claude Code's own `context_window.used_percentage` whenever the
+cache holds a valid, live reading (0-100; a stale or malformed value above
+100 is treated as absent) and no `HANDOFF_CTX_WINDOW_TOKENS` pin is set:
+this applies even when the cache has a percentage but no window size.
+`HANDOFF_CTX_NO_STATUSLINE=1` ignores the cache.
+
+The desktop app does not run the status line, and Claude Code exposes
+`context_window` to hooks only through it. The app does, however, show the
+real figure in its own context meter. The hook therefore runs in **desktop
+mode** when the hook environment carries
+`CLAUDE_CODE_ENTRYPOINT=claude-desktop` (the app sets it, together with
+`CLAUDE_CODE_DESKTOP_APP_VERSION`), no live cached percentage exists, and
+the window came from the model table or is unknown: the reminder is the same
+line a terminal gets (the percentage and where its window came from, so the
+5-point cadence stays visible) plus one sentence saying the app's context
+meter is the authoritative figure. Until issue #173 the app got the token
+count only, because the window was then a guess from the model id. A status
+line wired by hand in the app still wins. `HANDOFF_CTX_NO_DESKTOP_MODE=1`
+drops the meter sentence. Terminal sessions never enter desktop mode.
 
 The nudge needs a growth measure to space its reminders, and until
 0.14.2 that could only be the Stop hook's transcript byte count
@@ -180,13 +218,15 @@ The nudge needs a growth measure to space its reminders, and until
 nudge exited silently no matter how full the context was, even with
 the statusline cache sitting right beside it. It now selects a
 ledger: **bytes** when `.ctx_<session_id>` exists (unchanged), or
-**tokens** from a fresh statusline cache when it does not. The two
+**tokens** from a fresh statusline cache, or from the transcript's own
+usage record, when it does not. The two
 use separate flag files, so a byte count and a token count are never
 compared as if they were the same quantity. `HANDOFF_CTX_SL_MAX_AGE_SECS`
 (default 900) bounds how stale that cache may be before the token
 ledger stands down; `0` disables it and restores the old behavior.
 `HANDOFF_CTX_COOLDOWN_TOKENS` is the token ledger's equivalent of
-`HANDOFF_CTX_COOLDOWN_KB` (transcript growth required between re-flags):
+`HANDOFF_CTX_COOLDOWN_KB` (growth required between re-flags, used only
+when the window is unknown; a known window steps by `HANDOFF_CTX_STEP_PCT`):
 it defaults to `HANDOFF_CTX_COOLDOWN_KB` converted at a 4-bytes-per-token
 ratio, so the one KB knob governs both ledgers' spacing unless you set the
 token knob directly. That 4:1 default is a heuristic bridge, not a measured
@@ -296,8 +336,13 @@ fire on it. Two hooks cover it:
   never fire it) runs `bin/handoff_compact_reset.sh`, which clears
   the session's context-measurement sidecars. The freed window is
   treated as session-start fresh: no nudge can fire off stale
-  pre-compact numbers, and the once-per-session nudge cap re-arms so
-  the assistant can flag `/handoff` again when the window refills.
+  pre-compact numbers, and the nudge cadence starts over so the
+  assistant can flag `/handoff` again when the window refills. Until
+  the first assistant turn after the compaction, the nudge stays
+  silent: the transcript's last usage record is pre-compact too. Without
+  the PostCompact hook (Claude Code older than 2.1.76) the flag ledger
+  survives the compaction, so a compaction that lands inside the last
+  flagged step stays silent until the next step is crossed.
 
 ## Where the handoff files live
 
