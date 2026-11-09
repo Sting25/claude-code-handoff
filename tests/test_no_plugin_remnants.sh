@@ -14,6 +14,8 @@
 #   * the PLUGIN_LEFTOVER_CHECK region in install.d/ and install.sh (the one
 #     check that tells a user a plugin install is still present), and its
 #     test, tests/test_install_plugin_leftover.sh;
+#   * tests/test_plugin_era_doc_verifies.sh, whose fixture must carry the
+#     v0.18.7 plugin header wording verbatim;
 #   * this file.
 #
 # The scanner is proven against planted fixtures below (one per pattern and
@@ -26,6 +28,7 @@ echo "no plugin remnants (#171)"
 
 SELF="tests/$(basename "${BASH_SOURCE[0]}")"
 LEFTOVER_TEST="tests/test_install_plugin_leftover.sh"
+ERA_TEST="tests/test_plugin_era_doc_verifies.sh"
 PATTERN='CLAUDE_PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|plugins/cache|marketplace|\.claude-plugin|hooks/hooks\.json|/plugin install|claude plugin|cache_prune'
 
 # filtered <root> <relpath>: the file's lines that are subject to the scan,
@@ -61,7 +64,7 @@ scan_tree() {
       [[ -f "$root/$rel" ]] && echo "$rel"
     done
   } | while IFS= read -r rel; do
-    case "$rel" in "$SELF"|"$LEFTOVER_TEST") continue ;; esac
+    case "$rel" in "$SELF"|"$LEFTOVER_TEST"|"$ERA_TEST") continue ;; esac
     filtered "$root" "$rel" | LC_ALL=C grep -i -E "$PATTERN" || true
   done
 }
@@ -84,6 +87,7 @@ fixture() {  # -> echoes a fresh clean fixture root
   printf '# >>> PLUGIN_LEFTOVER_CHECK\n# plugins/cache, claude plugin marketplace remove\n# <<< PLUGIN_LEFTOVER_CHECK\necho ok\n' > "$f/install.d/30-x.sh"
   cp "$f/install.d/30-x.sh" "$f/install.sh"
   printf '# claude plugin uninstall, plugins/cache\n' > "$f/$LEFTOVER_TEST"
+  printf '# hooks/hooks.json, plugins/cache\n' > "$f/$ERA_TEST"
   printf '# Privacy\n' > "$f/PRIVACY.md"
   printf '%s\n' "$f"
 }
