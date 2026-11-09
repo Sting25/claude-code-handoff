@@ -133,6 +133,11 @@ That writes the hooks into `~/code/myapp/.claude/settings.json` (add
 shared from `~/.claude/`. Uninstall with the same flags:
 `./install.sh --uninstall --scope project --project ~/code/myapp`.
 
+The tracked `settings.json` carries this machine's absolute home path in
+its `permissions.allow` entries. `--local` keeps that out of git, at the
+cost of not applying inside worktrees (`settings.local.json` is
+gitignored and per checkout).
+
 `install.sh` is a generated artifact (concatenated from `install.d/`
 by `tools/build-install.sh`; CI rebuilds and diffs it on every change)
 and ships with a checksum. Inside a full clone, git already guarantees
