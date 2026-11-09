@@ -13,12 +13,10 @@ on:
     branches: [main]
     # ALL tags, not 'v*': a mistyped tag (0.15.0, release-1) used to trigger
     # no CI at all — zero validation, silently. Now every tag runs the suite
-    # and the version-sync job (id plugin-version-sync, kept from when it
-    # also checked the plugin manifest) rejects any tag that isn't
-    # vX.Y.Z == VERSION.
+    # and the version-sync job rejects any tag that isn't vX.Y.Z == VERSION.
     tags: ['**']
 
-# Least-privilege token for every job (lint.yml pins the same). All steps
+# Least-privilege token for every job. All steps
 # are plain shell + first-party checkout; nothing needs write access, and a
 # future step addition shouldn't inherit one by default.
 permissions:
@@ -87,11 +85,9 @@ jobs:
   # the single source of truth. On a release tag the tag itself must match
   # VERSION, and CHANGELOG.md must already document the release: a tag
   # pushed without either is exactly how a "shipped" version ends up
-  # undocumented or mismatched. The job id stays plugin-version-sync (it
-  # also compared the plugin manifest until the plugin distribution was
-  # removed in #171); only the display name changed, so the branch
-  # protection required-check entry must follow the new name.
-  plugin-version-sync:
+  # undocumented or mismatched. Branch protection matches the display
+  # name below, not the job id.
+  version-sync:
     name: version sync (required)
     runs-on: ubuntu-latest
     steps:
