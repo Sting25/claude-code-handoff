@@ -55,17 +55,6 @@ elif [[ "$mode" == install ]]; then
     echo "      200k context window. Re-run  ./install.sh --model 'opus[1m]'  to pin one."
     echo
   fi
-  # Plugin/script coexistence heads-up (v0.14.0+ ships a plugin form of this
-  # tool) — see find_plugin_cache_dir's comment for why this checks $HOME and
-  # not $claude_home. Informational only; the install itself proceeds exactly
-  # as it always has.
-  plugin_cache_dir=""
-  if plugin_cache_dir="$(find_plugin_cache_dir)"; then
-    echo "NOTE: a plugin install of this tool was detected ($plugin_cache_dir)."
-    echo "      Installing the script mode too will double-fire every hook —"
-    echo "      Claude Code runs both plugin and script hooks, no dedup."
-    echo
-  fi
   if [[ "$scope" == project ]] && settings_has_our_hooks "$user_settings"; then
     echo "NOTE: $user_settings also wires this installer's hooks, so in"
     echo "      $project_dir every hook fires twice. Run ./install.sh --doctor"

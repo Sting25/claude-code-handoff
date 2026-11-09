@@ -218,8 +218,8 @@ fi
 
 # --- Bounded stdin read (issue #160). Canonical copy: read_hook_payload() in
 # bin/write_handoff.sh (rationale there); tests/test_stdin_readers_bounded.sh
-# diffs this copy against it. Duplicated, not sourced, because the plugin
-# (${CLAUDE_PLUGIN_ROOT}/bin) and install.sh ($HOME/.claude/bin) layouts differ
+# diffs this copy against it. Duplicated, not sourced, so each hook stays a
+# single self-contained file in $HOME/.claude/bin with nothing to source
 # and this hook must stay dependency-light. Waits HANDOFF_STDIN_TIMEOUT whole
 # seconds (default 2, min 1) for a first line, then drains to EOF; a closed
 # pipe returns EOF at once.
@@ -266,8 +266,8 @@ fi
 # error here — it yields an empty session_id and this hook exits 0 having done
 # nothing, for every prompt of every session, forever. install.sh refuses to
 # install without jq (install.d/40-main.sh) and --doctor reports it BROKEN, but
-# a PLUGIN install runs neither: `/plugin install` wires hooks/hooks.json and
-# never executes the installer, so nothing on that path has ever checked.
+# both only run when someone runs them: jq can go missing after install (a
+# PATH change, an uninstalled package) and nothing on the hook path checks.
 # handoff_session_start.sh and handoff_recover_tail.sh already say so out loud;
 # this hook and the Stop hook were the two holdouts.
 #
@@ -473,7 +473,7 @@ if [[ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]]; then
       fi
     fi
     if (( done_turns >= HEALTH_PROMPTS )); then
-      echo "⚠️  handoff: the Stop hook does not appear to be running this session: no per-turn backup has been recorded after ${done_turns} completed turns. /handoff will have no incremental dump to fall back on if invoked under context pressure. Likely causes, in order: hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
+      echo "⚠️  handoff: the Stop hook does not appear to be running this session: no per-turn backup has been recorded after ${done_turns} completed turns. /handoff will have no incremental dump to fall back on if invoked under context pressure. Likely causes, in order: hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone."
       if mkdir -p "$backup_dir" 2>/dev/null; then
         : > "$health_flag" 2>/dev/null || true
       fi
@@ -541,8 +541,8 @@ fi
 # dead Stop hook did not degrade context watching, it deleted it — silently, at
 # any context level, even with Claude Code's own numbers sitting unread in
 # .ctx_sl_<sid>. That matters most exactly where the Stop hook is most likely
-# to be missing: a plugin install, where the statusline is the only accurate
-# context signal there is.
+# to be missing: a broken or unwired Stop hook, where the statusline is the
+# only accurate context signal there is.
 #
 # So the ledger is now chosen rather than assumed:
 #

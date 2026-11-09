@@ -9,9 +9,9 @@
 #   - handoff_recover_tail.sh errors instead of printing an empty "recovery".
 #
 # Issue #68 closed the two remaining holdouts. The installer gate above only
-# ever protected the BARE-SCRIPTS channel — a plugin install wires
-# hooks/hooks.json and never runs install.sh — so the Stop hook and the ctx
-# nudge still failed silently on that path. Both now preflight jq and say so
+# runs at install time, and jq can disappear later (a PATH change, an
+# uninstalled package), so the Stop hook and the ctx nudge still failed
+# silently once it did. Both now preflight jq and say so
 # on STDOUT (stderr is what the `2>/dev/null || true` hook wiring discards),
 # once per session via a shared .ctx_nojq_<sid> marker.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

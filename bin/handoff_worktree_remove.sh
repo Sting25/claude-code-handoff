@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # handoff_worktree_remove.sh: WorktreeRemove hook (#142).
 #
-# Claude Code fires WorktreeRemove (plugin hooks since 2.1.300, only for the
+# Claude Code fires WorktreeRemove (since 2.1.300, only for the
 # worktrees Claude Code itself created, which covers desktop worktree
 # sessions) with a payload naming the worktree about to go:
 #   {"session_id": "...", "cwd": "...", "worktree_path": "/path/to/worktree"}
@@ -31,8 +31,8 @@ umask 077
 
 # --- Bounded stdin read (issue #160). Canonical copy: read_hook_payload() in
 # bin/write_handoff.sh (rationale there); tests/test_stdin_readers_bounded.sh
-# diffs this copy against it. Duplicated, not sourced, because the plugin
-# (${CLAUDE_PLUGIN_ROOT}/bin) and install.sh ($HOME/.claude/bin) layouts differ
+# diffs this copy against it. Duplicated, not sourced, so each hook stays a
+# single self-contained file in $HOME/.claude/bin with nothing to source
 # and this hook must stay dependency-light. Waits HANDOFF_STDIN_TIMEOUT whole
 # seconds (default 2, min 1) for a first line, then drains to EOF; a closed
 # pipe returns EOF at once.

@@ -34,8 +34,8 @@ umask 077
 # --- Read hook payload ---
 # --- Bounded stdin read (issue #160). Canonical copy: read_hook_payload() in
 # bin/write_handoff.sh (rationale there); tests/test_stdin_readers_bounded.sh
-# diffs this copy against it. Duplicated, not sourced, because the plugin
-# (${CLAUDE_PLUGIN_ROOT}/bin) and install.sh ($HOME/.claude/bin) layouts differ
+# diffs this copy against it. Duplicated, not sourced, so each hook stays a
+# single self-contained file in $HOME/.claude/bin with nothing to source
 # and this hook must stay dependency-light. Waits HANDOFF_STDIN_TIMEOUT whole
 # seconds (default 2, min 1) for a first line, then drains to EOF; a closed
 # pipe returns EOF at once.
@@ -78,14 +78,14 @@ fi
 # --- jq preflight (issue #68) -----------------------------------------------
 # The two jq calls below are UNGUARDED (no `2>/dev/null || true`) and this
 # script runs under `set -euo pipefail`, so a missing jq kills the hook at
-# exit 127 — and every wiring of it, in hooks/hooks.json and in install.sh's
-# canonical settings block alike, ends `2>/dev/null || true`, which discards
+# exit 127, and every wiring of it in install.sh's canonical settings block
+# ends `2>/dev/null || true`, which discards
 # both the message and the status. The result is a session that silently
 # accumulates no per-turn backup and no context sidecars, and only finds out
 # at /handoff time.
 #
 # install.sh refuses to install without jq and --doctor reports it BROKEN, but
-# a PLUGIN install runs neither, so nothing on that path has ever checked. Fail
+# both only run when someone runs them: jq can go missing after install. Fail
 # the same way we already fail here (exit 0, never break the turn) but say so
 # first, on STDOUT — stderr is what the hook wiring throws away.
 #
