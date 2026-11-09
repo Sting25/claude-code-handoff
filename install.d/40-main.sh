@@ -110,6 +110,16 @@ elif [[ "$scope" == project ]]; then
   # the way to remove them.
   echo "uninstalling handoff wiring from $project_dir (project scope)"
   echo
+  if (( project_gone )); then
+    # The directory is gone (a removed worktree, usually): nothing left to
+    # unpatch, so clear its registry line and stop cleanly.
+    echo "project settings ($project_dir):"
+    echo "  ok      $project_dir no longer exists; nothing to unpatch"
+    registry_remove "$project_dir" "$settings_name"
+    echo
+    echo "done. the repo at $repo_root is untouched."
+    exit 0
+  fi
   echo "project settings ($project_dir):"
   unpatch_settings
   registry_remove "$project_dir" "$settings_name"
@@ -129,8 +139,26 @@ else
   unpatch_settings
   echo
   echo "local state:"
-  remove_secret_if_ours
-  report_registry_orphans
+  # Registry first (issue #171 review): projects still wired sign their
+  # handoffs with the same per-machine secret, so deleting it here would
+  # silently downgrade every one of them. Keep it automatically while any
+  # registered project is wired; --remove-secret deletes it anyway.
+  orphan_list="$(registry_scan wired)"
+  secret_path="${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}"
+  if [[ -n "$orphan_list" ]] && (( ! remove_secret && ! keep_secret )); then
+    orphan_n="$(printf '%s\n' "$orphan_list" | wc -l | tr -d ' ')"
+    echo "  keep    $secret_path (kept: $orphan_n project-scope install(s) still sign with"
+    echo "          it; pass --remove-secret to delete it anyway)"
+    secret_note="The HMAC secret $secret_path was kept for them."
+  else
+    remove_secret_if_ours
+    if [[ -e "$secret_path" ]]; then
+      secret_note="The HMAC secret $secret_path is still in place."
+    else
+      secret_note="The HMAC secret $secret_path is gone, so their signed handoffs no longer verify as binding."
+    fi
+  fi
+  report_registry_orphans "$orphan_list" "$secret_note"
   echo
   echo "done. the repo at $repo_root is untouched."
 fi

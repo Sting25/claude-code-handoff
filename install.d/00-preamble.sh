@@ -62,6 +62,11 @@ Scope (where the hooks are wired):
   flags: a project-scope --uninstall strips only that project's settings
   file and leaves ~/.claude/bin, the skills, and the HMAC secret in place.
   The project must be an existing directory, and may not be this clone.
+  Without --project, inside a git repo the project is its toplevel.
+
+  While any project-scope install is still wired, a user-scope --uninstall
+  keeps the shared HMAC secret (those projects sign with it); add
+  --remove-secret to delete it anyway.
 
 --keep-secret only changes what --uninstall does. It is still accepted
 without --uninstall (plain install, --doctor) so a script that always
@@ -141,6 +146,13 @@ link_mode="auto"
 # "delete" (unchanged, opt-in only) because the secret is also genuinely
 # uninstall-scoped key material for someone leaving the tool entirely.
 keep_secret=0
+# --remove-secret (issue #171): a user-scope --uninstall keeps the secret
+# automatically while any registered project-scope install is still wired
+# (they sign with it); this flag deletes it anyway.
+remove_secret=0
+# Set when a project-scope --uninstall names a directory that is gone (a
+# removed worktree): only its registry line is cleared.
+project_gone=0
 
 # Validate $claude_home before creating or patching anything under it: an empty,
 # root, or relative value would scatter symlinks and a patched settings.json
@@ -226,6 +238,7 @@ while [[ $# -gt 0 ]]; do
     --copy)        link_mode=copy ;;
     --link)        link_mode='link' ;;
     --keep-secret) keep_secret=1 ;;
+    --remove-secret) remove_secret=1 ;;
     --model)
       if [[ $# -lt 2 || -z "$2" ]]; then
         echo "ERROR: --model requires a value (e.g. --model 'opus[1m]')" >&2
@@ -272,6 +285,13 @@ done
 if (( keep_secret )) && [[ "$mode" != uninstall ]]; then
   echo "warning: --keep-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
 fi
+if (( keep_secret && remove_secret )); then
+  echo "ERROR: --keep-secret and --remove-secret contradict each other; pass one." >&2
+  exit 2
+fi
+if (( remove_secret )) && [[ "$mode" != uninstall ]]; then
+  echo "warning: --remove-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
+fi
 
 # Resolve the install scope (issue #171). Every refusal here exits before
 # anything is created or patched.
@@ -295,13 +315,41 @@ if (( use_local )) && [[ "$scope" != project ]]; then
   exit 2
 fi
 if [[ "$scope" == project ]]; then
-  # No --project: the current directory, the natural shape for
-  # `cd ~/code/myapp && ~/src/claude-code-handoff/install.sh --scope project`.
-  [[ -n "$project_dir" ]] || project_dir="$PWD"
-  if [[ ! -d "$project_dir" ]]; then
+  # No --project: the project containing the current directory, the natural
+  # shape for `cd ~/code/myapp && ~/src/claude-code-handoff/install.sh
+  # --scope project`. Inside a git repo that is its toplevel (Claude Code
+  # reads .claude/ at the project root, not in a subdirectory); outside
+  # one, the current directory itself. Said out loud either way.
+  if [[ -z "$project_dir" ]]; then
+    _top=""
+    if command -v git >/dev/null 2>&1; then
+      _top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+    fi
+    if [[ -n "$_top" ]]; then
+      project_dir="$_top"
+      echo "note: no --project given; using $project_dir (the git toplevel of the current directory)." >&2
+    else
+      project_dir="$PWD"
+      echo "note: no --project given; using $project_dir (the current directory)." >&2
+    fi
+  fi
+  if [[ ! -d "$project_dir" && "$mode" == uninstall ]]; then
+    # A project-scope uninstall of a directory that is gone (typically a
+    # removed worktree the doctor listed as stale) only clears its registry
+    # line; there is no file left to unpatch. Made absolute the only way a
+    # missing path allows, so it matches the registry's absolute entries.
+    case "$project_dir" in
+      /*) : ;;
+      *) project_dir="$PWD/$project_dir" ;;
+    esac
+    while [[ "$project_dir" == */ && "$project_dir" != / ]]; do project_dir="${project_dir%/}"; done
+    project_gone=1
+  elif [[ ! -d "$project_dir" ]]; then
     echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
     exit 2
   fi
+fi
+if [[ "$scope" == project ]] && (( ! project_gone )); then
   # Absolute and physical, so the comparisons below and the paths printed
   # (and the backup location) never depend on how the flag was spelled.
   project_dir="$(cd "$project_dir" && pwd -P)"
@@ -330,6 +378,9 @@ if [[ "$scope" == project ]]; then
     echo "       Use --scope user to patch $user_settings." >&2
     exit 2
   fi
+fi
+if [[ "$scope" == project ]]; then
+  _proj_claude="$project_dir/.claude"
   if (( use_local )); then
     settings_name="settings.local.json"
   else
@@ -342,8 +393,8 @@ if [[ "$scope" == project ]]; then
   project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$project_dir" | cksum | awk '{print $1}')"
   # A project-scope --uninstall never touches the secret (see 40-main.sh),
   # so --keep-secret is a no-op there too; say so, same as issue #82.
-  if (( keep_secret )) && [[ "$mode" == uninstall ]]; then
-    echo "warning: --keep-secret has no effect with --scope project; a project-scope --uninstall never removes the secret." >&2
+  if (( keep_secret || remove_secret )) && [[ "$mode" == uninstall ]]; then
+    echo "warning: --keep-secret/--remove-secret have no effect with --scope project; a project-scope --uninstall never removes the secret." >&2
   fi
 fi
 

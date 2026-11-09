@@ -306,16 +306,51 @@ signing_status_reason() {
 # The install command that re-creates THIS run's wiring, for remedies doctor
 # prints: a project-scope doctor must not tell the user to run a bare
 # ./install.sh, which would wire the user-scope file instead (issue #171).
+# In user scope it consults the wiring: when the user file is unwired but
+# the project (or, failing that, a registered project) carries our hooks, a
+# bare ./install.sh would wire the wrong scope, so it prints that project's
+# command instead (the new-machine or teammate-clone case, where a tracked
+# project settings.json arrives without the scripts).
 rerun_cmd() {
+  local proj first rp rn
   if [[ "$scope" == project ]]; then
     if (( use_local )); then
-      printf '%s\n' "./install.sh --scope project --project $project_dir --local"
+      printf '%s\n' "./install.sh --scope project --project $(shq "$project_dir") --local"
     else
-      printf '%s\n' "./install.sh --scope project --project $project_dir"
+      printf '%s\n' "./install.sh --scope project --project $(shq "$project_dir")"
     fi
-  else
-    printf '%s\n' "./install.sh"
+    return 0
   fi
+  if ! settings_has_our_hooks "$user_settings"; then
+    proj="$(wiring_project_root)"
+    if settings_has_our_hooks "$proj/.claude/settings.json"; then
+      printf '%s\n' "./install.sh --scope project --project $(shq "$proj")"
+      return 0
+    fi
+    if settings_has_our_hooks "$proj/.claude/settings.local.json"; then
+      printf '%s\n' "./install.sh --scope project --project $(shq "$proj") --local"
+      return 0
+    fi
+    first="$(registry_scan wired | head -n 1 || true)"
+    if [[ -n "$first" ]]; then
+      rp="${first%%$'\t'*}"; rn="${first#*$'\t'}"
+      if [[ "$rn" == settings.local.json ]]; then
+        printf '%s\n' "./install.sh --scope project --project $(shq "$rp") --local"
+      else
+        printf '%s\n' "./install.sh --scope project --project $(shq "$rp")"
+      fi
+      return 0
+    fi
+  fi
+  printf '%s\n' "./install.sh"
+}
+
+# Single-quote a path for a printed, copy-pasteable command (a project path
+# with a space must survive the paste). Embedded single quotes become '\''.
+shq() {
+  local q
+  q="$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+  printf "'%s'" "$q"
 }
 
 # settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
@@ -361,7 +396,9 @@ wiring_project_root() {
   if command -v git >/dev/null 2>&1; then
     top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
   fi
-  printf '%s\n' "${top:-$PWD}"
+  # Physical, like every project path this installer records or prints.
+  [[ -n "$top" ]] || top="$(pwd -P)"
+  printf '%s\n' "$top"
 }
 
 # Wiring layout check (issue #171). Claude Code runs an identical handler
@@ -399,17 +436,17 @@ report_wiring() {
     echo "${pc}invalidate the signed handoffs in every wired project. A user-scope"
     echo "${pc}uninstall also removes the shared scripts in $claude_home/bin, so re-run"
     echo "${pc}the project install afterwards:"
-    if (( sw )); then echo "${pc}  ./install.sh --scope project --project $proj"; fi
-    if (( lw )); then echo "${pc}  ./install.sh --scope project --project $proj --local"; fi
+    if (( sw )); then echo "${pc}  ./install.sh --scope project --project $(shq "$proj")"; fi
+    if (( lw )); then echo "${pc}  ./install.sh --scope project --project $(shq "$proj") --local"; fi
     if (( ! sw && ! lw )); then echo "${pc}  $(rerun_cmd)"; fi
   fi
   if (( dup_issue )); then
     echo "${pc}Both project files carry the hooks. Claude Code runs them once, so this"
     echo "${pc}is redundant rather than broken; keep one. To remove the extra one run:"
     if [[ "$scope" == project ]] && (( use_local )); then
-      echo "${pc}  ./install.sh --uninstall --scope project --project $proj"
+      echo "${pc}  ./install.sh --uninstall --scope project --project $(shq "$proj")"
     else
-      echo "${pc}  ./install.sh --uninstall --scope project --project $proj --local"
+      echo "${pc}  ./install.sh --uninstall --scope project --project $(shq "$proj") --local"
     fi
     if [[ "$scope" != project ]]; then
       echo "${pc}  (or drop settings.json instead: the same command without --local)"
@@ -448,7 +485,7 @@ registry_remove() {  # <project dir> <settings file name>
   echo "  remove  registry: $1 ($2)"
 }
 
-# registry_scan <wired|stale>: print "<dir> (<name>)" for each registered
+# registry_scan <wired|stale>: print "<dir><TAB><name>" for each registered
 # project whose file does (wired) or does not (stale) carry our hooks.
 registry_scan() {
   local want="$1" rp rn has
@@ -458,37 +495,48 @@ registry_scan() {
     case "$rn" in settings.json|settings.local.json) ;; *) continue ;; esac
     has=stale
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
-    if [[ "$has" == "$want" ]]; then printf '%s (%s)\n' "$rp" "$rn"; fi
+    if [[ "$has" == "$want" ]]; then printf '%s\t%s\n' "$rp" "$rn"; fi
   done < "$project_registry"
   return 0
 }
 
+# registry_list_cmds <list>: one indented line per "<dir><TAB><name>" entry,
+# the entry itself and the copy-pasteable project uninstall for it.
+registry_list_cmds() {
+  local rp rn flag
+  while IFS=$'\t' read -r rp rn; do
+    [[ -n "$rp" ]] || continue
+    flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
+    echo "            $rp ($rn)"
+    echo "              ./install.sh --uninstall --scope project --project $(shq "$rp")$flag"
+  done <<< "$1"
+}
+
 # User-scope --uninstall: warn about every registered project still wired,
-# since their hooks call the scripts this uninstall removes.
+# since their hooks call the scripts this uninstall removes. <secret_note>
+# says what happened to the shared HMAC secret.
 report_registry_orphans() {
-  local list _l
-  list="$(registry_scan wired)"
+  local list="$1" secret_note="$2"
   [[ -n "$list" ]] || return 0
   echo "  WARN    project-scope installs still wired (from $project_registry):"
-  while IFS= read -r _l; do echo "            $_l"; done <<< "$list"
+  registry_list_cmds "$list"
   echo "          Their hooks call the scripts this uninstall removes from"
   echo "          $claude_home/bin, so they will silently no-op until each project is"
-  echo "          re-wired with './install.sh --scope project --project <dir>' or"
-  echo "          uninstalled with './install.sh --uninstall --scope project --project <dir>'"
-  echo "          (add --local for settings.local.json)."
+  echo "          re-wired with ./install.sh --scope project --project <dir>, or"
+  echo "          uninstalled with the command listed under it."
+  echo "          $secret_note"
 }
 
 # User-scope doctor: name registered projects whose file no longer carries
 # our hooks. Informational only.
 report_registry_stale() {
-  local list _l
+  local list
   list="$(registry_scan stale)"
   [[ -n "$list" ]] || return 0
   echo "  note    stale project registry entries (the file no longer carries this"
-  echo "          installer's hooks), from $project_registry:"
-  while IFS= read -r _l; do echo "            $_l"; done <<< "$list"
-  echo "          Clear one with './install.sh --uninstall --scope project --project <dir>'"
-  echo "          (add --local for settings.local.json), or delete its line from the file."
+  echo "          installer's hooks), from $project_registry; clear each with the"
+  echo "          command under it (works for a directory that is gone, too):"
+  registry_list_cmds "$list"
   echo
 }
 

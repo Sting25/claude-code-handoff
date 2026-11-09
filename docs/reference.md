@@ -999,8 +999,12 @@ installer's absolute home path (for example
 file publishes that path. `--local` keeps it out of git, at the cost of
 not applying inside worktrees.
 
-The project directory is resolved to an absolute physical path and must
-already exist; `.claude/` inside it is created when missing. The
+Without `--project`, the project is the git toplevel of the current
+directory when it is inside a repo (Claude Code reads `.claude/` at the
+project root, not in a subdirectory), else the current directory; the
+choice is printed. The project directory is resolved to an absolute
+physical path and must already exist; `.claude/` inside it is created
+when missing. The
 installer refuses (exit 2, nothing written) when the directory is
 missing, when it is the handoff clone holding `install.sh` or any
 directory inside it (the usual cause is running
@@ -1027,9 +1031,17 @@ removes the line. A user-scope `--uninstall` prints every registered
 project whose file still carries the hooks and warns that those hooks
 will silently no-op (the scripts they call are being removed) until each
 project is re-wired or uninstalled with
-`./install.sh --uninstall --scope project --project <dir>`. The
-user-scope `--doctor` lists registered projects whose file no longer
-carries the hooks (stale entries).
+`./install.sh --uninstall --scope project --project <dir>`. While any
+registered project is still wired, that uninstall also keeps the
+per-machine HMAC secret (the projects sign with it) and says so; pass
+`--remove-secret` to delete it anyway. The user-scope `--doctor` lists
+registered projects whose file no longer carries the hooks (stale
+entries), each with its uninstall command, which also works when the
+directory is gone (a removed worktree): it then clears the registry line
+and exits 0. Every printed command single-quotes its paths, so a project
+path with a space can be pasted as is. When the user file is unwired but
+the project (or a registered project) is, the doctor's "re-run" remedy
+names the project-scope command rather than a bare `./install.sh`.
 
 `--uninstall --scope project [--project <dir>] [--local]` strips only
 that project file (hooks, permissions, our `statusLine`, and a model pin
