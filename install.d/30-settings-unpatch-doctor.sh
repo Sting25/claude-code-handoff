@@ -282,6 +282,84 @@ signing_status_reason() {
   fi
 }
 
+# The install command that re-creates THIS run's wiring, for remedies doctor
+# prints: a project-scope doctor must not tell the user to run a bare
+# ./install.sh, which would wire the user-scope file instead (issue #171).
+rerun_cmd() {
+  if [[ "$scope" == project ]]; then
+    if (( use_local )); then
+      printf '%s\n' "./install.sh --scope project --project $project_dir --local"
+    else
+      printf '%s\n' "./install.sh --scope project --project $project_dir"
+    fi
+  else
+    printf '%s\n' "./install.sh"
+  fi
+}
+
+# settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
+# least one of this installer's hook commands (same markers as the
+# bare_wired check in doctor). 1 otherwise, including when jq is missing.
+settings_has_our_hooks() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
+        --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" '
+      type == "object" and (
+      ( (.hooks.SessionStart // [])     | any(.. | .command? // "" | contains($ss)) ) or
+      ( (.hooks.SessionEnd // [])       | any(.. | .command? // "" | contains($se)) ) or
+      ( (.hooks.PreCompact // [])       | any(.. | .command? // "" | contains($se)) ) or
+      ( (.hooks.PostCompact // [])      | any(.. | .command? // "" | contains($post)) ) or
+      ( (.hooks.WorktreeRemove // [])   | any(.. | .command? // "" | contains($wr)) ) or
+      ( (.hooks.Stop // [])             | any(.. | .command? // "" | contains($st)) ) or
+      ( (.hooks.UserPromptSubmit // []) | any(.. | .command? // "" | contains($up)) ) )
+    ' "$f" >/dev/null 2>&1
+}
+
+# Physical path of a settings file (symlinks resolved, directory made
+# physical), so the double-fire check below never counts one file twice: a
+# project rooted at $HOME, or a dotfiles link, can make two spellings name
+# the same file. Prints nothing when the directory does not exist.
+settings_phys_path() {
+  local f d
+  f="$(resolve_symlink "$1")"
+  d="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" || return 0
+  printf '%s/%s\n' "$d" "$(basename "$f")"
+}
+
+# Double-fire check (issue #171): Claude Code merges the user file and the
+# project's settings.json and settings.local.json, so this installer's hooks
+# wired into more than one of them fire once per file. The project checked
+# is --project (project scope) or the current directory (user scope).
+# Advisory only, never counts toward `broken`: each file is valid on its
+# own. Prints the WARN, or nothing when at most one file is wired.
+report_double_fire() {
+  local proj f p seen="" wired="" n=0
+  if [[ "$scope" == project ]]; then proj="$project_dir"; else proj="$PWD"; fi
+  for f in "$user_settings" "$proj/.claude/settings.json" "$proj/.claude/settings.local.json"; do
+    p="$(settings_phys_path "$f")"
+    [[ -n "$p" ]] || continue
+    case "$seen" in *"|$p|"*) continue ;; esac
+    seen="$seen|$p|"
+    if settings_has_our_hooks "$p"; then
+      wired="$wired
+            $f"
+      n=$((n + 1))
+    fi
+  done
+  (( n > 1 )) || return 0
+  echo "  WARN    this installer's hooks are wired in $n settings files that Claude"
+  echo "          Code loads for $proj, so every hook fires once per file:$wired"
+  echo "          Fix: keep one. To drop the user-scope wiring run"
+  echo "          './install.sh --uninstall', then re-run"
+  echo "          './install.sh --scope project --project $proj' (a user-scope"
+  echo "          uninstall also removes the shared scripts). To drop a project"
+  echo "          file run './install.sh --uninstall --scope project --project $proj'"
+  echo "          (add --local for settings.local.json)."
+  echo
+}
+
 # Self-check: verify each installed hook script under $claude_home/bin actually
 # resolves. A dangling symlink (e.g. installed from a temp checkout that was
 # later cleaned up) makes the corresponding hook no-op silently, so surface it
@@ -311,6 +389,10 @@ doctor() {
   # when there's no cache; that's a normal, expected outcome, not an error).
   plugin_dir="$(find_plugin_cache_dir || true)"
 
+  if [[ "$scope" == project ]]; then
+    echo "doctor: project scope, checking $settings"
+    echo
+  fi
   echo "doctor: checking runtime dependencies"
   # jq is a RUNTIME dependency of the Stop hook (payload parsing), the ctx
   # nudge, and the /handoff-recover tail rescue — a resolving script link is
@@ -484,7 +566,7 @@ doctor() {
       echo "          docs/reference.md, Status line section, to enable the"
       echo "          context nudge's most accurate signal in plugin mode)"
     else
-      echo "  info    statusLine unset (re-run ./install.sh to wire it)"
+      echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
     fi
     echo
   elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
@@ -513,7 +595,7 @@ doctor() {
       echo "          docs/reference.md, Status line section, to enable the"
       echo "          context nudge's most accurate signal in plugin mode)"
     else
-      echo "  info    statusLine unset (re-run ./install.sh to wire it)"
+      echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
     fi
     # Model context-window check — advisory only, never counts toward broken:
     # a bare 'opus'/'claude-opus-4-8' pin silently runs at a 200k context
@@ -689,6 +771,7 @@ doctor() {
     fi
     echo
   fi
+  report_double_fire
   if (( broken )); then
     echo "doctor: $broken issue(s) found." >&2
     if (( plugin_only )); then
@@ -700,7 +783,7 @@ doctor() {
       echo "        Reinstall the plugin instead: '/plugin uninstall claude-code-handoff'," >&2
       echo "        then '/plugin install claude-code-handoff@claude-code-handoff'." >&2
     else
-      echo "        Re-run ./install.sh from a persistent clone (not a /tmp checkout)." >&2
+      echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)." >&2
     fi
     return 1
   fi

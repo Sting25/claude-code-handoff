@@ -34,7 +34,19 @@ elif [[ "$mode" == install ]]; then
   echo "symlinks:"
   install_symlinks
   echo
-  echo "settings.json:"
+  if [[ "$scope" == project ]]; then
+    # Project scope (issue #171): the scripts above are shared from
+    # $claude_home; only the wiring goes into the project. Create the
+    # project's .claude/ on demand (install mode only: --doctor and
+    # --uninstall never create anything).
+    echo "project settings ($project_dir):"
+    if [[ ! -d "$(dirname "$settings")" ]]; then
+      mkdir -p "$(dirname "$settings")"
+      echo "  new     $(dirname "$settings")/"
+    fi
+  else
+    echo "settings.json:"
+  fi
   patch_settings
   echo
   if [[ -z "$model_pin" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
@@ -53,6 +65,15 @@ elif [[ "$mode" == install ]]; then
     echo "      Installing the script mode too will double-fire every hook —"
     echo "      Claude Code runs both plugin and script hooks, no dedup."
     echo
+  fi
+  if [[ "$scope" == project ]] && settings_has_our_hooks "$user_settings"; then
+    echo "NOTE: $user_settings also wires this installer's hooks, so in"
+    echo "      $project_dir every hook fires twice. Run ./install.sh --doctor"
+    echo "      --scope project --project $project_dir for the remedy."
+    echo
+  fi
+  if [[ "$scope" == project ]]; then
+    echo "note: hooks are wired for $project_dir only ($settings)."
   fi
   echo "done. start a new Claude Code session — /handoff is available now."
   # First-run signing note — one line pointing at --doctor for the detailed
@@ -77,6 +98,21 @@ elif [[ "$mode" == install ]]; then
     echo "      ./install.sh to refresh the copies — symlinked installs update"
     echo "      automatically, copies do not."
   fi
+elif [[ "$scope" == project ]]; then
+  # Project-scope uninstall (issue #171) strips only this project's wiring.
+  # The scripts, skills, and HMAC secret under $claude_home are shared by
+  # every project on this machine, so they stay; a user-scope --uninstall is
+  # the way to remove them.
+  echo "uninstalling handoff wiring from $project_dir (project scope)"
+  echo
+  echo "project settings ($project_dir):"
+  unpatch_settings
+  echo
+  echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
+  echo "      HMAC secret are shared by every project on this machine and were not"
+  echo "      removed. Run ./install.sh --uninstall (user scope) to remove them."
+  echo
+  echo "done. the repo at $repo_root is untouched."
 else
   echo "uninstalling handoff skill from $claude_home"
   echo

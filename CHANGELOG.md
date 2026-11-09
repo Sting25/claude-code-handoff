@@ -12,6 +12,9 @@ are appended).
 
 ## [Unreleased]
 
+### Added
+- **`install.sh --scope project` wires the hooks into one project only (#171).** `./install.sh --scope project --project <dir>` (or `--project <dir>` alone, or `--scope project` run from inside the project) writes the seven hooks, the status line, and the permission entries into `<dir>/.claude/settings.json`; add `--local` to target `.claude/settings.local.json` instead. The scripts and skills still go into `~/.claude/bin` and `~/.claude/skills`, which every wired project shares, and `~/.claude/settings.json` is not touched. The project must be an existing directory and may not be the handoff clone itself (both refusals exit 2 before anything is written). `--uninstall --scope project` strips only that project's file and keeps the shared scripts, skills, and HMAC secret. `--doctor` checks the project file in project scope, and in either scope warns when the user file and a project file both carry these hooks (double fire), with the remedy. A `--model` pin in project scope is recorded per project file, so a project's uninstall never consumes the user-scope record. With no scope flag the installer behaves exactly as before (user scope).
+
 ### Fixed
 - `write_handoff.sh` no longer blocks forever on an open, silent stdin
   (#158). The `/handoff` skill runs `--restamp` through the Claude Code

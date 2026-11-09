@@ -121,6 +121,18 @@ The installer symlinks the scripts and skills into `~/.claude/` and
 patches `~/.claude/settings.json` (backed up first; idempotent; your
 own settings are left untouched).
 
+To wire the hooks into one project only (recommended), name the project:
+
+```bash
+./install.sh --scope project --project ~/code/myapp
+```
+
+That writes the hooks into `~/code/myapp/.claude/settings.json` (add
+`--local` for `.claude/settings.local.json`) and leaves
+`~/.claude/settings.json` alone. The scripts and skills are still
+shared from `~/.claude/`. Uninstall with the same flags:
+`./install.sh --uninstall --scope project --project ~/code/myapp`.
+
 `install.sh` is a generated artifact (concatenated from `install.d/`
 by `tools/build-install.sh`; CI rebuilds and diffs it on every change)
 and ships with a checksum. Inside a full clone, git already guarantees

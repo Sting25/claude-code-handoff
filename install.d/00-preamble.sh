@@ -46,6 +46,23 @@ Usage:
   ./install.sh --uninstall --keep-secret  # same, but keep the per-machine HMAC secret
   ./install.sh --help
 
+Scope (where the hooks are wired):
+  --scope user       patch ~/.claude/settings.json (the default; every project)
+  --scope project    patch <project>/.claude/settings.json (one project only);
+                     the project is --project <dir>, else the current directory
+  --project <dir>    the project to wire; implies --scope project
+  --local            with project scope, patch .claude/settings.local.json
+                     instead of .claude/settings.json
+
+  Recommended (one project only):
+    ./install.sh --scope project --project ~/code/myapp
+
+  Project scope still installs the scripts and skills into ~/.claude, since
+  every project shares them. --uninstall and --doctor take the same scope
+  flags: a project-scope --uninstall strips only that project's settings
+  file and leaves ~/.claude/bin, the skills, and the HMAC secret in place.
+  The project must be an existing directory, and may not be this clone.
+
 --keep-secret only changes what --uninstall does. It is still accepted
 without --uninstall (plain install, --doctor) so a script that always
 passes it doesn't have to branch on mode, but it has no effect there and
@@ -71,6 +88,23 @@ umask 077
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || repo_root=""
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
+# The user-scope file, kept separately because project scope (issue #171)
+# repoints $settings at a project file while doctor still needs this one for
+# its double-fire check.
+user_settings="$settings"
+
+# Install scope (issue #171). "user" patches $claude_home/settings.json, the
+# behaviour every release before this one had, and stays the default so an
+# existing install never changes under anyone's feet. "project" patches
+# <project>/.claude/settings.json (or settings.local.json with --local)
+# instead; the scripts and skills still go into $claude_home either way,
+# because the hook commands point at $HOME/.claude/bin. scope_flag records
+# an explicit --scope so a contradiction with --project/--local is refused
+# rather than guessed at.
+scope=user
+scope_flag=""
+project_dir=""
+use_local=0
 # Include the PID so two installs in the same clock second don't collide on the
 # same .bak.<ts> name — without it, the second run's `cp` would overwrite the
 # first run's pre-patch settings.json backup, destroying the only safe copy.
@@ -137,11 +171,8 @@ resolve_symlink() {  # <path> -> physical path on stdout
   done
   printf '%s\n' "$p"
 }
-if [[ -L "$settings" ]]; then
-  settings_resolved="$(resolve_symlink "$settings")"
-  echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
-  settings="$settings_resolved"
-fi
+# (The symlink check itself runs after argument parsing, below, because
+# --scope project repoints $settings at a project file first.)
 
 # Recovery state for the settings.json patch/unpatch sequence. The edits are a
 # series of separate jq writes; if the script aborts (set -e) partway through,
@@ -183,6 +214,27 @@ while [[ $# -gt 0 ]]; do
       fi
       model_pin="$2"; shift ;;
     --model=*)   model_pin="${1#--model=}" ;;
+    --scope)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "ERROR: --scope requires a value: user or project" >&2
+        exit 2
+      fi
+      scope_flag="$2"; shift ;;
+    --scope=*)   scope_flag="${1#--scope=}" ;;
+    --project)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "ERROR: --project requires a directory (e.g. --project ~/code/myapp)" >&2
+        exit 2
+      fi
+      project_dir="$2"; shift ;;
+    --project=*)
+      project_dir="${1#--project=}"
+      if [[ -z "$project_dir" ]]; then
+        echo "ERROR: --project requires a directory (e.g. --project ~/code/myapp)" >&2
+        exit 2
+      fi
+      ;;
+    --local)     use_local=1 ;;
     --help|-h)
       usage
       exit 0
@@ -202,6 +254,69 @@ if (( keep_secret )) && [[ "$mode" != uninstall ]]; then
   echo "warning: --keep-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
 fi
 
+# Resolve the install scope (issue #171). Every refusal here exits before
+# anything is created or patched.
+case "$scope_flag" in
+  "" | user | project) : ;;
+  *)
+    echo "ERROR: --scope must be 'user' or 'project' (got '$scope_flag')." >&2
+    exit 2 ;;
+esac
+if [[ -n "$project_dir" ]]; then
+  if [[ "$scope_flag" == user ]]; then
+    echo "ERROR: --project implies --scope project; it cannot be combined with --scope user." >&2
+    exit 2
+  fi
+  scope=project
+elif [[ "$scope_flag" == project ]]; then
+  scope=project
+fi
+if (( use_local )) && [[ "$scope" != project ]]; then
+  echo "ERROR: --local only applies to project scope; add --scope project or --project <dir>." >&2
+  exit 2
+fi
+if [[ "$scope" == project ]]; then
+  # No --project: the current directory, the natural shape for
+  # `cd ~/code/myapp && ~/src/claude-code-handoff/install.sh --scope project`.
+  [[ -n "$project_dir" ]] || project_dir="$PWD"
+  if [[ ! -d "$project_dir" ]]; then
+    echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
+    exit 2
+  fi
+  # Absolute and physical, so the comparisons below and the paths printed
+  # (and the backup location) never depend on how the flag was spelled.
+  project_dir="$(cd "$project_dir" && pwd -P)"
+  # Wiring the handoff clone itself is almost certainly a mistake: the usual
+  # cause is running `./install.sh --scope project` from inside the clone
+  # without --project. Refuse instead of patching the clone's own .claude/.
+  if [[ -n "$repo_root" ]] && [[ "$project_dir" == "$(cd "$repo_root" && pwd -P)" ]]; then
+    echo "ERROR: project directory '$project_dir' is this handoff clone (the install source); refusing." >&2
+    echo "       Pass --project <dir> for the project you want to wire, or run install.sh from inside that project." >&2
+    exit 2
+  fi
+  # A project whose .claude/ IS $claude_home (a project rooted at $HOME)
+  # would make the "project" file the user-scope file under another name.
+  _proj_claude="$project_dir/.claude"
+  # (Plain string compare too, for a fresh machine where neither exists yet.)
+  if [[ "$_proj_claude" == "$claude_home" ]] \
+     || { [[ -d "$_proj_claude" && -d "$claude_home" ]] \
+          && [[ "$(cd "$_proj_claude" && pwd -P)" == "$(cd "$claude_home" && pwd -P)" ]]; }; then
+    echo "ERROR: project '$project_dir' has $claude_home as its .claude directory, which is the user-scope config; refusing." >&2
+    echo "       Use --scope user to patch $user_settings." >&2
+    exit 2
+  fi
+  if (( use_local )); then
+    settings="$_proj_claude/settings.local.json"
+  else
+    settings="$_proj_claude/settings.json"
+  fi
+  # A project-scope --uninstall never touches the secret (see 40-main.sh),
+  # so --keep-secret is a no-op there too; say so, same as issue #82.
+  if (( keep_secret )) && [[ "$mode" == uninstall ]]; then
+    echo "warning: --keep-secret has no effect with --scope project; a project-scope --uninstall never removes the secret." >&2
+  fi
+fi
+
 # Env fallback for the model pin; an explicit --model flag wins.
 if [[ -z "$model_pin" && -n "${HANDOFF_MODEL:-}" ]]; then
   model_pin="$HANDOFF_MODEL"
@@ -211,6 +326,25 @@ fi
 # inverse: the key is removed only when this installer set it AND the value
 # is still exactly what it set — a user's later edit always wins.
 model_pin_record="$claude_home/handoff-model-pin"
+# Project scope keeps one record per project settings file (keyed by a cksum
+# of its path), so a project's --uninstall can never consume the user-scope
+# record or another project's. Computed before the symlink resolution below
+# so the key is the path the user named, not wherever a dotfiles link points.
+if [[ "$scope" == project ]]; then
+  model_pin_record="$claude_home/handoff-model-pin.project.$(printf '%s' "$settings" | cksum | awk '{print $1}')"
+fi
+
+# If the settings file is a symlink (a common dotfiles pattern; stow, chezmoi
+# and friends point ~/.claude/settings.json at a tracked file), operate on its
+# TARGET. The patch writes via tmp+mv, and `mv` onto a symlink replaces the
+# LINK with a plain file, silently disconnecting the user's source of truth.
+# Resolving to the real path keeps tmp+mv atomic AND leaves the symlink intact
+# (Claude Code follows it to read). Applies to a project file the same way.
+if [[ -L "$settings" ]]; then
+  settings_resolved="$(resolve_symlink "$settings")"
+  echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
+  settings="$settings_resolved"
+fi
 
 # Canonical hook commands and permissions. Edit these together with
 # CHANGELOG.md if you ever change the snippet shape.

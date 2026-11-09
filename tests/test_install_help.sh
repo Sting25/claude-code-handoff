@@ -36,6 +36,14 @@ help_present="no"
 [[ "$out" == *"--help"* ]] && help_present="yes"
 check "--help in output" yes "$help_present"
 
+# Install scope flags (issue #171), plus the recommended project example.
+for flag in "--scope user" "--scope project" "--project <dir>" "--local" \
+            "./install.sh --scope project --project"; do
+  flag_present="no"
+  [[ "$out" == *"$flag"* ]] && flag_present="yes"
+  check "'$flag' in output" yes "$flag_present"
+done
+
 echo
 echo "install.sh --help (piped: script on stdin, as with curl | bash -s -- --help)"
 
