@@ -66,7 +66,9 @@ nothing gets lost across the restart boundary.
    the skill invoked outside a session) the write still proceeds
    exactly as before:
    ```bash
-   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+   if [ -z "${hb:-}" ]; then
+     echo "MISSING: \$hb is empty; run the resolution snippet above in the same Bash call"
+   elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
      bash "$hb/write_handoff.sh" --session-id "$CLAUDE_CODE_SESSION_ID" </dev/null
    else
      bash "$hb/write_handoff.sh" </dev/null
@@ -198,7 +200,12 @@ nothing gets lost across the restart boundary.
    ```bash
    hb="${CLAUDE_HOME:-$HOME/.claude}/bin"
    [ -f "$hb/write_handoff.sh" ] || hb=""
-   bash "$hb/write_handoff.sh" --restamp </dev/null
+   if [ -z "$hb" ]; then
+     echo "MISSING: handoff scripts not installed (no write_handoff.sh in ${CLAUDE_HOME:-$HOME/.claude}/bin)"
+   else
+     echo "handoff-bin: $hb"
+     bash "$hb/write_handoff.sh" --restamp </dev/null
+   fi
    ```
    This re-signs `handoff_current.md` in place with the per-machine
    secret so the next session loads the Rules/pinned blocks as binding.

@@ -135,7 +135,12 @@ final turns.
    ```bash
    hb="${CLAUDE_HOME:-$HOME/.claude}/bin"
    [ -f "$hb/write_handoff.sh" ] || hb=""
-   bash "$hb/handoff_recover_tail.sh" <previous_session_id>
+   if [ -z "$hb" ]; then
+     echo "MISSING: handoff scripts not installed (no write_handoff.sh in ${CLAUDE_HOME:-$HOME/.claude}/bin)"
+   else
+     echo "handoff-bin: $hb"
+     bash "$hb/handoff_recover_tail.sh" <previous_session_id>
+   fi
    ```
 
    It compares the dump's cursor against the transcript JSONL and prints
@@ -212,7 +217,12 @@ final turns.
    ```bash
    hb="${CLAUDE_HOME:-$HOME/.claude}/bin"
    [ -f "$hb/write_handoff.sh" ] || hb=""
-   bash "$hb/write_handoff.sh" --restamp </dev/null
+   if [ -z "$hb" ]; then
+     echo "MISSING: handoff scripts not installed (no write_handoff.sh in ${CLAUDE_HOME:-$HOME/.claude}/bin)"
+   else
+     echo "handoff-bin: $hb"
+     bash "$hb/write_handoff.sh" --restamp </dev/null
+   fi
    ```
    Best-effort — if it warns (no openssl, older install), continue; the
    handoff still works, the rules just load as data. Re-run it after any
