@@ -116,15 +116,18 @@ removes the secret.
 
 ### Migrating from the plugin (0.19 and earlier)
 
-Versions up to 0.19 also shipped as a Claude Code plugin. That
-distribution is gone; `install.sh` is the only install path. To move a
-plugin install over:
+Versions up to 0.19 also shipped as a Claude Code plugin, and 0.19.0 is
+the last version published as a plugin. That distribution is gone;
+`install.sh` is the only install path. To move a plugin install over:
 
 1. Remove the plugin at the scope you installed it with (`--scope
    project` for a per-project install, `--scope user` for a global one,
-   `--scope local` if you used that):
+   `--scope local` if you used that; the default is `user`). Project and
+   local scope act on the `.claude/` settings of the directory you run the
+   command in, so run it from inside the project directory:
 
    ```bash
+   cd <dir>
    claude plugin uninstall claude-code-handoff@claude-code-handoff --scope project
    ```
 
@@ -142,7 +145,9 @@ plugin install over:
 
 The HMAC secret is per machine (`~/.claude/handoff_secret`), and the
 plugin read the same file, so handoffs it signed keep verifying as
-binding rules after the switch.
+binding rules after the switch. Until the plugin is gone, the installer
+and `./install.sh --doctor` say so: its hook commands differ from the
+installer's, so both sets would run on every event.
 
 ## Requirements
 
