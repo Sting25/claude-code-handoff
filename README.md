@@ -102,9 +102,11 @@ through hooks without you thinking about it.
 ### Keeping signed handoffs across a reinstall
 
 A user-scope `./install.sh --uninstall` deletes the per-machine HMAC
-secret at `~/.claude/handoff_secret` by default (see [Uninstall
+secret at `~/.claude/handoff_secret` (see [Uninstall
 details](docs/reference.md#uninstall-details)) so no key material is
-left behind by a tool you removed. If you are uninstalling only to
+left behind by a tool you removed, unless a registered project is still
+wired: those projects sign with the same secret, so it is kept and the
+uninstall says so (`--remove-secret` deletes it anyway). If you are uninstalling only to
 reinstall (for example to move from user scope to `--scope project`)
 and have already-signed `handoff_current.md` files (or entries in
 `handoff_history/`) you want to keep verifying as binding rules, run

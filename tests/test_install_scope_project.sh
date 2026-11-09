@@ -25,6 +25,12 @@
 #      uninstall, user-scope uninstall warns about wired projects, the
 #      user-scope doctor lists stale entries
 #   L. both project files wired: the NOTE/WARN names the extra one
+#   M. review round: a user-scope uninstall keeps the shared secret while a
+#      project is wired (--remove-secret deletes it); the doctor remedy on a
+#      fresh machine with a wired project file names the project command;
+#      a project uninstall of a vanished dir clears its registry line; no
+#      --project inside a repo uses the git toplevel; printed commands
+#      quote paths (a path with a space pastes and runs)
 # Every run sandboxes HOME and CLAUDE_HOME, so nothing touches ~/.claude.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -228,7 +234,7 @@ check "H: WARN lists the project file" yes "$(has "$OUT" "/.claude/settings.json
 check "H: WARN does not list an unwired local file" no "$(has "$OUT" "(project, local)")"
 check "H: remedy keeps the secret" yes "$(has "$OUT" "./install.sh --uninstall --keep-secret")"
 check "H: remedy explains the shared secret" yes "$(has "$OUT" "HMAC secret is shared by project-scope installs")"
-check "H: remedy re-wires the project afterwards" yes "$(has "$OUT" "./install.sh --scope project --project $(cd "$P" && pwd -P)")"
+check "H: remedy re-wires the project afterwards" yes "$(has "$OUT" "./install.sh --scope project --project '$(cd "$P" && pwd -P)'")"
 check "H: no double-fire wording in the WARN" no "$(has "$OUT" "fires once per file")"
 RUN_DIR="$P" inst --doctor
 check "H: user-scope doctor in the project WARNs too" yes "$(has "$OUT" "$WIRED_MSG")"
@@ -316,7 +322,91 @@ inst --project "$P" --local
 check "L: --local on a wired settings.json prints the NOTE" yes "$(has "$OUT" "NOTE: this installer's hooks are wired in")"
 check "L: NOTE lists the local file" yes "$(has "$OUT" "settings.local.json (project, local)")"
 check "L: NOTE says it is redundant" yes "$(has "$OUT" "Both project files carry the hooks")"
-check "L: NOTE gives the command for the extra file" yes "$(has "$OUT" "./install.sh --uninstall --scope project --project $(cd "$P" && pwd -P)")"
+check "L: NOTE gives the command for the extra file" yes "$(has "$OUT" "./install.sh --uninstall --scope project --project '$(cd "$P" && pwd -P)'")"
 check "L: no user-scope complaint when the user file is clean" no "$(has "$OUT" "User-scope wiring present")"
+
+
+# --- M. review round ------------------------------------------------------------------
+SECRET_HEX="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# uninst_nojail [args...]: like inst, but without the suite's secret jail,
+# so the default $CLAUDE_HOME/handoff_secret path is the one in play.
+uninst_nojail() {
+  OUT="$(cd "${RUN_DIR:-$P}" && env -u HANDOFF_SECRET_FILE HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" "$@" 2>&1)"
+  RC=$?
+}
+# M1: secret kept while a project is wired; --remove-secret deletes it.
+fresh_sandbox
+inst --project "$P"
+printf '%s\n' "$SECRET_HEX" > "$H/.claude/handoff_secret"; chmod 600 "$H/.claude/handoff_secret"
+uninst_nojail --uninstall
+check "M1: user uninstall exit 0" 0 "$RC"
+check "M1: secret kept while a project is wired" yes "$([[ -f "$H/.claude/handoff_secret" ]] && echo yes || echo no)"
+check "M1: keep message" yes "$(has "$OUT" "kept: 1 project-scope install(s) still sign with")"
+check "M1: keep message names the flag" yes "$(has "$OUT" "pass --remove-secret to delete it anyway")"
+check "M1: WARN names the secret" yes "$(has "$OUT" "The HMAC secret $H/.claude/handoff_secret was kept for them.")"
+inst --project "$P"
+uninst_nojail --uninstall --remove-secret
+check "M1: --remove-secret exit 0" 0 "$RC"
+check "M1: --remove-secret deletes the secret" no "$([[ -e "$H/.claude/handoff_secret" ]] && echo yes || echo no)"
+check "M1: WARN says the secret is gone" yes "$(has "$OUT" "is gone, so their signed handoffs no longer verify")"
+inst --uninstall --keep-secret --remove-secret
+check "M1: --keep-secret with --remove-secret refused" 2 "$RC"
+check "M1: contradiction message" yes "$(has "$OUT" "--keep-secret and --remove-secret contradict each other")"
+
+# M2: teammate clone / new Mac: the project file is wired, the scripts are not.
+fresh_sandbox
+inst --project "$P"
+H_OLD="$H"; H="$(mktemp -d)"; cleanup_on_exit "$H"; mkdir -p "$H/.claude"
+RUN_DIR="$P" inst --doctor
+check "M2: doctor reports the missing scripts" 1 "$RC"
+check "M2: remedy is the project command" yes "$(has "$OUT" "Re-run ./install.sh --scope project --project '$(cd "$P" && pwd -P)' from")"
+check "M2: remedy is not a bare user-scope install" no "$(has "$OUT" "Re-run ./install.sh from")"
+H="$H_OLD"
+
+# M3: project uninstall of a directory that is gone clears its registry line.
+fresh_sandbox
+mkdir -p "$P/wt"
+WT="$(cd "$P/wt" && pwd -P)"
+inst --project "$WT"
+check "M3: registered" 1 "$(grep -cFx "$WT	settings.json" "$H/.claude/handoff_projects" 2>/dev/null)"
+rm -rf "$P/wt"
+RUN_DIR="$H" inst --doctor
+check "M3: doctor lists the vanished dir as stale" yes "$(has "$OUT" "$WT (settings.json)")"
+inst --uninstall --scope project --project "$WT"
+check "M3: uninstall of a gone dir exits 0" 0 "$RC"
+check "M3: says the dir is gone" yes "$(has "$OUT" "$WT no longer exists; nothing to unpatch")"
+check "M3: registry line removed" no "$([[ -e "$H/.claude/handoff_projects" ]] && echo yes || echo no)"
+check "M3: dir not recreated" no "$([[ -e "$WT" ]] && echo yes || echo no)"
+inst --scope project --project "$WT"
+check "M3: install into a gone dir still refused" 2 "$RC"
+
+# M4: no --project from a repo subdirectory wires the git toplevel.
+fresh_sandbox
+must git -C "$P" init -q
+mkdir -p "$P/sub/deeper"
+RUN_DIR="$P/sub/deeper" inst --scope project
+check "M4: exit 0" 0 "$RC"
+check "M4: toplevel file wired" 1 "$(pj '.hooks.Stop | length')"
+check "M4: subdirectory not wired" no "$([[ -e "$P/sub/deeper/.claude" ]] && echo yes || echo no)"
+check "M4: chosen directory printed" yes "$(has "$OUT" "(the git toplevel of the current directory)")"
+fresh_sandbox
+RUN_DIR="$P" inst --scope project
+check "M4: outside a repo the current directory is used and said" yes "$(has "$OUT" "(the current directory).")"
+
+# M5: paths with a space are quoted in printed commands and paste cleanly.
+fresh_sandbox
+mkdir -p "$P/my proj"
+Q="$(cd "$P/my proj" && pwd -P)"
+inst --project "$Q"
+check "M5: install into a path with a space" 0 "$RC"
+inst
+inst --doctor --project "$Q"
+check "M5: doctor command quotes the path" yes "$(has "$OUT" "--project '$Q'")"
+inst --uninstall
+check "M5: registry warning quotes the path" yes "$(has "$OUT" "./install.sh --uninstall --scope project --project '$Q'")"
+cmd_line="$(printf '%s\n' "$OUT" | grep -m1 "\./install.sh --uninstall --scope project --project '" | sed 's/^ *//')"
+OUT="$(cd "$P" && eval "HOME=\"\$H\" CLAUDE_HOME=\"\$H/.claude\" bash \"\$SRC/install.sh\" ${cmd_line#./install.sh }" 2>&1)"; RC=$?
+check "M5: the printed command pastes and runs" 0 "$RC"
+check "M5: and unwires that project" 0 "$(jq -r '.hooks.Stop // [] | length' "$Q/.claude/settings.json" 2>/dev/null)"
 
 finish

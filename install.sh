@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 67c7db3e96d47975fda0b6ab7eecea062972df6511338f57991f9f543b95cb2d
+# SOURCE-SHA256: 050b243402c09094aa467877f72c80e073ce7c6c4f73c6e966a363343b1497f7
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -74,6 +74,11 @@ Scope (where the hooks are wired):
   flags: a project-scope --uninstall strips only that project's settings
   file and leaves ~/.claude/bin, the skills, and the HMAC secret in place.
   The project must be an existing directory, and may not be this clone.
+  Without --project, inside a git repo the project is its toplevel.
+
+  While any project-scope install is still wired, a user-scope --uninstall
+  keeps the shared HMAC secret (those projects sign with it); add
+  --remove-secret to delete it anyway.
 
 --keep-secret only changes what --uninstall does. It is still accepted
 without --uninstall (plain install, --doctor) so a script that always
@@ -153,6 +158,13 @@ link_mode="auto"
 # "delete" (unchanged, opt-in only) because the secret is also genuinely
 # uninstall-scoped key material for someone leaving the tool entirely.
 keep_secret=0
+# --remove-secret (issue #171): a user-scope --uninstall keeps the secret
+# automatically while any registered project-scope install is still wired
+# (they sign with it); this flag deletes it anyway.
+remove_secret=0
+# Set when a project-scope --uninstall names a directory that is gone (a
+# removed worktree): only its registry line is cleared.
+project_gone=0
 
 # Validate $claude_home before creating or patching anything under it: an empty,
 # root, or relative value would scatter symlinks and a patched settings.json
@@ -238,6 +250,7 @@ while [[ $# -gt 0 ]]; do
     --copy)        link_mode=copy ;;
     --link)        link_mode='link' ;;
     --keep-secret) keep_secret=1 ;;
+    --remove-secret) remove_secret=1 ;;
     --model)
       if [[ $# -lt 2 || -z "$2" ]]; then
         echo "ERROR: --model requires a value (e.g. --model 'opus[1m]')" >&2
@@ -284,6 +297,13 @@ done
 if (( keep_secret )) && [[ "$mode" != uninstall ]]; then
   echo "warning: --keep-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
 fi
+if (( keep_secret && remove_secret )); then
+  echo "ERROR: --keep-secret and --remove-secret contradict each other; pass one." >&2
+  exit 2
+fi
+if (( remove_secret )) && [[ "$mode" != uninstall ]]; then
+  echo "warning: --remove-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
+fi
 
 # Resolve the install scope (issue #171). Every refusal here exits before
 # anything is created or patched.
@@ -307,13 +327,41 @@ if (( use_local )) && [[ "$scope" != project ]]; then
   exit 2
 fi
 if [[ "$scope" == project ]]; then
-  # No --project: the current directory, the natural shape for
-  # `cd ~/code/myapp && ~/src/claude-code-handoff/install.sh --scope project`.
-  [[ -n "$project_dir" ]] || project_dir="$PWD"
-  if [[ ! -d "$project_dir" ]]; then
+  # No --project: the project containing the current directory, the natural
+  # shape for `cd ~/code/myapp && ~/src/claude-code-handoff/install.sh
+  # --scope project`. Inside a git repo that is its toplevel (Claude Code
+  # reads .claude/ at the project root, not in a subdirectory); outside
+  # one, the current directory itself. Said out loud either way.
+  if [[ -z "$project_dir" ]]; then
+    _top=""
+    if command -v git >/dev/null 2>&1; then
+      _top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+    fi
+    if [[ -n "$_top" ]]; then
+      project_dir="$_top"
+      echo "note: no --project given; using $project_dir (the git toplevel of the current directory)." >&2
+    else
+      project_dir="$PWD"
+      echo "note: no --project given; using $project_dir (the current directory)." >&2
+    fi
+  fi
+  if [[ ! -d "$project_dir" && "$mode" == uninstall ]]; then
+    # A project-scope uninstall of a directory that is gone (typically a
+    # removed worktree the doctor listed as stale) only clears its registry
+    # line; there is no file left to unpatch. Made absolute the only way a
+    # missing path allows, so it matches the registry's absolute entries.
+    case "$project_dir" in
+      /*) : ;;
+      *) project_dir="$PWD/$project_dir" ;;
+    esac
+    while [[ "$project_dir" == */ && "$project_dir" != / ]]; do project_dir="${project_dir%/}"; done
+    project_gone=1
+  elif [[ ! -d "$project_dir" ]]; then
     echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
     exit 2
   fi
+fi
+if [[ "$scope" == project ]] && (( ! project_gone )); then
   # Absolute and physical, so the comparisons below and the paths printed
   # (and the backup location) never depend on how the flag was spelled.
   project_dir="$(cd "$project_dir" && pwd -P)"
@@ -342,6 +390,9 @@ if [[ "$scope" == project ]]; then
     echo "       Use --scope user to patch $user_settings." >&2
     exit 2
   fi
+fi
+if [[ "$scope" == project ]]; then
+  _proj_claude="$project_dir/.claude"
   if (( use_local )); then
     settings_name="settings.local.json"
   else
@@ -354,8 +405,8 @@ if [[ "$scope" == project ]]; then
   project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$project_dir" | cksum | awk '{print $1}')"
   # A project-scope --uninstall never touches the secret (see 40-main.sh),
   # so --keep-secret is a no-op there too; say so, same as issue #82.
-  if (( keep_secret )) && [[ "$mode" == uninstall ]]; then
-    echo "warning: --keep-secret has no effect with --scope project; a project-scope --uninstall never removes the secret." >&2
+  if (( keep_secret || remove_secret )) && [[ "$mode" == uninstall ]]; then
+    echo "warning: --keep-secret/--remove-secret have no effect with --scope project; a project-scope --uninstall never removes the secret." >&2
   fi
 fi
 
@@ -1282,16 +1333,51 @@ signing_status_reason() {
 # The install command that re-creates THIS run's wiring, for remedies doctor
 # prints: a project-scope doctor must not tell the user to run a bare
 # ./install.sh, which would wire the user-scope file instead (issue #171).
+# In user scope it consults the wiring: when the user file is unwired but
+# the project (or, failing that, a registered project) carries our hooks, a
+# bare ./install.sh would wire the wrong scope, so it prints that project's
+# command instead (the new-machine or teammate-clone case, where a tracked
+# project settings.json arrives without the scripts).
 rerun_cmd() {
+  local proj first rp rn
   if [[ "$scope" == project ]]; then
     if (( use_local )); then
-      printf '%s\n' "./install.sh --scope project --project $project_dir --local"
+      printf '%s\n' "./install.sh --scope project --project $(shq "$project_dir") --local"
     else
-      printf '%s\n' "./install.sh --scope project --project $project_dir"
+      printf '%s\n' "./install.sh --scope project --project $(shq "$project_dir")"
     fi
-  else
-    printf '%s\n' "./install.sh"
+    return 0
   fi
+  if ! settings_has_our_hooks "$user_settings"; then
+    proj="$(wiring_project_root)"
+    if settings_has_our_hooks "$proj/.claude/settings.json"; then
+      printf '%s\n' "./install.sh --scope project --project $(shq "$proj")"
+      return 0
+    fi
+    if settings_has_our_hooks "$proj/.claude/settings.local.json"; then
+      printf '%s\n' "./install.sh --scope project --project $(shq "$proj") --local"
+      return 0
+    fi
+    first="$(registry_scan wired | head -n 1 || true)"
+    if [[ -n "$first" ]]; then
+      rp="${first%%$'\t'*}"; rn="${first#*$'\t'}"
+      if [[ "$rn" == settings.local.json ]]; then
+        printf '%s\n' "./install.sh --scope project --project $(shq "$rp") --local"
+      else
+        printf '%s\n' "./install.sh --scope project --project $(shq "$rp")"
+      fi
+      return 0
+    fi
+  fi
+  printf '%s\n' "./install.sh"
+}
+
+# Single-quote a path for a printed, copy-pasteable command (a project path
+# with a space must survive the paste). Embedded single quotes become '\''.
+shq() {
+  local q
+  q="$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+  printf "'%s'" "$q"
 }
 
 # settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
@@ -1337,7 +1423,9 @@ wiring_project_root() {
   if command -v git >/dev/null 2>&1; then
     top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
   fi
-  printf '%s\n' "${top:-$PWD}"
+  # Physical, like every project path this installer records or prints.
+  [[ -n "$top" ]] || top="$(pwd -P)"
+  printf '%s\n' "$top"
 }
 
 # Wiring layout check (issue #171). Claude Code runs an identical handler
@@ -1375,17 +1463,17 @@ report_wiring() {
     echo "${pc}invalidate the signed handoffs in every wired project. A user-scope"
     echo "${pc}uninstall also removes the shared scripts in $claude_home/bin, so re-run"
     echo "${pc}the project install afterwards:"
-    if (( sw )); then echo "${pc}  ./install.sh --scope project --project $proj"; fi
-    if (( lw )); then echo "${pc}  ./install.sh --scope project --project $proj --local"; fi
+    if (( sw )); then echo "${pc}  ./install.sh --scope project --project $(shq "$proj")"; fi
+    if (( lw )); then echo "${pc}  ./install.sh --scope project --project $(shq "$proj") --local"; fi
     if (( ! sw && ! lw )); then echo "${pc}  $(rerun_cmd)"; fi
   fi
   if (( dup_issue )); then
     echo "${pc}Both project files carry the hooks. Claude Code runs them once, so this"
     echo "${pc}is redundant rather than broken; keep one. To remove the extra one run:"
     if [[ "$scope" == project ]] && (( use_local )); then
-      echo "${pc}  ./install.sh --uninstall --scope project --project $proj"
+      echo "${pc}  ./install.sh --uninstall --scope project --project $(shq "$proj")"
     else
-      echo "${pc}  ./install.sh --uninstall --scope project --project $proj --local"
+      echo "${pc}  ./install.sh --uninstall --scope project --project $(shq "$proj") --local"
     fi
     if [[ "$scope" != project ]]; then
       echo "${pc}  (or drop settings.json instead: the same command without --local)"
@@ -1424,7 +1512,7 @@ registry_remove() {  # <project dir> <settings file name>
   echo "  remove  registry: $1 ($2)"
 }
 
-# registry_scan <wired|stale>: print "<dir> (<name>)" for each registered
+# registry_scan <wired|stale>: print "<dir><TAB><name>" for each registered
 # project whose file does (wired) or does not (stale) carry our hooks.
 registry_scan() {
   local want="$1" rp rn has
@@ -1434,37 +1522,48 @@ registry_scan() {
     case "$rn" in settings.json|settings.local.json) ;; *) continue ;; esac
     has=stale
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
-    if [[ "$has" == "$want" ]]; then printf '%s (%s)\n' "$rp" "$rn"; fi
+    if [[ "$has" == "$want" ]]; then printf '%s\t%s\n' "$rp" "$rn"; fi
   done < "$project_registry"
   return 0
 }
 
+# registry_list_cmds <list>: one indented line per "<dir><TAB><name>" entry,
+# the entry itself and the copy-pasteable project uninstall for it.
+registry_list_cmds() {
+  local rp rn flag
+  while IFS=$'\t' read -r rp rn; do
+    [[ -n "$rp" ]] || continue
+    flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
+    echo "            $rp ($rn)"
+    echo "              ./install.sh --uninstall --scope project --project $(shq "$rp")$flag"
+  done <<< "$1"
+}
+
 # User-scope --uninstall: warn about every registered project still wired,
-# since their hooks call the scripts this uninstall removes.
+# since their hooks call the scripts this uninstall removes. <secret_note>
+# says what happened to the shared HMAC secret.
 report_registry_orphans() {
-  local list _l
-  list="$(registry_scan wired)"
+  local list="$1" secret_note="$2"
   [[ -n "$list" ]] || return 0
   echo "  WARN    project-scope installs still wired (from $project_registry):"
-  while IFS= read -r _l; do echo "            $_l"; done <<< "$list"
+  registry_list_cmds "$list"
   echo "          Their hooks call the scripts this uninstall removes from"
   echo "          $claude_home/bin, so they will silently no-op until each project is"
-  echo "          re-wired with './install.sh --scope project --project <dir>' or"
-  echo "          uninstalled with './install.sh --uninstall --scope project --project <dir>'"
-  echo "          (add --local for settings.local.json)."
+  echo "          re-wired with ./install.sh --scope project --project <dir>, or"
+  echo "          uninstalled with the command listed under it."
+  echo "          $secret_note"
 }
 
 # User-scope doctor: name registered projects whose file no longer carries
 # our hooks. Informational only.
 report_registry_stale() {
-  local list _l
+  local list
   list="$(registry_scan stale)"
   [[ -n "$list" ]] || return 0
   echo "  note    stale project registry entries (the file no longer carries this"
-  echo "          installer's hooks), from $project_registry:"
-  while IFS= read -r _l; do echo "            $_l"; done <<< "$list"
-  echo "          Clear one with './install.sh --uninstall --scope project --project <dir>'"
-  echo "          (add --local for settings.local.json), or delete its line from the file."
+  echo "          installer's hooks), from $project_registry; clear each with the"
+  echo "          command under it (works for a directory that is gone, too):"
+  registry_list_cmds "$list"
   echo
 }
 
@@ -1762,6 +1861,16 @@ elif [[ "$scope" == project ]]; then
   # the way to remove them.
   echo "uninstalling handoff wiring from $project_dir (project scope)"
   echo
+  if (( project_gone )); then
+    # The directory is gone (a removed worktree, usually): nothing left to
+    # unpatch, so clear its registry line and stop cleanly.
+    echo "project settings ($project_dir):"
+    echo "  ok      $project_dir no longer exists; nothing to unpatch"
+    registry_remove "$project_dir" "$settings_name"
+    echo
+    echo "done. the repo at $repo_root is untouched."
+    exit 0
+  fi
   echo "project settings ($project_dir):"
   unpatch_settings
   registry_remove "$project_dir" "$settings_name"
@@ -1781,8 +1890,26 @@ else
   unpatch_settings
   echo
   echo "local state:"
-  remove_secret_if_ours
-  report_registry_orphans
+  # Registry first (issue #171 review): projects still wired sign their
+  # handoffs with the same per-machine secret, so deleting it here would
+  # silently downgrade every one of them. Keep it automatically while any
+  # registered project is wired; --remove-secret deletes it anyway.
+  orphan_list="$(registry_scan wired)"
+  secret_path="${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}"
+  if [[ -n "$orphan_list" ]] && (( ! remove_secret && ! keep_secret )); then
+    orphan_n="$(printf '%s\n' "$orphan_list" | wc -l | tr -d ' ')"
+    echo "  keep    $secret_path (kept: $orphan_n project-scope install(s) still sign with"
+    echo "          it; pass --remove-secret to delete it anyway)"
+    secret_note="The HMAC secret $secret_path was kept for them."
+  else
+    remove_secret_if_ours
+    if [[ -e "$secret_path" ]]; then
+      secret_note="The HMAC secret $secret_path is still in place."
+    else
+      secret_note="The HMAC secret $secret_path is gone, so their signed handoffs no longer verify as binding."
+    fi
+  fi
+  report_registry_orphans "$orphan_list" "$secret_note"
   echo
   echo "done. the repo at $repo_root is untouched."
 fi

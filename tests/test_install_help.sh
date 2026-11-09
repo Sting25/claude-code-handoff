@@ -37,7 +37,7 @@ help_present="no"
 check "--help in output" yes "$help_present"
 
 # Install scope flags (issue #171), plus the recommended project example.
-for flag in "--scope user" "--scope project" "--project <dir>" "--local" \
+for flag in "--scope user" "--scope project" "--project <dir>" "--local" "--remove-secret" \
             "./install.sh --scope project --project"; do
   flag_present="no"
   [[ "$out" == *"$flag"* ]] && flag_present="yes"
