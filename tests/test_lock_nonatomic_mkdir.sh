@@ -63,6 +63,11 @@ rm -rf "$repo"
 repo="$(mk_repo)"
 must mkdir -p "$repo/.claude/.handoff_write.lock"
 echo 424242 > "$repo/.claude/.handoff_write.lock/owner"
+# Age the token as well as the dir, as a real dead holder's would be: writing
+# the token updates the dir's mtime, so a token newer than its dir only
+# happens when a reclaimer won after another's age check, and the #155
+# reclaim then hands it back instead of taking it.
+touch -t 202001010000 "$repo/.claude/.handoff_write.lock/owner"
 touch -t 202001010000 "$repo/.claude/.handoff_write.lock"   # POSIX touch -t
 ( cd "$repo" && PATH="$SHIMPATH" HANDOFF_LOCK_STALE_SECS=1 bash "$WH" --if-curated >/dev/null 2>&1 ); rc=$?
 check "stale write lock with token: exit 0"          0   "$rc"

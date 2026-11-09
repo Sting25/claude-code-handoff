@@ -24,6 +24,16 @@ are appended).
   a trailing newline, multi-line, or written a moment after spawn) are
   still read in full; a timeout degrades to the always-write path. The
   skill snippets now also pass `</dev/null`, which skips the wait.
+- Reclaiming a stale lock now has exactly one winner (#155). When a
+  holder died and left its lock behind, two hook runs that both saw it as
+  stale could both take it over: the second one deleted the first one's
+  fresh ownership token. The reclaim now captures the old token with an
+  atomic rename, hands it straight back if it turns out to belong to a run
+  that reclaimed in the meantime, and lets the usual exclusive token
+  create pick the one owner. A lock whose `owner` entry had become a
+  directory is now reclaimed instead of staying stuck forever. Applies to
+  the write lock, the shared .gitignore lock and the per-session lock used
+  where `flock` is missing (macOS).
 
 ## [0.19.0] - 2026-11-03
 

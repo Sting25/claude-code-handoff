@@ -632,10 +632,114 @@ claim_mkdir_lock() {  # <lock_dir>; 0 = this process owns the lock
 release_mkdir_lock() {  # <lock_dir>
   [[ -L "$1" ]] && return 0
   rm -f "$1/owner" 2>/dev/null || true
+  rmdir "$1" 2>/dev/null && return 0
+  # Still there: a stale reclaimer may hold a capture of our token
+  # (owner.reap.*, see the reclaim below). Remove captures and retry, so the
+  # lock is freed now and the reclaimer finds nothing to hand back.
+  rm -f "$1"/owner.reap.* 2>/dev/null || true
   rmdir "$1" 2>/dev/null || true
 }
+# Stale reclaim, single winner (#155). Shared idiom with handoff_turn_append.sh's
+# ta_reclaim_stale_lock (keep the two bodies in sync). Returns 0 with the lock
+# held, 1 otherwise; the caller has already failed a plain mkdir+claim.
+#
+# Why not `rm owner; rmdir; mkdir; claim` (the old chain): the age check and
+# the removal were separate steps, so reclaimer B, which saw the dead holder's
+# lock as stale, could arrive after reclaimer A had already reclaimed it and
+# delete A's FRESH token, and then both owned the lock. An `owner` that is a
+# directory also wedged it forever (`rm -f` fails, `rmdir` refuses).
+#
+# Now: (1) the lock DIR's age gates entry, exactly as before. (2) The owner
+# token is captured with an atomic same-directory rename to a name unique to
+# this process; at most one caller can capture any given token. (3) The
+# captured token's mtime (rename keeps it) is compared with the dir mtime the
+# age check judged stale. A token is created once, at claim time (which
+# updates the dir's mtime), then written, so a dead holder's token is at most
+# 1 s newer than its dir (create and write straddling a second). A token
+# more than 1 s newer than the dir we judged means another reclaimer won
+# after our check and we just took a live holder's token: it goes straight
+# back (a hard link, which never replaces a token someone else made
+# meanwhile) and we report held. A new token is at least the window newer
+# than the judged dir, so the 1 s allowance holds for any window of 2 s or
+# more. (4b) A caller with nothing to capture claims only if the dir mtime
+# is still the one it judged: a capture, claim or release by anyone else
+# changes it. Without that, a third reclaimer could claim while another held
+# a capture of the winner's token, and two processes owned the lock.
+# Only a regular file can be a live token (that is all a claim ever writes),
+# so anything else captured there (a directory, a symlink) is junk and goes. (4) Otherwise the captured entry is removed with rm -rf
+# (a file, or a directory of any depth, never followed if it is a symlink).
+# (5) Ownership is then settled by claim_mkdir_lock, the same O_EXCL token
+# create every acquisition uses, so whoever reaches it first among the
+# reclaimers wins and everyone else gets a miss. A caller whose capture
+# found nothing (no token at all, or a peer captured it first) goes straight
+# to that claim: it can only win if nobody else holds the token. The dir is
+# never removed or recreated on this path, so there is no mkdir window and no
+# second mkdir to race.
+# Orphans: a kill between capture and removal leaves an owner.reap.* entry in
+# the dir. The release removes captures when its rmdir fails (a holder's dir
+# can only hold captures of its own token), and the reclaim winner sweeps
+# every owner.reap.* entry older than the window (a live reclaimer's capture
+# of a fresh token is fresh, so it is never swept from under it).
+reclaim_stale_mkdir_lock() {  # <lock_dir>
+  local lock_dir="$1" stale_secs lock_mtime now reap reap_mtime g g_mtime
+  [[ -L "$lock_dir" || ! -d "$lock_dir" ]] && return 1
+  stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
+  # Numeric guard before the (( )) below: bash arithmetic recursively
+  # expands its operand, so a non-numeric payload (e.g. an array subscript
+  # with command substitution) delivered via a clone's .claude/settings.json
+  # env would execute. Fall back to the default on anything non-numeric,
+  # matching every other arithmetic env var in this script.
+  [[ "$stale_secs" =~ ^[0-9]+$ ]] || stale_secs=300
+  # Age via GNU `stat -c` with a BSD `stat -f` fallback.
+  lock_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null \
+                || stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  [[ "$lock_mtime" =~ ^[0-9]+$ ]] || return 1
+  (( lock_mtime + stale_secs <= now )) || return 1
+  reap="$lock_dir/owner.reap.$$.$RANDOM$RANDOM"
+  # The target must not exist: mv into an existing directory (or through a
+  # symlink to one) would nest the token instead of renaming it.
+  if [[ ! -e "$reap" && ! -L "$reap" ]] \
+     && mv "$lock_dir/owner" "$reap" 2>/dev/null; then
+    reap_mtime="$(stat -c %Y "$reap" 2>/dev/null \
+                  || stat -f %m "$reap" 2>/dev/null || echo 0)"
+    if [[ -f "$reap" && ! -L "$reap" && "$reap_mtime" =~ ^[0-9]+$ ]] \
+       && (( reap_mtime > lock_mtime + 1 )); then
+      # A live holder's token: hand it back. ln (link(2)) is atomic, fails
+      # if an owner exists, and fails if the capture is gone, which is how
+      # a release by that holder in the meantime shows up (the release
+      # removes captures, see release_mkdir_lock); then there is nothing
+      # to hand back and the lock is already free.
+      if ! ln "$reap" "$lock_dir/owner" 2>/dev/null && [[ -e "$reap" ]]; then
+        echo "lock reclaim: could not hand a live holder's token back to $lock_dir (another process claimed it meanwhile)." >&2
+      fi
+      rm -f "$reap" 2>/dev/null || true
+      return 1
+    fi
+    rm -rf "$reap" 2>/dev/null || true
+  else
+    # Nothing to capture: no token, or a peer captured it. Claim only if
+    # the dir is untouched since our age check. Any capture, claim or
+    # release changes its mtime, and a stale lock_mtime is at least the
+    # window in the past, so an equal reading means nobody acted in
+    # between (review of #155: without this, C claimed while B held a
+    # capture of A's fresh token, and A and C both owned the lock).
+    g_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null \
+               || stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
+    [[ "$g_mtime" == "$lock_mtime" ]] || return 1
+  fi
+  claim_mkdir_lock "$lock_dir" || return 1
+  for g in "$lock_dir"/owner.reap.*; do
+    [[ -e "$g" || -L "$g" ]] || continue
+    g_mtime="$(stat -c %Y "$g" 2>/dev/null || stat -f %m "$g" 2>/dev/null || echo 0)"
+    if [[ "$g_mtime" =~ ^[0-9]+$ ]] && (( g_mtime + stale_secs <= now )); then
+      rm -rf "$g" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
 try_mkdir_lock() {  # <lock_dir>
-  local lock_dir="$1" stale_secs lock_mtime now
+  local lock_dir="$1"
   # A symlink planted at the lock path (a malicious repo could ship one) makes
   # mkdir fail with EEXIST forever and rmdir can't reclaim through it — i.e. a
   # permanently wedged lock. Refuse it, mirroring this script's other symlink
@@ -649,26 +753,8 @@ try_mkdir_lock() {  # <lock_dir>
   fi
   # Held, or leftover, or mkdir reported success for a dir someone else owns
   # (a racing peer's, which is fresh and stays theirs; or a dead holder's,
-  # which the staleness check below reclaims). Only age decides.
-  # Age via GNU `stat -c` with a BSD `stat -f` fallback, like turn_append.
-  stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
-  # Numeric guard before the (( )) below: bash arithmetic recursively
-  # expands its operand, so a non-numeric payload (e.g. an array subscript
-  # with command substitution) delivered via a clone's .claude/settings.json
-  # env would execute. Fall back to the default on anything non-numeric,
-  # matching every other arithmetic env var in this script.
-  [[ "$stale_secs" =~ ^[0-9]+$ ]] || stale_secs=300
-  lock_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null \
-                || stat -f %m "$lock_dir" 2>/dev/null || echo 0)"
-  now="$(date +%s)"
-  if [[ "$lock_mtime" =~ ^[0-9]+$ ]] \
-     && (( now - lock_mtime >= stale_secs )) \
-     && { rm -f "$lock_dir/owner" 2>/dev/null || true; rmdir "$lock_dir" 2>/dev/null; } \
-     && mkdir "$lock_dir" 2>/dev/null \
-     && claim_mkdir_lock "$lock_dir"; then
-    return 0   # reclaimed a stale lock (the dead holder's token had to go first)
-  fi
-  return 1
+  # which the staleness reclaim takes over). Only age decides.
+  reclaim_stale_mkdir_lock "$lock_dir"
 }
 
 # One EXIT trap owns ALL cleanup from here on (traps replace each other, so
