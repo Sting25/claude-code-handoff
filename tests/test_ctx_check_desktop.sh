@@ -2,11 +2,13 @@
 # handoff_ctx_check.sh x desktop mode (issue #144): inside the Claude desktop
 # app the hook environment carries CLAUDE_CODE_ENTRYPOINT=claude-desktop, the
 # status line does not run, and the app shows the real context figure in its
-# own meter. With no fresh cached pct and no HANDOFF_CTX_WINDOW_TOKENS pin, the
-# reminder must report the token count only, point at the app's meter, and
-# drop the model-table percentage and its window source. Every escape (statusline
-# pct, env pin, HANDOFF_CTX_NO_DESKTOP_MODE=1, a non-desktop entrypoint) must
-# restore the percentage path, and terminal sessions must be byte-identical.
+# own meter. #144 hid the percentage there because the window was a guess
+# from the model id. Since PR #177 the window comes from a docs-checked model
+# table (or is reported unknown) and the cadence is percentage-based, so the
+# app now gets the same line as a terminal (percentage and its source) plus
+# one sentence that the app's meter is authoritative. Every escape
+# (statusline pct, env pin, HANDOFF_CTX_NO_DESKTOP_MODE=1, a non-desktop
+# entrypoint) drops that sentence, and terminal sessions are byte-identical.
 #
 # lib.sh unsets CLAUDE_CODE_ENTRYPOINT and CLAUDE_CODE_DESKTOP_APP_VERSION, so
 # every case here sets the entrypoint explicitly; nothing leaks in from a
@@ -54,19 +56,20 @@ echo "handoff_ctx_check.sh: desktop mode (issue #144)"
 
 # --- Desktop, measured tokens, auto window -> token count only --------------
 # Model claude-opus-5-5 -> 1M window (model table); 350000 tokens crosses the
-# 30% gate. In a terminal this prints "~35% of a 1000000-token window" with
-# the window's source; in the app it must print neither.
+# 30% gate. Terminal and app both print "~35% of a 1000000-token window" with
+# the window's source; the app adds the meter sentence.
 repo="$(mk_repo)"; cleanup_on_exit "$repo"
 seed "$repo" DESK 4000 350000 claude-opus-5-5
 out="$(run_auto "$repo" DESK "$DESK")"
 check "desktop -> fires"                         yes "$(has "$out" "<system-reminder>")"
 check "desktop -> keeps 'Context at ~'"          yes "$(has "$out" "Context at ~350000 tokens")"
-check "desktop -> no percent sign anywhere"      no  "$(has "$out" "%")"
+check "desktop -> percentage printed"            yes "$(has "$out" "~35% of a 1000000-token window")"
 check "desktop -> names the app's context meter" yes "$(has "$out" "context meter")"
 check "desktop -> no '(estimated)' label"        no  "$(has "$out" "(estimated)")"
-check "desktop -> no window source"              no  "$(has "$out" "model table")"
-check "desktop -> no window size"                no  "$(has "$out" "1000000-token window")"
-check "desktop -> flag line has no pct"          yes "$(has "$out" "Flagging: about 350000 tokens of context used (see the app's context meter)")"
+check "desktop -> window source named"           yes "$(has "$out" "from this hook's model table for claude-opus-5-5")"
+check "desktop -> meter is authoritative"        yes "$(has "$out" "The desktop app's own context meter is the authoritative figure")"
+check "desktop -> flag line has the pct"         yes "$(has "$out" "Flagging: ~35% of context used")"
+check "desktop -> next step stated"              yes "$(has "$out" "Next reminder at 35% + 5 = 40%")"
 check "desktop -> still passive-mention copy"    yes "$(has "$out" "passive mention")"
 check "desktop -> flag recorded"                 yes "$([[ -f "$repo/.claude/handoff_backups/.ctx_flagged_DESK" ]] && echo yes || echo no)"
 # Cadence unchanged by desktop mode: same 5-point step -> silent.
@@ -86,7 +89,6 @@ seed "$repo" DESKEST 4000000
 out="$(run_auto "$repo" DESKEST "$DESK")"
 check "desktop estimate -> fires"                 yes "$(has "$out" "<system-reminder>")"
 check "desktop estimate -> bytes/4 note kept"     yes "$(has "$out" "ESTIMATED from transcript byte size (bytes/4)")"
-check "desktop estimate -> short note (no 'rough upper bound')" no "$(has "$out" "rough upper bound")"
 check "desktop estimate -> no percent sign"       no  "$(has "$out" "%")"
 check "desktop estimate -> names the meter"       yes "$(has "$out" "context meter")"
 
@@ -124,7 +126,7 @@ seed_sl "$repo" DESKSTALE "tokens=350000" "pct=42"
 must touch -t 202001010000 "$repo/.claude/handoff_backups/.ctx_sl_DESKSTALE"
 must touch "$repo/.claude/handoff_backups/.ctx_tokens_DESKSTALE"
 out="$(run_auto "$repo" DESKSTALE "$DESK")"
-check "desktop + stale sl pct -> no percent sign" no  "$(has "$out" "%")"
+check "desktop + stale sl pct -> table pct"       yes "$(has "$out" "~35% of a 1000000-token window (from this hook's model table")"
 check "desktop + stale sl pct -> meter wording"   yes "$(has "$out" "context meter")"
 
 # --- HANDOFF_CTX_WINDOW_TOKENS pinned -> percentage against the pin --------
@@ -140,7 +142,7 @@ seed "$repo" DESKACT 4000 350000 claude-opus-5-5
 out="$(run_auto "$repo" DESKACT "$DESK" HANDOFF_CTX_REMINDER_MODE=act)"
 check "desktop act -> fires"                yes "$(has "$out" "<system-reminder>")"
 check "desktop act -> self-invoke copy"     yes "$(has "$out" "invoke /handoff yourself")"
-check "desktop act -> no percent sign"      no  "$(has "$out" "%")"
+check "desktop act -> percentage printed"   yes "$(has "$out" "~35% of a 1000000-token window")"
 check "desktop act -> names the meter"      yes "$(has "$out" "context meter")"
 check "desktop act -> keeps 'Context at ~'" yes "$(has "$out" "Context at ~350000 tokens")"
 

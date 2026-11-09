@@ -189,7 +189,7 @@ claude-opus-5-5; percentage is tokens / window)`.
 | `HANDOFF_CTX_SL_MAX_AGE_SECS` | `900` | Age after which the status line cache is not live. |
 | `HANDOFF_CTX_REMINDER_MODE` | `suggest` | `act` makes the assistant run `/handoff` itself. |
 | `HANDOFF_CTX_NO_STATUSLINE` | unset | `1` ignores the status line cache. |
-| `HANDOFF_CTX_NO_DESKTOP_MODE` | unset | `1` prints the percentage in the desktop app. |
+| `HANDOFF_CTX_NO_DESKTOP_MODE` | unset | `1` drops the desktop app's meter sentence. |
 
 When the [status line](#status-line) is wired, the percentage in the
 reminder is Claude Code's own `context_window.used_percentage` whenever the
@@ -204,12 +204,13 @@ real figure in its own context meter. The hook therefore runs in **desktop
 mode** when the hook environment carries
 `CLAUDE_CODE_ENTRYPOINT=claude-desktop` (the app sets it, together with
 `CLAUDE_CODE_DESKTOP_APP_VERSION`), no live cached percentage exists, and
-the window came from the model id or is unknown: the reminder reports the
-token count and its source only, and says the app's context meter is the
-authoritative figure. The cadence is unchanged, so the nudge fires at the
-same points. A status line wired by hand in the app still wins.
-`HANDOFF_CTX_NO_DESKTOP_MODE=1` prints the percentage in the app. Terminal
-sessions never enter desktop mode.
+the window came from the model table or is unknown: the reminder is the same
+line a terminal gets (the percentage and where its window came from, so the
+5-point cadence stays visible) plus one sentence saying the app's context
+meter is the authoritative figure. Until issue #173 the app got the token
+count only, because the window was then a guess from the model id. A status
+line wired by hand in the app still wins. `HANDOFF_CTX_NO_DESKTOP_MODE=1`
+drops the meter sentence. Terminal sessions never enter desktop mode.
 
 The nudge needs a growth measure to space its reminders, and until
 0.14.2 that could only be the Stop hook's transcript byte count
@@ -352,7 +353,10 @@ fire on it. Two hooks cover it:
   pre-compact numbers, and the nudge cadence starts over so the
   assistant can flag `/handoff` again when the window refills. Until
   the first assistant turn after the compaction, the nudge stays
-  silent: the transcript's last usage record is pre-compact too.
+  silent: the transcript's last usage record is pre-compact too. Without
+  the PostCompact hook (Claude Code older than 2.1.76) the flag ledger
+  survives the compaction, so a compaction that lands inside the last
+  flagged step stays silent until the next step is crossed.
 
 ## Where the handoff files live
 

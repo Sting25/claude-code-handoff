@@ -133,14 +133,12 @@
 #                               run there. So when that variable is set, no
 #                               fresh statusline pct exists, and the window was
 #                               not pinned by HANDOFF_CTX_WINDOW_TOKENS, the
-#                               reminder reports the token estimate only,
-#                               points the model at the app's meter as the
-#                               authoritative figure, and omits the inferred
-#                               percentage and its window NOTE. Threshold,
-#                               cooldown and cap logic are unchanged. Set 1 to
-#                               print the inferred percentage anyway. Terminal
-#                               sessions (variable unset or any other value)
-#                               are unaffected either way.
+#                               reminder (same line as a terminal since PR
+#                               #177: percentage and its source) adds one
+#                               sentence that the app's meter is the
+#                               authoritative figure. Set 1 to drop that
+#                               sentence. Terminal sessions (variable unset or
+#                               any other value) are unaffected either way.
 #   HANDOFF_HEALTH_PROMPTS      Stop-hook health detector A (issue #71):
 #                               number of COMPLETED turns (issue #159: main-
 #                               chain assistant transcript lines with
@@ -1073,11 +1071,14 @@ fi
 # --- Desktop mode (issue #144) ---
 # In the Claude desktop app the hook environment carries
 # CLAUDE_CODE_ENTRYPOINT=claude-desktop, and the app displays the real context
-# figure in its own meter. The status line does not run there, so a window
-# this hook could use is at best read off the model id, which the app's meter
-# already contradicts or confirms on screen. So in that situation the
-# reminder carries the token count only and points the model at the meter.
-# Conditions, each of which keeps the percentage path when it fails:
+# figure in its own meter. The status line does not run there. Issue #144
+# hid the percentage in the app because the window was then a guess from the
+# model id, which the app's meter contradicted on screen. Since PR #177 the
+# window comes from a docs-checked model table (or is reported as unknown),
+# and the owner's cadence is percentage-based (30%, then every 5 points), so
+# hiding the percentage would hide the cadence: the app now gets the same
+# line as a terminal, plus one sentence that the app's own meter is the
+# authoritative figure. Conditions for that sentence:
 #   * entrypoint is the desktop app (a terminal session never changes);
 #   * no live statusline pct (CC's own used_percentage is authoritative);
 #   * the window was neither pinned by HANDOFF_CTX_WINDOW_TOKENS nor read
@@ -1085,23 +1086,14 @@ fi
 #     qualifies;
 #   * HANDOFF_CTX_NO_DESKTOP_MODE is not 1 (the escape hatch).
 # Gate, cadence, cap and flag recording above are untouched: only the
-# wording of the emitted reminder differs.
+# appended sentence differs.
 desktop_mode=0
 if [[ "${CLAUDE_CODE_ENTRYPOINT:-}" == "claude-desktop" ]] \
    && [[ -z "$sl_pct" && "$window_source" != "env" && "$window_source" != "statusline" ]] \
    && [[ "${HANDOFF_CTX_NO_DESKTOP_MODE:-0}" != "1" ]]; then
   desktop_mode=1
 fi
-if (( desktop_mode )); then
-  # Shorter estimate wording here: the app meter shows the real figure.
-  [[ "$token_source" == "estimated" ]] \
-    && tok_src="ESTIMATED from transcript byte size (bytes/4), the last fallback; it typically runs high"
-  # No percentage in this mode, the step promise included.
-  [[ "$repeat_note" == "Next reminder at "* ]] \
-    && repeat_note="This reminder re-fires after usage grows by another ${STEP_PCT}-point step."
-  ctx_head="Context at ~${est_tokens} tokens (${tok_src}). The desktop app's own context meter is the authoritative figure for how full the window is: refer to it rather than inferring a percentage."
-  flag_example="about ${est_tokens} tokens of context used (see the app's context meter)"
-elif (( pct_over )) && [[ "$token_source" == "estimated" ]]; then
+if (( pct_over )) && [[ "$token_source" == "estimated" ]]; then
   ctx_head="Context at ~${est_tokens} tokens (${tok_src}), at or above the ${window_tokens}-token window (${win_src}), so no percentage is given."
   flag_example="about ${est_tokens} tokens of context used (an estimate), at or above the ${window_tokens}-token window"
 elif (( pct_over )); then
@@ -1121,6 +1113,9 @@ elif [[ -n "$pct" ]]; then
 else
   ctx_head="Context at ~${est_tokens} tokens (${tok_src}); window unknown (${window_unknown_why}), so no percentage is given."
   flag_example="about ${est_tokens} tokens of context used, window unknown"
+fi
+if (( desktop_mode )); then
+  ctx_head="${ctx_head} The desktop app's own context meter is the authoritative figure for how full the window is."
 fi
 
 case "$REMINDER_MODE" in

@@ -45,7 +45,11 @@ are appended).
   unlisted id such as `claude-opus-5-1` is unknown. A step re-arms only
   after usage falls a full step below it, so 35, 34, 35 fires once. The
   transcript scan reads only the last 64 lines unless they hold nothing of
-  this session.
+  this session. In the desktop app the reminder now carries the
+  percentage and its source like a terminal (the window is no longer a
+  guess, and the 5-point cadence is percentage-based), plus one sentence
+  that the app's own meter is authoritative; `HANDOFF_CTX_NO_DESKTOP_MODE=1`
+  drops that sentence.
 
 ### Fixed
 - `write_handoff.sh` no longer blocks forever on an open, silent stdin
