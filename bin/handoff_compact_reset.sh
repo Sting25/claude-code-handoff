@@ -3,9 +3,12 @@
 #
 # Compaction frees the context window, but the per-session sidecars under
 # .claude/handoff_backups/ still describe the PRE-compact world: the next
-# prompt would nudge off stale-high numbers, and (worse) the MAX_FLAGS=1
-# ledger would forever suppress a legitimately-needed re-nudge in the freed
-# window. Simplest correct behavior: treat post-compact as session-start
+# prompt would nudge off stale-high numbers, and (worse) the flag ledger
+# (its step cadence, or a user-set HANDOFF_CTX_MAX_FLAGS cap) would
+# suppress a legitimately-needed re-nudge in the freed window. Since PR #177
+# handoff_ctx_check.sh also ignores transcript usage older than the
+# compaction boundary, so the gap stays silent even though it now reads the
+# transcript directly. Simplest correct behavior: treat post-compact as session-start
 # fresh — delete the session's measurement + flag sidecars and let the next
 # Stop fire repopulate real post-compact numbers.
 #
@@ -23,9 +26,9 @@
 #                            #69's fallback path, used when the Stop hook's
 #                            byte sidecar above is absent). Same re-arm
 #                            reasoning as .ctx_flagged_<sid>: without this
-#                            clear, the default suggest-mode MAX_FLAGS=1 nudge
-#                            on the token ledger fires exactly once per
-#                            session ever, never again after a compaction.
+#                            clear, a HANDOFF_CTX_MAX_FLAGS=1 nudge on the
+#                            token ledger fires exactly once per session
+#                            ever, never again after a compaction.
 #   .ctx_sl_<sid>          — statusline cache; also pre-compact (the
 #                            statusline will overwrite it within a second
 #                            anyway).

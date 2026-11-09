@@ -4,8 +4,8 @@
 # tests. We pin the window via HANDOFF_CTX_WINDOW_TOKENS so the auto-detect
 # path never participates, then drive the threshold / fallback / mode /
 # cooldown branches directly. A final section un-pins the window (empty
-# override + HOME jailed to the fixture repo) to drive the model-file /
-# regex / ratchet window-detection branches hermetically.
+# override + HOME jailed to the fixture repo) to drive the model-table
+# window-detection branches (issue #173) hermetically.
 #
 # Observable: stdout (a <system-reminder> or nothing) + the .ctx_flagged_* file
 # the cooldown is recorded in.
@@ -98,13 +98,17 @@ out="$(run_cc "$repo" CD2 HANDOFF_CTX_MAX_FLAGS=0)"
 check "beyond cooldown -> re-fires (uncapped)" yes "$(has "$out" "<system-reminder>")"
 rm -rf "$repo"
 
-# --- Per-session cap (the over-nagging fix) ---------------------------------
-# Default suggest mode caps at 1 flag: even far beyond the cooldown, a session
-# that has already flagged once stays silent. This is the fix for "the handoff
-# message shows up more than is correct" on long/idle sessions.
+# --- Per-session cap --------------------------------------------------------
+# Issue #173: suggest mode is uncapped by default (the 5-point step spaces the
+# nudges instead). HANDOFF_CTX_MAX_FLAGS=1 restores the old once-only cap: a
+# session that has already flagged once stays silent, even far past the
+# cooldown.
 repo="$(mk_repo)"; seed "$repo" CAP1 200000 600 0   # one prior flag, way past cooldown
-out="$(run_cc "$repo" CAP1)"                          # suggest default -> MAX_FLAGS=1
-check "suggest default caps at one flag" "" "$out"
+out="$(run_cc "$repo" CAP1)"
+check "suggest default uncapped -> re-fires" yes "$(has "$out" "<system-reminder>")"
+seed "$repo" CAP1 200000 600 0
+out="$(run_cc "$repo" CAP1 HANDOFF_CTX_MAX_FLAGS=1)"
+check "MAX_FLAGS=1 caps at one flag" "" "$out"
 rm -rf "$repo"
 
 # act mode is uncapped by default: same setup re-fires (autonomous self-refresh).
@@ -140,17 +144,20 @@ check "first crossing -> fires despite tiny bytes" yes "$(has "$out" "<system-re
 rm -rf "$repo"
 
 # --- Re-fire wording matches the cap (audit 2026-07-17) ----------------------
-# Default suggest mode (MAX_FLAGS=1): the first nudge is also the last, so it
-# must say so — not promise a cooldown repeat that will never come.
+# MAX_FLAGS=1: the first nudge is also the last, so it must say so, not
+# promise a repeat that will never come.
 repo="$(mk_repo)"; seed "$repo" WORD1 4000 600
-out="$(run_cc "$repo" WORD1)"
+out="$(run_cc "$repo" WORD1 HANDOFF_CTX_MAX_FLAGS=1)"
 check "capped final nudge says it won't re-fire"   yes "$(has "$out" "will not re-fire this session")"
 check "capped final nudge drops cooldown promise"  no  "$(has "$out" "KB of transcript growth")"
 rm -rf "$repo"
-# Uncapped (MAX_FLAGS=0): the cooldown promise is real and must be stated.
+# Uncapped (MAX_FLAGS=0) with a known window: the next 5-point step is the
+# real promise (60% sits on step 60, next 65). The KB cooldown promise is for
+# an unknown window only (see test_ctx_check_cadence.sh).
 repo="$(mk_repo)"; seed "$repo" WORD0 4000 600
 out="$(run_cc "$repo" WORD0 HANDOFF_CTX_MAX_FLAGS=0)"
-check "uncapped nudge keeps cooldown promise"      yes "$(has "$out" "another 100KB of transcript growth")"
+check "uncapped nudge states the next step"        yes "$(has "$out" "Next reminder at 60% + 5 = 65%")"
+check "known window -> no KB cooldown promise"     no  "$(has "$out" "KB of transcript growth")"
 check "uncapped nudge has no cap-reached text"     no  "$(has "$out" "will not re-fire this session")"
 rm -rf "$repo"
 # MAX_FLAGS=2, one prior flag: this (second) nudge reaches the cap -> final.
@@ -169,17 +176,17 @@ rm -rf "$repo"
 # --- Malformed THRESHOLD_PCT / COOLDOWN_KB fall back to defaults -------------
 # (audit 2026-07-17) A '%'-suffixed threshold previously aborted the hook at
 # the $((...)) arithmetic under set -e — nudge silently disabled every session.
-# With the fallback to the default 40, 600/1000 = 60% must still fire.
+# With the fallback to the default 30, 600/1000 = 60% must still fire.
 repo="$(mk_repo)"; seed "$repo" BADPCT 4000 600
 out="$(run_cc "$repo" BADPCT HANDOFF_CTX_THRESHOLD_PCT=40%)"
-check "THRESHOLD_PCT='40%' -> falls back to 40, fires" yes "$(has "$out" "<system-reminder>")"
+check "THRESHOLD_PCT='40%' -> falls back to 30, fires" yes "$(has "$out" "<system-reminder>")"
 rm -rf "$repo"
 
 # A negative threshold previously passed straight through and made the gate
-# always-fire. It now falls back to 40: 100/1000 = 10% must NOT fire.
+# always-fire. It now falls back to 30: 100/1000 = 10% must NOT fire.
 repo="$(mk_repo)"; seed "$repo" NEGPCT 4000 100
 out="$(run_cc "$repo" NEGPCT HANDOFF_CTX_THRESHOLD_PCT=-40)"
-check "THRESHOLD_PCT=-40 -> falls back to 40, no fire" "" "$out"
+check "THRESHOLD_PCT=-40 -> falls back to 30, no fire" "" "$out"
 rm -rf "$repo"
 
 # Malformed COOLDOWN_KB ("100KB"): with a prior flag far in the past and the
@@ -258,83 +265,97 @@ check "1M-native model file -> 1000000-token window" yes "$(has "$out" "1000000-
 check "1M-native model file -> pct against 1M (15%)" yes "$(has "$out" "15%")"
 rm -rf "$repo"
 
-# Claude 5+ Opus/Sonnet ids are 1M-native too. The default regex only knew
-# fable/mythos, so an opus-5-5 desktop session (no statusline cache) reported
-# 47% at 94,637 tokens: 5x over. Same below-200k shape as above so the
-# ratchet cannot mask a miss. Claude 4 ids without [1m] must stay 200k.
-for m in claude-opus-5-5 claude-sonnet-5 claude-opus-6; do
-  repo="$(mk_repo)"; seed "$repo" C5 4000 150000; seed_model "$repo" C5 "$m"
-  out="$(run_cc_auto "$repo" C5 HANDOFF_CTX_THRESHOLD_PCT=10)"
-  check "$m -> 1000000-token window" yes "$(has "$out" "1000000-token window")"
+# Issue #173: the window comes from a model table checked against the model
+# docs, never from a broad regex. Listed 1M ids (Opus 4.8 included: "Opus 4.7
+# and later run with the 1M window by default"); 4.5-family ids are 200k; an
+# id the table does not list (claude-opus-6, a future release) is UNKNOWN,
+# not assumed.
+for m in claude-opus-5-5 claude-sonnet-5 claude-opus-4-8 anthropic.claude-haiku-5-5; do
+  repo="$(mk_repo)"; seed "$repo" C5 4000 400000; seed_model "$repo" C5 "$m"
+  out="$(run_cc_auto "$repo" C5)"
+  check "$m -> 1000000-token window (table)" yes "$(has "$out" "1000000-token window (from this hook's model table for $m")"
   rm -rf "$repo"
 done
-for m in claude-opus-4-8 claude-sonnet-4-5-20250929; do
+for m in claude-sonnet-4-5-20250929 claude-opus-4-5; do
   repo="$(mk_repo)"; seed "$repo" C4 4000 100000; seed_model "$repo" C4 "$m"
   out="$(run_cc_auto "$repo" C4)"
   check "$m -> 200000-token window" yes "$(has "$out" "200000-token window")"
   rm -rf "$repo"
 done
-
-# Non-1M model recorded -> 200k window (explicit non-1M signal respected).
-repo="$(mk_repo)"; seed "$repo" M200K 4000 100000
-seed_model "$repo" M200K claude-haiku-4-5-20251001
-out="$(run_cc_auto "$repo" M200K)"
-check "non-1M model file -> 200000-token window" yes "$(has "$out" "200000-token window")"
+for m in claude-opus-6 claude-sonnet-4-6 claude-opus-4-6; do
+  repo="$(mk_repo)"; seed "$repo" CUNK 4000 150000; seed_model "$repo" CUNK "$m"
+  out="$(run_cc_auto "$repo" CUNK)"
+  check "$m -> window unknown"       yes "$(has "$out" "window unknown")"
+  check "$m -> no percentage"        no  "$(has "$out" "%")"
+  rm -rf "$repo"
+done
+# A [1m] suffix means 1M whatever the base id (Opus 4.6 [1m] variant).
+repo="$(mk_repo)"; seed "$repo" M1MSUF 4000 400000; seed_model "$repo" M1MSUF 'claude-opus-4-6[1m]'
+out="$(run_cc_auto "$repo" M1MSUF)"
+check "[1m] suffix -> 1M window, names the suffix" yes "$(has "$out" "1000000-token window (from the [1m] suffix")"
+rm -rf "$repo"
+# CLAUDE_CODE_DISABLE_1M_CONTEXT=1 makes Claude Code run 1M-default models at
+# 200k, so the table follows it.
+repo="$(mk_repo)"; seed "$repo" NO1M 4000 100000; seed_model "$repo" NO1M claude-opus-5-5
+out="$(run_cc_auto "$repo" NO1M CLAUDE_CODE_DISABLE_1M_CONTEXT=1)"
+check "DISABLE_1M_CONTEXT -> 200000-token window" yes "$(has "$out" "200000-token window")"
 rm -rf "$repo"
 
-# Ratchet: a MEASURED 250k count cannot fit the 200k window the non-1M model
-# detected -> forced up to 1M (25%, needs the lowered threshold to fire).
+# A MEASURED 250k count cannot fit the 200k window the table lists: the table
+# is wrong for this session, so the window is unknown (the old code
+# "ratcheted" to 1M, which was another guess).
 repo="$(mk_repo)"; seed "$repo" RAT 4000 250000
 seed_model "$repo" RAT claude-haiku-4-5-20251001
-out="$(run_cc_auto "$repo" RAT HANDOFF_CTX_THRESHOLD_PCT=20)"
-check "measured 250k vs 200k window -> ratchets to 1M" yes "$(has "$out" "1000000-token window")"
-check "ratchet pct against 1M (25%)"                   yes "$(has "$out" "25%")"
+out="$(run_cc_auto "$repo" RAT)"
+check "measured 250k vs 200k table window -> unknown" yes "$(has "$out" "window unknown (measured 250000 tokens exceed")"
+check "contradicted table window -> no percentage"    no  "$(has "$out" "%")"
 rm -rf "$repo"
 
-# Negative control: the bytes/4 ESTIMATE never ratchets (it routinely
-# overshoots) — 4MB/4 = 1M est tokens still reports against the 200k window.
+# Negative control: the bytes/4 ESTIMATE never overrides the table (it
+# routinely overshoots): 4MB/4 = 1M est tokens still reports the 200k window.
 repo="$(mk_repo)"; seed "$repo" NORAT 4000000
 seed_model "$repo" NORAT claude-haiku-4-5-20251001
 out="$(run_cc_auto "$repo" NORAT)"
-check "estimated tokens never ratchet -> 200000 window" yes "$(has "$out" "200000-token window")"
+check "estimated tokens never override -> 200000 window" yes "$(has "$out" "200000-token window")"
 rm -rf "$repo"
 
-# Second negative control: an EXPLICIT env override is never ratcheted either —
-# the documented contract is that HANDOFF_CTX_WINDOW_TOKENS always wins (a user
-# may pin a sub-1M budget on purpose), so a measured 250k against a pinned 500k
-# window reports 50% of 500000, not 25% of 1M. (Trailing env wins over the
-# empty override run_cc_auto sets, so the auto-detect guard sees 500000.)
+# An EXPLICIT env window is never second-guessed: the documented contract is
+# that HANDOFF_CTX_WINDOW_TOKENS always wins (a user may pin a sub-1M budget on
+# purpose), so a measured 250k against a pinned 500k window reports 50%.
 repo="$(mk_repo)"; seed "$repo" ENVRAT 4000 250000
 out="$(run_cc_auto "$repo" ENVRAT HANDOFF_CTX_WINDOW_TOKENS=500000)"
-check "explicit env window never ratchets -> 500000 window" yes "$(has "$out" "500000-token window")"
-check "explicit env window pct against 500k (50%)"          yes "$(has "$out" "50%")"
+check "explicit env window -> 500000 window"       yes "$(has "$out" "500000-token window (from HANDOFF_CTX_WINDOW_TOKENS")"
+check "explicit env window pct against 500k (50%)" yes "$(has "$out" "50%")"
 rm -rf "$repo"
 
 # HANDOFF_CTX_1M_MODEL_REGEX override: a custom id matches the user's regex ->
-# 1M; the same id without the override misses the default regex -> 200k.
-repo="$(mk_repo)"; seed "$repo" REOVR 4000 150000
+# 1M; the same id without the override is not in the table -> unknown.
+repo="$(mk_repo)"; seed "$repo" REOVR 4000 400000
 seed_model "$repo" REOVR my-custom-1m-model
-out="$(run_cc_auto "$repo" REOVR HANDOFF_CTX_THRESHOLD_PCT=10 HANDOFF_CTX_1M_MODEL_REGEX=custom-1m)"
-check "regex override matches custom id -> 1M window" yes "$(has "$out" "1000000-token window")"
+out="$(run_cc_auto "$repo" REOVR HANDOFF_CTX_1M_MODEL_REGEX=custom-1m)"
+check "regex override matches custom id -> 1M window" yes "$(has "$out" "1000000-token window (model id my-custom-1m-model matches")"
 seed "$repo" REDEF 4000 150000; seed_model "$repo" REDEF my-custom-1m-model
-out="$(run_cc_auto "$repo" REDEF HANDOFF_CTX_THRESHOLD_PCT=10)"
-check "custom id w/o override -> default regex misses -> 200k" yes "$(has "$out" "200000-token window")"
+out="$(run_cc_auto "$repo" REDEF)"
+check "custom id w/o override -> window unknown" yes "$(has "$out" "not in this hook's model table")"
 rm -rf "$repo"
 
-# A model file failing the charset guard is ignored (treated as unrecorded):
-# no .claude.json under the pinned HOME -> 200k.
+# A model file failing the charset guard is never trusted or printed, but it
+# is present, so the reason says so (PR #177 review: it used to claim "no
+# model id recorded"). Window unknown, absolute gate (150k >= 100k) fires.
 repo="$(mk_repo)"; seed "$repo" BADMODEL 4000 150000
 seed_model "$repo" BADMODEL 'evil;model/../id'
-out="$(run_cc_auto "$repo" BADMODEL HANDOFF_CTX_THRESHOLD_PCT=10)"
-check "invalid model file ignored -> 200000 window" yes "$(has "$out" "200000-token window")"
+out="$(run_cc_auto "$repo" BADMODEL)"
+check "invalid model file -> window unknown, id present" yes "$(has "$out" "the recorded model id is not in this hook's model table")"
+check "invalid model file -> not 'no model id recorded'" no  "$(has "$out" "no model id recorded")"
+check "invalid model file -> id never printed"           no  "$(has "$out" "evil;model")"
 rm -rf "$repo"
 
-# No model file -> lastModelUsage fallback, now regex-driven: a suffix-less
-# Claude 5 id in ~/.claude.json (any project -> global step) means 1M.
+# ~/.claude.json lastModelUsage is no longer consulted (another session's or
+# project's model is a guess, issue #173): no model recorded -> unknown.
 repo="$(mk_repo)"; seed "$repo" JQ1M 4000 150000
 printf '{"projects":{"/elsewhere":{"lastModelUsage":{"claude-fable-5":{"count":1}}}}}' > "$repo/.claude.json"
-out="$(run_cc_auto "$repo" JQ1M HANDOFF_CTX_THRESHOLD_PCT=10)"
-check "no model file, Claude-5 id in .claude.json -> 1M" yes "$(has "$out" "1000000-token window")"
+out="$(run_cc_auto "$repo" JQ1M)"
+check "no model file, .claude.json ignored -> unknown" yes "$(has "$out" "window unknown")"
 rm -rf "$repo"
 
 finish
