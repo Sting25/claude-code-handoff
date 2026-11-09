@@ -495,7 +495,7 @@ report_plugin_leftover() {
       scopes="$(jq -r '(.plugins // {}) | to_entries[]
                  | select(.key | startswith("claude-code-handoff@"))
                  | .value | if type == "array" then .[] else . end
-                 | .scope? // empty' "$reg" 2>/dev/null | sort -u | paste -sd '|' - || true)"
+                 | .scope? // empty' "$reg" 2>/dev/null | sort -u | tr '\n' '|' | sed 's/|$//' || true)"
     fi
   elif [[ -n "$cache" ]]; then
     where="$cache"

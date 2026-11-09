@@ -3,12 +3,12 @@
 # block in the three SKILL.md files that sets `hb=` is extracted and run
 # under /bin/bash with a scrubbed environment (env -i plus HOME, CLAUDE_HOME
 # and PATH):
-#   - scripts present: prints "handoff-bin: <dir>/bin", exits 0, and a
+#   * scripts present: prints "handoff-bin: <dir>/bin", exits 0, and a
 #     follow-up block runs its script;
-#   - scripts absent: prints the MISSING line and never tries to run
+#   * scripts absent: prints the MISSING line and never tries to run
 #     "/write_handoff.sh" (measured before the fix: rc=127, "No such file
 #     or directory");
-#   - CLAUDE_HOME unset: falls back to $HOME/.claude/bin; CLAUDE_HOME set:
+#   * CLAUDE_HOME unset: falls back to $HOME/.claude/bin; CLAUDE_HOME set:
 #     wins over $HOME/.claude.
 # The /handoff run block (no `hb=` of its own, meant to share a Bash call
 # with the resolution block) is checked both joined to it and alone.

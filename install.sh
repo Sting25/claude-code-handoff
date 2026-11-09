@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 0c634e5512b4f735bd6a03da3fb4a169b334aa3471fe4146d957b66e9293b2c6
+# SOURCE-SHA256: 67c7db3e96d47975fda0b6ab7eecea062972df6511338f57991f9f543b95cb2d
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1494,7 +1494,7 @@ report_plugin_leftover() {
       scopes="$(jq -r '(.plugins // {}) | to_entries[]
                  | select(.key | startswith("claude-code-handoff@"))
                  | .value | if type == "array" then .[] else . end
-                 | .scope? // empty' "$reg" 2>/dev/null | sort -u | paste -sd '|' - || true)"
+                 | .scope? // empty' "$reg" 2>/dev/null | sort -u | tr '\n' '|' | sed 's/|$//' || true)"
     fi
   elif [[ -n "$cache" ]]; then
     where="$cache"

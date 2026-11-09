@@ -8,13 +8,13 @@
 #
 # Scope: bin/, install.d/, install.sh, skills/, tests/, docs/, .github/,
 # tools/, README.md and PRIVACY.md. Allowed, and nothing else:
-#   - CHANGELOG.md (not scanned): its history describes the plugin releases;
-#   - README.md's "Migrating from the plugin" subsection, which has to name
+#   * CHANGELOG.md (not scanned): its history describes the plugin releases;
+#   * README.md's "Migrating from the plugin" subsection, which has to name
 #     the commands a user runs to leave the plugin;
-#   - the PLUGIN_LEFTOVER_CHECK region in install.d/ and install.sh (the one
+#   * the PLUGIN_LEFTOVER_CHECK region in install.d/ and install.sh (the one
 #     check that tells a user a plugin install is still present), and its
 #     test, tests/test_install_plugin_leftover.sh;
-#   - this file.
+#   * this file.
 #
 # The scanner is proven against planted fixtures below (one per pattern and
 # one per scanned location, plus each allowance in both directions), so a
