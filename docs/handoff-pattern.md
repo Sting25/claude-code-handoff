@@ -61,6 +61,18 @@ A failure is fed forward only while it can still bite. If nothing dropped this
 session, note why — silent monotonic growth is the signal the loop has stopped
 maintaining itself.
 
+#### Rules can drift from their sources
+A line in a Rules fence is a copy. The thing that produced it (a rule file, an
+issue, a script path) can change or vanish while the copy keeps being
+re-injected as if it were current. Two cheap catches:
+
+- **Annotate the source.** End each Rules line with where it came from:
+  `(src: #123)` for an issue or PR, `(src: path/to/file:42)` for a file and
+  line. A line with no source cannot be re-checked, so write one or drop it.
+- **Re-check at session start.** Next to the settled/live/stale pass, open each
+  `src:` target and confirm the rule still says that. If the source changed,
+  update the line. If the source is gone, treat the line as stale and drop it.
+
 ---
 
 ## READ (session start)

@@ -1815,7 +1815,17 @@ EOF
   printf 'Run this now, before anything else this session, and say what you found:\n\n'
   printf '```bash\n'
   if (( in_git )); then
-    printf 'git -C %s status && git -C %s log --oneline -5\n' "$repo_root" "$repo_root"
+    # #139 (H2): repo_root is the handoff's home, which under
+    # HANDOFF_ANCHOR=common is the MAIN checkout even when this session runs in
+    # a linked worktree. The next session starts in the worktree, so verify
+    # THAT checkout first (its toplevel, from the resolver's anchor), and keep
+    # the repo_root line only when it is a different path.
+    verify_wt="$(git -C "${HANDOFF_ROOT_ANCHOR:-$repo_root}" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$verify_wt" ]] || verify_wt="$repo_root"
+    printf 'git -C %s status && git -C %s log --oneline -5\n' "$verify_wt" "$verify_wt"
+    if [[ "$verify_wt" != "$repo_root" ]]; then
+      printf 'git -C %s status && git -C %s log --oneline -5\n' "$repo_root" "$repo_root"
+    fi
     if [[ -n "$substrate_root" ]]; then
       printf 'git -C %s log --oneline -5\n' "$substrate_root"
     fi
