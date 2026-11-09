@@ -66,6 +66,7 @@ elif [[ "$mode" == install ]]; then
     # uninstall command that removes it.
     report_wiring NOTE
   fi
+  report_plugin_leftover "NOTE:"
   if [[ "$scope" == project ]]; then
     echo "note: hooks are wired for $project_dir only ($settings)."
   fi

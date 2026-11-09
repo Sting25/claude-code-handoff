@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 3d59ac3830fa813ad979a5ff992a54461b83a1ae543b01d7728b145b03c70626
+# SOURCE-SHA256: 0c634e5512b4f735bd6a03da3fb4a169b334aa3471fe4146d957b66e9293b2c6
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1468,6 +1468,49 @@ report_registry_stale() {
   echo
 }
 
+# >>> PLUGIN_LEFTOVER_CHECK (the one place the shipped tree may name the
+# retired plugin layout; tests/test_no_plugin_remnants.sh skips this region)
+# A plugin install of this tool left behind after the #171 migration runs its
+# own hook commands (under the plugin's root) next to these scripts. Those
+# commands differ from ours, so Claude Code's identical-handler dedupe does
+# not apply and every hook runs twice. Read-only, jq optional.
+#
+# Signal: Claude Code's installed_plugins.json registry when it exists (a
+# cache directory can outlive an uninstall, so a cache alone would be a
+# false positive forever once the registry has dropped the entry); the cache
+# glob alone only when there is no registry file at all.
+# report_plugin_leftover <NOTE|WARN>: prints the message, or nothing.
+report_plugin_leftover() {
+  local tag="$1" base pd cache="" reg where scopes=""
+  base="${CLAUDE_CONFIG_DIR:-$claude_home}"
+  for pd in "$base"/plugins/cache/*/claude-code-handoff; do
+    if [[ -d "$pd" ]]; then cache="$pd"; break; fi
+  done
+  reg="$base/plugins/installed_plugins.json"
+  if [[ -f "$reg" ]]; then
+    LC_ALL=C grep -q 'claude-code-handoff' "$reg" 2>/dev/null || return 0
+    where="${cache:-$reg}"
+    if command -v jq >/dev/null 2>&1; then
+      scopes="$(jq -r '(.plugins // {}) | to_entries[]
+                 | select(.key | startswith("claude-code-handoff@"))
+                 | .value | if type == "array" then .[] else . end
+                 | .scope? // empty' "$reg" 2>/dev/null | sort -u | paste -sd '|' - || true)"
+    fi
+  elif [[ -n "$cache" ]]; then
+    where="$cache"
+  else
+    return 0
+  fi
+  [[ -n "$scopes" ]] || scopes="project|user"
+  case "$scopes" in *"|"*) scopes="<$scopes>" ;; esac
+  printf '%-8s%s\n' "$tag" "A plugin install of this tool is still present at $where;"
+  echo "        its hooks run alongside these scripts. Finish the migration:"
+  echo "        'claude plugin uninstall claude-code-handoff@claude-code-handoff --scope $scopes'"
+  echo "        then 'claude plugin marketplace remove claude-code-handoff'."
+  echo
+}
+# <<< PLUGIN_LEFTOVER_CHECK
+
 # Self-check: verify each installed hook script under $claude_home/bin actually
 # resolves. A dangling symlink (e.g. installed from a temp checkout that was
 # later cleaned up) makes the corresponding hook no-op silently, so surface it
@@ -1608,6 +1651,7 @@ doctor() {
   if [[ "$scope" == user ]]; then
     report_registry_stale
   fi
+  report_plugin_leftover "  WARN"
   if (( broken )); then
     echo "doctor: $broken issue(s) found." >&2
     echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)." >&2
@@ -1684,6 +1728,7 @@ elif [[ "$mode" == install ]]; then
     # uninstall command that removes it.
     report_wiring NOTE
   fi
+  report_plugin_leftover "NOTE:"
   if [[ "$scope" == project ]]; then
     echo "note: hooks are wired for $project_dir only ($settings)."
   fi
