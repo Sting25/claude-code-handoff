@@ -13,10 +13,18 @@
 #      user's own keys, and leaves bin/, skills/, and the secret in place
 #   G. --model in project scope pins the project file and its uninstall
 #      removes only that pin (the user-scope record is never touched)
-#   H. --doctor WARNs on double fire when both the user file and the
-#      project file are wired (both scopes), and not when only one is
-#   I. a mid-patch abort restores the PROJECT file from its own backup
+#   H. --doctor WARNs on user-scope wiring next to a project layout (both
+#      scopes, and from a subdirectory via the git toplevel), lists exactly
+#      the wired files, gives --uninstall --keep-secret; and not when only
+#      the project is wired. Claude Code runs identical handlers once, so
+#      this is about scope, not double firing.
+#   I. a mid-patch abort restores the PROJECT file from its backup under
+#      CLAUDE_HOME, and undoes a seed when there was no file before
 #   J. a symlinked project settings.json is patched through, link intact
+#   K. the project registry: append (no duplicates), remove on project
+#      uninstall, user-scope uninstall warns about wired projects, the
+#      user-scope doctor lists stale entries
+#   L. both project files wired: the NOTE/WARN names the extra one
 # Every run sandboxes HOME and CLAUDE_HOME, so nothing touches ~/.claude.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -52,6 +60,8 @@ inst() {
 pj()  { jq -r "$1" "$P/.claude/settings.json" 2>/dev/null; }
 has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 backups() { find "$1" -maxdepth 1 -name '*.bak.*' 2>/dev/null | wc -l | tr -d ' '; }
+# Where project-scope backups go: $CLAUDE_HOME/handoff_settings_backups/<cksum of project path>.
+bdir() { printf '%s/.claude/handoff_settings_backups/%s' "$H" "$(printf '%s' "$(cd "$P" && pwd -P)" | cksum | awk '{print $1}')"; }
 
 events="SessionStart SessionEnd PreCompact PostCompact WorktreeRemove Stop UserPromptSubmit"
 
@@ -74,7 +84,9 @@ check "A: no backup next to user file" 0 "$(backups "$H/.claude")"
 check "A: scripts installed in CLAUDE_HOME" yes "$([[ -e "$H/.claude/bin/write_handoff.sh" ]] && echo yes || echo no)"
 check "A: skills installed in CLAUDE_HOME" yes "$([[ -e "$H/.claude/skills/handoff/SKILL.md" ]] && echo yes || echo no)"
 check "A: output names the project file" yes "$(has "$OUT" "hooks are wired for $(cd "$P" && pwd -P) only")"
-check "A: backup sits next to the project file" 1 "$(backups "$P/.claude")"
+check "A: no backup inside the project" 0 "$(backups "$P/.claude")"
+check "A: no backup of a just-seeded file" 0 "$(backups "$(bdir)")"
+check "A: seed reported as needing no backup" yes "$(has "$OUT" "no backup needed")"
 
 # --- B. idempotent second run ----------------------------------------------------
 rm -f "$P"/.claude/settings.json.bak.*
@@ -83,6 +95,7 @@ inst --scope project --project "$P"
 check "B: exit 0" 0 "$RC"
 check "B: project file unchanged" same "$([[ "$before" == "$(cat "$P/.claude/settings.json")" ]] && echo same || echo changed)"
 check "B: no backup left behind" 0 "$(backups "$P/.claude")"
+check "B: no backup left in CLAUDE_HOME" 0 "$(backups "$(bdir)")"
 check "B: no-change message" yes "$(has "$OUT" "no settings.json changes (backup removed)")"
 check "B: still one Stop hook" 1 "$(pj '.hooks.Stop | length')"
 check "B: still seven permissions" 7 "$(pj '.permissions.allow | length')"
@@ -115,12 +128,16 @@ check "D: no flags leaves the project alone" no "$([[ -e "$P/.claude" ]] && echo
 fresh_sandbox
 inst --scope project --project "$SRC"
 check "E: source clone refused, exit 2" 2 "$RC"
-check "E: source clone message" yes "$(has "$OUT" "is this handoff clone (the install source); refusing.")"
+check "E: source clone message" yes "$(has "$OUT" "or inside it (the install source); refusing.")"
 check "E: source clone gets no .claude/" no "$([[ -e "$SRC/.claude" ]] && echo yes || echo no)"
 check "E: nothing installed into CLAUDE_HOME" no "$([[ -e "$H/.claude/bin" ]] && echo yes || echo no)"
 RUN_DIR="$SRC" inst --scope project
 check "E: source clone via \$PWD refused, exit 2" 2 "$RC"
-check "E: source clone via \$PWD message" yes "$(has "$OUT" "is this handoff clone")"
+check "E: source clone via \$PWD message" yes "$(has "$OUT" "or inside it (the install source)")"
+inst --scope project --project "$SRC/bin"
+check "E: dir inside the source clone refused" 2 "$RC"
+check "E: dir inside the source clone message" yes "$(has "$OUT" "or inside it (the install source); refusing.")"
+check "E: dir inside the clone gets no .claude/" no "$([[ -e "$SRC/bin/.claude" ]] && echo yes || echo no)"
 inst --scope project --project "$P/does-not-exist"
 check "E: missing dir refused, exit 2" 2 "$RC"
 check "E: missing dir message" yes "$(has "$OUT" "does not exist or is not a directory; refusing.")"
@@ -137,9 +154,15 @@ check "E: project rooted at HOME refused" 2 "$RC"
 check "E: project rooted at HOME message" yes "$(has "$OUT" "which is the user-scope config; refusing.")"
 inst --scope global
 check "E: bad --scope value refused" 2 "$RC"
+check "E: bad --scope value message" yes "$(has "$OUT" "--scope must be 'user' or 'project' (got 'global').")"
 inst --project
 check "E: --project with no value refused" 2 "$RC"
+check "E: --project with no value message" yes "$(has "$OUT" "--project requires a directory")"
 check "E: refusals left the project alone" no "$([[ -e "$P/.claude" ]] && echo yes || echo no)"
+fresh_sandbox
+sib="${SRC}-sibling"; mkdir -p "$sib"; cleanup_on_exit "$sib"
+inst --scope project --project "$sib"
+check "E: sibling sharing the clone's name prefix is allowed" 0 "$RC"
 
 # --- F. --uninstall --scope project ---------------------------------------------
 fresh_sandbox
@@ -155,7 +178,7 @@ check "F: our Stop hook added beside the user's" 2 "$(pj '.hooks.Stop | length')
 user_wired='{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash $HOME/.claude/bin/handoff_turn_append.sh 2>/dev/null || true"}]}]}}'
 printf '%s' "$user_wired" > "$H/.claude/settings.json"
 printf 'k3y\n' > "$H/.claude/handoff_secret"; chmod 600 "$H/.claude/handoff_secret"
-rm -f "$P"/.claude/settings.json.bak.*
+rm -f "$(bdir)"/settings.json.bak.*
 OUT="$(cd "$P" && env -u HANDOFF_SECRET_FILE HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --uninstall --scope project --project "$P" 2>&1)"; RC=$?
 check "F: uninstall exit 0" 0 "$RC"
 for ev in SessionStart SessionEnd PreCompact PostCompact WorktreeRemove UserPromptSubmit; do
@@ -171,7 +194,9 @@ check "F: skills kept" yes "$([[ -e "$H/.claude/skills/handoff/SKILL.md" ]] && e
 check "F: secret kept" yes "$([[ -f "$H/.claude/handoff_secret" ]] && echo yes || echo no)"
 check "F: user settings.json untouched" "$user_wired" "$(cat "$H/.claude/settings.json")"
 check "F: output says what was kept" yes "$(has "$OUT" "kept (project scope)")"
-check "F: backup sits next to the project file" 1 "$(backups "$P/.claude")"
+check "F: no backup inside the project" 0 "$(backups "$P/.claude")"
+check "F: backup kept under CLAUDE_HOME" 1 "$(backups "$(bdir)")"
+check "F: backup path printed" yes "$(has "$OUT" "-> $(bdir)/settings.json.bak.")"
 inst --uninstall --scope project --project "$P"
 check "F: second uninstall exit 0" 0 "$RC"
 check "F: second uninstall is a no-op" yes "$(has "$OUT" "no settings.json changes (backup removed)")"
@@ -186,23 +211,36 @@ inst --uninstall --project "$P"
 check "G: uninstall removes the project pin" null "$(pj '.model // "null"')"
 check "G: project pin record consumed" 0 "$(find "$H/.claude" -maxdepth 1 -name 'handoff-model-pin.project.*' | wc -l | tr -d ' ')"
 
-# --- H. doctor double-fire WARN ---------------------------------------------------
+# --- H. doctor: user-scope wiring next to a project layout ------------------------
+WIRED_MSG="User-scope wiring present: these hooks fire in every project"
 fresh_sandbox
 inst --project "$P"
 inst --doctor --project "$P"
-check "H: project-only doctor has no double-fire WARN" no "$(has "$OUT" "fires once per file")"
+check "H: project-only doctor has no wiring WARN" no "$(has "$OUT" "$WIRED_MSG")"
 check "H: project doctor names the project file" yes "$(has "$OUT" "doctor: project scope, checking")"
+check "H: no double-fire wording anywhere" no "$(has "$OUT" "fires twice")"
 inst
 check "H: user-scope install exit 0" 0 "$RC"
 inst --doctor --project "$P"
-check "H: project-scope doctor WARNs on double fire" yes "$(has "$OUT" "fires once per file")"
-check "H: WARN gives the project uninstall remedy" yes "$(has "$OUT" "--uninstall --scope project --project")"
+check "H: project-scope doctor WARNs on user-scope wiring" yes "$(has "$OUT" "$WIRED_MSG")"
+check "H: WARN lists the user file" yes "$(has "$OUT" "$H/.claude/settings.json (user scope)")"
+check "H: WARN lists the project file" yes "$(has "$OUT" "/.claude/settings.json (project)")"
+check "H: WARN does not list an unwired local file" no "$(has "$OUT" "(project, local)")"
+check "H: remedy keeps the secret" yes "$(has "$OUT" "./install.sh --uninstall --keep-secret")"
+check "H: remedy explains the shared secret" yes "$(has "$OUT" "HMAC secret is shared by project-scope installs")"
+check "H: remedy re-wires the project afterwards" yes "$(has "$OUT" "./install.sh --scope project --project $(cd "$P" && pwd -P)")"
+check "H: no double-fire wording in the WARN" no "$(has "$OUT" "fires once per file")"
 RUN_DIR="$P" inst --doctor
-check "H: user-scope doctor in the project WARNs too" yes "$(has "$OUT" "fires once per file")"
+check "H: user-scope doctor in the project WARNs too" yes "$(has "$OUT" "$WIRED_MSG")"
 RUN_DIR="$H" inst --doctor
-check "H: user-scope doctor elsewhere has no WARN" no "$(has "$OUT" "fires once per file")"
+check "H: user-scope doctor elsewhere has no WARN" no "$(has "$OUT" "$WIRED_MSG")"
+must git -C "$P" init -q
+mkdir -p "$P/sub/dir"
+RUN_DIR="$P/sub/dir" inst --doctor
+check "H: user-scope doctor from a subdirectory finds the project" yes "$(has "$OUT" "$WIRED_MSG")"
 inst --scope project --project "$P"
-check "H: install NOTE when the user file is also wired" yes "$(has "$OUT" "every hook fires twice")"
+check "H: install NOTE when the user file is also wired" yes "$(has "$OUT" "NOTE: this installer's hooks are wired in")"
+check "H: install NOTE carries the keep-secret remedy" yes "$(has "$OUT" "--uninstall --keep-secret")"
 
 # --- I. mid-patch abort restores the project file ----------------------------------
 fresh_sandbox
@@ -221,7 +259,15 @@ OUT="$(cd "$P" && PATH="$shim:$PATH" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$S
 check "I: abort exits nonzero" yes "$([[ "$RC" -ne 0 ]] && echo yes || echo no)"
 check "I: project file restored" "$orig" "$(cat "$P/.claude/settings.json")"
 check "I: restore message names the project file" yes "$(has "$OUT" "restore $(cd "$P" && pwd -P)/.claude/settings.json")"
+check "I: restore message names the CLAUDE_HOME backup" yes "$(has "$OUT" "from $(bdir)/settings.json.bak.")"
 check "I: no stray .tmp" no "$([[ -e "$P/.claude/settings.json.tmp" ]] && echo yes || echo no)"
+# Seeded case: no file before, so no backup; the abort removes the seed.
+fresh_sandbox
+OUT="$(cd "$P" && PATH="$shim:$PATH" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --project "$P" 2>&1)"; RC=$?
+check "I: seeded abort exits nonzero" yes "$([[ "$RC" -ne 0 ]] && echo yes || echo no)"
+check "I: seeded abort leaves no settings file" no "$([[ -e "$P/.claude/settings.json" ]] && echo yes || echo no)"
+check "I: seeded abort message" yes "$(has "$OUT" "removed again; this run created it")"
+check "I: seeded abort made no backup" 0 "$(backups "$(bdir)")"
 
 # --- J. symlinked project settings.json ---------------------------------------------
 fresh_sandbox
@@ -232,5 +278,45 @@ inst --project "$P"
 check "J: exit 0" 0 "$RC"
 check "J: symlink left intact" yes "$([[ -L "$P/.claude/settings.json" ]] && echo yes || echo no)"
 check "J: target patched" 1 "$(jq -r '.hooks.Stop | length' "$P/dotfiles/settings.json" 2>/dev/null)"
+
+# --- K. project registry ---------------------------------------------------------------
+fresh_sandbox
+REG="$H/.claude/handoff_projects"
+PP="$(cd "$P" && pwd -P)"
+inst --project "$P"
+check "K: install appends the project" 1 "$(grep -cFx "$PP	settings.json" "$REG" 2>/dev/null)"
+inst --project "$P"
+check "K: re-install adds no duplicate" 1 "$(wc -l < "$REG" | tr -d ' ')"
+inst --project "$P" --local
+check "K: --local install adds its own line" 1 "$(grep -cFx "$PP	settings.local.json" "$REG" 2>/dev/null)"
+check "K: two lines now" 2 "$(wc -l < "$REG" | tr -d ' ')"
+inst --uninstall --project "$P" --local
+check "K: project uninstall removes its line" 0 "$(grep -cFx "$PP	settings.local.json" "$REG" 2>/dev/null)"
+check "K: the other line survives" 1 "$(grep -cFx "$PP	settings.json" "$REG" 2>/dev/null)"
+check "K: uninstall reports the removal" yes "$(has "$OUT" "remove  registry: $PP (settings.local.json)")"
+inst --uninstall
+check "K: user-scope uninstall exit 0" 0 "$RC"
+check "K: user-scope uninstall warns about wired projects" yes "$(has "$OUT" "project-scope installs still wired")"
+check "K: warning names the project" yes "$(has "$OUT" "$PP (settings.json)")"
+check "K: warning says the hooks will no-op" yes "$(has "$OUT" "silently no-op")"
+inst --project "$P"
+printf '{}' > "$P/.claude/settings.json"
+RUN_DIR="$H" inst --doctor
+check "K: user-scope doctor lists the stale entry" yes "$(has "$OUT" "stale project registry entries")"
+check "K: stale entry names the project" yes "$(has "$OUT" "$PP (settings.json)")"
+inst --uninstall --project "$P"
+check "K: last entry removed, registry file gone" no "$([[ -e "$REG" ]] && echo yes || echo no)"
+inst --uninstall
+check "K: no warning once nothing is registered" no "$(has "$OUT" "project-scope installs still wired")"
+
+# --- L. both project files wired --------------------------------------------------------
+fresh_sandbox
+inst --project "$P"
+inst --project "$P" --local
+check "L: --local on a wired settings.json prints the NOTE" yes "$(has "$OUT" "NOTE: this installer's hooks are wired in")"
+check "L: NOTE lists the local file" yes "$(has "$OUT" "settings.local.json (project, local)")"
+check "L: NOTE says it is redundant" yes "$(has "$OUT" "Both project files carry the hooks")"
+check "L: NOTE gives the command for the extra file" yes "$(has "$OUT" "./install.sh --uninstall --scope project --project $(cd "$P" && pwd -P)")"
+check "L: no user-scope complaint when the user file is clean" no "$(has "$OUT" "User-scope wiring present")"
 
 finish

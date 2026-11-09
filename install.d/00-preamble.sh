@@ -20,10 +20,10 @@ install.sh — wire this repo's handoff skill into ~/.claude/.
 What it does:
   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
-  2. Patches ~/.claude/settings.json to add six hooks
+  2. Patches ~/.claude/settings.json to add seven hooks
      (SessionStart / SessionEnd / PreCompact / PostCompact / WorktreeRemove / Stop /
-     UserPromptSubmit), six permission entries, and — only when you
-     don't already have one — a statusLine command (never overwrites
+     UserPromptSubmit), seven permission entries, and (only when you
+     don't already have one) a statusLine command (never overwrites
      an existing statusLine; prints the manual step instead).
      Requires jq; falls back to printing the snippet if jq is missing.
 
@@ -105,6 +105,13 @@ scope=user
 scope_flag=""
 project_dir=""
 use_local=0
+settings_name="settings.json"
+project_backup_dir=""
+# Registry of project-scope installs (issue #171): one line per wired
+# project file, "<absolute project dir><TAB><settings file name>". Lets a
+# user-scope --uninstall warn about projects whose hooks it is about to
+# orphan, and lets the user-scope doctor name stale entries.
+project_registry="$claude_home/handoff_projects"
 # Include the PID so two installs in the same clock second don't collide on the
 # same .bak.<ts> name — without it, the second run's `cp` would overwrite the
 # first run's pre-patch settings.json backup, destroying the only safe copy.
@@ -182,6 +189,10 @@ resolve_symlink() {  # <path> -> physical path on stdout
 # armed only between the backup and the successful end of the sequence.
 settings_backup=""
 patch_in_progress=0
+# Project scope only (issue #171): a settings file this run seeded as {}
+# gets no backup (there was nothing to keep), so an abort puts back what
+# was there before instead: "absent" removes the file, "empty" truncates it.
+settings_seed_state=""
 cleanup() {
   local rc=$?
   rm -f "$settings.tmp" 2>/dev/null || true
@@ -189,6 +200,14 @@ cleanup() {
      && [[ -n "$settings_backup" && -f "$settings_backup" ]]; then
     cp -f "$settings_backup" "$settings" 2>/dev/null || true
     echo "  restore $settings from $settings_backup (aborted mid-patch, rc=$rc)" >&2
+  elif (( patch_in_progress )) && (( rc != 0 )) && [[ -n "$settings_seed_state" ]]; then
+    if [[ "$settings_seed_state" == absent ]]; then
+      rm -f "$settings" 2>/dev/null || true
+      echo "  restore $settings removed again; this run created it (aborted mid-patch, rc=$rc)" >&2
+    else
+      : > "$settings" 2>/dev/null || true
+      echo "  restore $settings emptied again, as it was before this run (aborted mid-patch, rc=$rc)" >&2
+    fi
   fi
 }
 # NOT armed here. A piped `curl | bash` executes top-level statements as they
@@ -286,13 +305,19 @@ if [[ "$scope" == project ]]; then
   # Absolute and physical, so the comparisons below and the paths printed
   # (and the backup location) never depend on how the flag was spelled.
   project_dir="$(cd "$project_dir" && pwd -P)"
-  # Wiring the handoff clone itself is almost certainly a mistake: the usual
-  # cause is running `./install.sh --scope project` from inside the clone
-  # without --project. Refuse instead of patching the clone's own .claude/.
-  if [[ -n "$repo_root" ]] && [[ "$project_dir" == "$(cd "$repo_root" && pwd -P)" ]]; then
-    echo "ERROR: project directory '$project_dir' is this handoff clone (the install source); refusing." >&2
-    echo "       Pass --project <dir> for the project you want to wire, or run install.sh from inside that project." >&2
-    exit 2
+  # Wiring the handoff clone, or any directory inside it, is almost
+  # certainly a mistake: the usual cause is running `./install.sh --scope
+  # project` from inside the clone without --project. Refuse instead of
+  # patching a .claude/ under the clone. Prefix test with a trailing slash on
+  # both sides, so /src/handoff-other is not mistaken for /src/handoff.
+  if [[ -n "$repo_root" ]]; then
+    _src_phys="$(cd "$repo_root" && pwd -P)"
+    case "$project_dir/" in
+      "$_src_phys"/*)
+        echo "ERROR: project directory '$project_dir' is the handoff clone '$_src_phys' or inside it (the install source); refusing." >&2
+        echo "       Pass --project <dir> for the project you want to wire, or run install.sh from inside that project." >&2
+        exit 2 ;;
+    esac
   fi
   # A project whose .claude/ IS $claude_home (a project rooted at $HOME)
   # would make the "project" file the user-scope file under another name.
@@ -306,10 +331,15 @@ if [[ "$scope" == project ]]; then
     exit 2
   fi
   if (( use_local )); then
-    settings="$_proj_claude/settings.local.json"
+    settings_name="settings.local.json"
   else
-    settings="$_proj_claude/settings.json"
+    settings_name="settings.json"
   fi
+  settings="$_proj_claude/$settings_name"
+  # Project-scope backups live OUTSIDE the project (a .bak next to a tracked
+  # settings.json is one `git add .` from being committed), one directory
+  # per project keyed by a cksum of its physical path.
+  project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$project_dir" | cksum | awk '{print $1}')"
   # A project-scope --uninstall never touches the secret (see 40-main.sh),
   # so --keep-secret is a no-op there too; say so, same as issue #82.
   if (( keep_secret )) && [[ "$mode" == uninstall ]]; then

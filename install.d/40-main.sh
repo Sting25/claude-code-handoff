@@ -48,6 +48,11 @@ elif [[ "$mode" == install ]]; then
     echo "settings.json:"
   fi
   patch_settings
+  # Record the project once its file actually carries our hooks (a refused
+  # patch, e.g. invalid JSON, wires nothing and registers nothing).
+  if [[ "$scope" == project ]] && settings_has_our_hooks "$settings"; then
+    registry_add "$project_dir" "$settings_name"
+  fi
   echo
   if [[ -z "$model_pin" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
      && jq -e 'type == "object" and ((.model // null) == null)' "$settings" >/dev/null 2>&1; then
@@ -55,11 +60,11 @@ elif [[ "$mode" == install ]]; then
     echo "      200k context window. Re-run  ./install.sh --model 'opus[1m]'  to pin one."
     echo
   fi
-  if [[ "$scope" == project ]] && settings_has_our_hooks "$user_settings"; then
-    echo "NOTE: $user_settings also wires this installer's hooks, so in"
-    echo "      $project_dir every hook fires twice. Run ./install.sh --doctor"
-    echo "      --scope project --project $project_dir for the remedy."
-    echo
+  if [[ "$scope" == project ]]; then
+    # Checks all three files (user, project settings.json, project
+    # settings.local.json): an extra wired file is reported with the
+    # uninstall command that removes it.
+    report_wiring NOTE
   fi
   if [[ "$scope" == project ]]; then
     echo "note: hooks are wired for $project_dir only ($settings)."
@@ -96,6 +101,7 @@ elif [[ "$scope" == project ]]; then
   echo
   echo "project settings ($project_dir):"
   unpatch_settings
+  registry_remove "$project_dir" "$settings_name"
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
   echo "      HMAC secret are shared by every project on this machine and were not"
@@ -113,6 +119,7 @@ else
   echo
   echo "local state:"
   remove_secret_if_ours
+  report_registry_orphans
   echo
   echo "done. the repo at $repo_root is untouched."
 fi
