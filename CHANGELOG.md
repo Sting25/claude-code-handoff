@@ -15,6 +15,45 @@ are appended).
 ### Added
 - **`install.sh --scope project` wires the hooks into one project only (#171).** `./install.sh --scope project --project <dir>` (or `--project <dir>` alone, or `--scope project` run from inside the project) writes the seven hooks, the status line, and the permission entries into `<dir>/.claude/settings.json`; add `--local` to target `.claude/settings.local.json` instead. The help text now also says seven hooks and seven permission entries (it said six). The scripts and skills still go into `~/.claude/bin` and `~/.claude/skills`, which every wired project shares, and `~/.claude/settings.json` is not touched. The project must be an existing directory and may not be the handoff clone or a directory inside it (both refusals exit 2 before anything is written). `--uninstall --scope project` strips only that project's file and keeps the shared scripts, skills, and HMAC secret. `--doctor` checks the project file in project scope, and in either scope lists which of the user file and the two project files carry these hooks: user-scope wiring next to a project layout is reported (the hooks then fire in every project) with `./install.sh --uninstall --keep-secret` as the remedy, since the HMAC secret is shared with project-scope installs. Claude Code runs an identical handler once, so several wired files do not double fire. Project-scope backups go under `~/.claude/handoff_settings_backups/` instead of into the project, a freshly seeded file gets none, and project installs are recorded in `~/.claude/handoff_projects` so a user-scope `--uninstall` can warn about projects it would leave pointing at removed scripts. That uninstall keeps the shared HMAC secret while any registered project is still wired (new `--remove-secret` deletes it anyway). Without `--project`, a project-scope install inside a git repo targets the repo's toplevel. A project-scope `--uninstall` of a directory that no longer exists clears its registry line and exits 0. Printed commands quote their paths. A `--model` pin in project scope is recorded per project file, so a project's uninstall never consumes the user-scope record. With no scope flag the installer behaves exactly as before (user scope).
 
+### Changed
+- Context nudge cadence and measurement (#173). The first nudge now comes
+  at 30% of the context window (`HANDOFF_CTX_THRESHOLD_PCT`, was 40%), then
+  again every 5 percentage points (`HANDOFF_CTX_STEP_PCT`, new) for as long
+  as the session runs: suggest mode is no longer capped at one nudge
+  (`HANDOFF_CTX_MAX_FLAGS` defaults to 0; set it to 1 for the old
+  behavior). The absolute `HANDOFF_CTX_THRESHOLD_TOKENS` gate (100,000)
+  now applies only when the window is unknown, so a 1M window no longer
+  nudges at 10%. With no live status line, usage is measured from the
+  transcript's last usage record for this session (input plus cache read
+  plus cache creation tokens), skipping earlier sessions' lines, sidechain
+  lines and `<synthetic>` placeholders; the bytes/4 estimate is the last
+  fallback and is labeled as one. The window comes from
+  `HANDOFF_CTX_WINDOW_TOKENS`, the status line's `context_window_size`, or
+  the session's model id (a `[1m]` suffix, `HANDOFF_CTX_1M_MODEL_REGEX`
+  when set, or a model table checked against the model docs on
+  2026-11-09). The `~/.claude.json` lastModelUsage probe, the built-in 1M
+  regex and the >200k "ratchet" are gone: when no source applies the
+  reminder says "window unknown" and prints no percentage. Each reminder
+  is now one line naming the measured token count, the window and where
+  each number came from, plus the `/handoff` pointer; the "quality
+  degrades before the meter runs out" sentence is dropped. A status line
+  cache older than `HANDOFF_CTX_SL_MAX_AGE_SECS` no longer supplies any
+  number, its window included, and a cache whose tokens are older than
+  the Stop hook's record drops its window with them. After a compaction
+  the transcript's pre-compact usage is ignored (anything older than this
+  session's last `compact_boundary`), so the nudge stays silent until the
+  next assistant turn. No percentage above 100 is printed. The model table
+  matches only the listed family and version (with an optional provider
+  prefix, snapshot date, Bedrock `-vN:M` or Vertex `@` suffix), so an
+  unlisted id such as `claude-opus-5-1` is unknown. A step re-arms only
+  after usage falls a full step below it, so 35, 34, 35 fires once. The
+  transcript scan reads only the last 64 lines unless they hold nothing of
+  this session. In the desktop app the reminder now carries the
+  percentage and its source like a terminal (the window is no longer a
+  guess, and the 5-point cadence is percentage-based), plus one sentence
+  that the app's own meter is authoritative; `HANDOFF_CTX_NO_DESKTOP_MODE=1`
+  drops that sentence.
+
 ### Fixed
 - `write_handoff.sh` no longer blocks forever on an open, silent stdin
   (#158). The `/handoff` skill runs `--restamp` through the Claude Code
