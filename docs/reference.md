@@ -133,16 +133,21 @@ threshold, so the human keystroke is still required.
 `HANDOFF_CTX_STEP_PCT` step (default 5 points): 30%, 35%, 40%, and so on
 for as long as the session runs. There is no per-session cap by default;
 `HANDOFF_CTX_MAX_FLAGS=1` restores the old one-nudge-per-session behavior.
-A drop in usage (after a compaction) counts as a fresh crossing.
+A lower reading re-arms a step only once it is a full step below the last
+one flagged (a compaction qualifies), so usage wobbling around 35% does not
+fire on every prompt.
 
 **Usage.** The token count comes, in order, from the live status line
 cache; from the transcript itself (the last assistant line of this session
 with a `usage` record: `input_tokens + cache_read_input_tokens +
 cache_creation_input_tokens`, which is the context occupied at that turn;
 lines from an earlier session in a resumed transcript, subagent sidechain
-lines and `<synthetic>` placeholders are skipped); from the Stop hook's
+lines, `<synthetic>` placeholders and anything older than this session's
+last `compact_boundary` are skipped); from the Stop hook's
 record of the same sum; and only as the last fallback from transcript bytes
-divided by 4, which runs high and is labeled as an estimate.
+divided by 4, which runs high and is labeled as an estimate. No percentage
+above 100 is ever printed: a count above the window is reported as at or
+above it.
 
 **Window.** The window size comes from `HANDOFF_CTX_WINDOW_TOKENS` when
 set, else from the status line's `context_window_size` while that cache is
@@ -158,6 +163,13 @@ record, so they are not in the table. When nothing applies, the window is
 instead, with `HANDOFF_CTX_COOLDOWN_KB` / `HANDOFF_CTX_COOLDOWN_TOKENS`
 spacing the repeats. That absolute gate never applies when the window is
 known: on a 1M window it used to fire at 10% (issue #173).
+
+If Claude Code compacts earlier than the nudge fires, the nudge never
+appears: a low `autoCompactWindow` setting or
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` (for example 200000 on a 1M model)
+compacts at about 20% of the window, before the 30% threshold is reached.
+Lower `HANDOFF_CTX_THRESHOLD_PCT` there, or pin
+`HANDOFF_CTX_WINDOW_TOKENS` to the compaction window.
 
 Every reminder says where each number came from, for example
 `Context at ~312000 tokens (measured from the transcript's last usage
@@ -337,8 +349,10 @@ fire on it. Two hooks cover it:
   never fire it) runs `bin/handoff_compact_reset.sh`, which clears
   the session's context-measurement sidecars. The freed window is
   treated as session-start fresh: no nudge can fire off stale
-  pre-compact numbers, and the once-per-session nudge cap re-arms so
-  the assistant can flag `/handoff` again when the window refills.
+  pre-compact numbers, and the nudge cadence starts over so the
+  assistant can flag `/handoff` again when the window refills. Until
+  the first assistant turn after the compaction, the nudge stays
+  silent: the transcript's last usage record is pre-compact too.
 
 ## Where the handoff files live
 

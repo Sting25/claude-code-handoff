@@ -15,7 +15,7 @@ digest you never read.
 - **Follows you into linked git worktrees**: a session in a worktree that has no handoff of its own loads the main checkout's handoff as inherited context (standing rules included), and never asks you to recover a session that never ran there.
 - **Keeps a per-turn backup**, so a crashed or killed session can be reconstructed afterwards.
 - **Saves a mechanical git-state snapshot on every clean exit**, even if you forget to hand off.
-- **Nudges you when context is filling** (about 100k tokens in, or 40% of the window on smaller models), while Claude is still sharp enough to write a good summary, so you hand off confidently instead of riding a bloated session, which also means less context re-processing and fewer wasted tokens.
+- **Nudges you when context is filling** (at 30% of the window, then every 5 points; at 100k tokens when the window size is unknown), while Claude is still sharp enough to write a good summary, so you hand off confidently instead of riding a bloated session, which also means less context re-processing and fewer wasted tokens.
 - **Signs each handoff with a per-machine key**, so a cloned repo can't inject fake standing rules.
 - **Keeps a history of past handoffs** (last 5 by default) that you can pull back into context on demand.
 - **Auto-rebuilds a missing or corrupted handoff on load**: if `handoff_current.md` is missing, empty, unreadable, or fails an integrity check, the next session start composes a best-effort stand-in from your history and per-turn backups instead of loading nothing, clearly labeled `AUTO-REBUILT` and never written to disk or signed.
@@ -202,8 +202,8 @@ into `~/.claude/settings.json`):
 `SessionEnd` and `PreCompact` write a mechanical git-state safety net
 before an ending or a compaction, `Stop` appends each turn to a
 backup and records context usage, `UserPromptSubmit` nudges you
-toward `/handoff` once usage crosses about 100k tokens (or 40% of the
-window, whichever comes first), and
+toward `/handoff` once usage crosses 30% of the window and again every 5
+points (or 100k tokens when the window size is unknown), and
 `PostCompact` resets those measurements so the freed window is
 treated as fresh, and `WorktreeRemove` salvages a removed git
 worktree's handoff and raw dumps into the main checkout (see

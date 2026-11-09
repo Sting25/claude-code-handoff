@@ -339,12 +339,15 @@ out="$(run_cc_auto "$repo" REDEF)"
 check "custom id w/o override -> window unknown" yes "$(has "$out" "not in this hook's model table")"
 rm -rf "$repo"
 
-# A model file failing the charset guard is ignored (treated as unrecorded):
-# window unknown, absolute gate (150k >= 100k) fires.
+# A model file failing the charset guard is never trusted or printed, but it
+# is present, so the reason says so (PR #177 review: it used to claim "no
+# model id recorded"). Window unknown, absolute gate (150k >= 100k) fires.
 repo="$(mk_repo)"; seed "$repo" BADMODEL 4000 150000
 seed_model "$repo" BADMODEL 'evil;model/../id'
 out="$(run_cc_auto "$repo" BADMODEL)"
-check "invalid model file ignored -> window unknown" yes "$(has "$out" "no model id recorded")"
+check "invalid model file -> window unknown, id present" yes "$(has "$out" "the recorded model id is not in this hook's model table")"
+check "invalid model file -> not 'no model id recorded'" no  "$(has "$out" "no model id recorded")"
+check "invalid model file -> id never printed"           no  "$(has "$out" "evil;model")"
 rm -rf "$repo"
 
 # ~/.claude.json lastModelUsage is no longer consulted (another session's or

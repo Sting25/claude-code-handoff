@@ -144,16 +144,17 @@ check "env pin -> computed 60%"         yes "$(has "$out" "~60% of a 1000-token 
 check "env pin -> CC pct not used"      no  "$(has "$out" "73%")"
 rm -rf "$repo"
 
-# A stale sl cache's pct is dropped with its tokens (same payload snapshot).
-# "Stale" here is the older-than-the-tokens-file guard, so the age horizon is
-# lifted (its own test is in test_ctx_check_cadence.sh): the window= survives.
-repo="$(mk_repo)"; seed "$repo" STPCT 4000 600
-seed_sl "$repo" STPCT "window=1000" "tokens=600" "pct=73"
+# A stale sl cache's pct AND window are dropped with its tokens (same payload
+# snapshot; PR #177 review: a kept window against a newer count printed
+# 125%). "Stale" here is the older-than-the-tokens-file guard, so the age
+# horizon is lifted. The Stop hook's 150000 with no model -> window unknown.
+repo="$(mk_repo)"; seed "$repo" STPCT 4000 150000
+seed_sl "$repo" STPCT "window=100000" "tokens=600" "pct=73"
 must touch -t 202001010000 "$repo/.claude/handoff_backups/.ctx_sl_STPCT"
 must touch "$repo/.claude/handoff_backups/.ctx_tokens_STPCT"
 out="$(run_cc_auto "$repo" STPCT HANDOFF_CTX_SL_MAX_AGE_SECS=2000000000)"
-check "stale sl pct dropped -> 60%"     yes "$(has "$out" "~60% of a 1000-token window")"
-check "stale sl pct dropped -> not 73"  no  "$(has "$out" "73%")"
+check "stale sl -> its window dropped too (unknown)" yes "$(has "$out" "window unknown")"
+check "stale sl -> no 150% against its old window"   no  "$(has "$out" "%")"
 rm -rf "$repo"
 
 # --- No CC figure + window from the model table -> source named --------------

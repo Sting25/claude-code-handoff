@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 188b7d9ad030f20160707dc4d796e360e4f59eb38fce9545b8933e48e0e19237
+# SOURCE-SHA256: facea1e0e19cd1209f7180edba8a5800522af041efddc21694f78bf155ec20b0
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -244,7 +244,7 @@ model_pin_record="$claude_home/handoff-model-pin"
   pc_cmd="$se_cmd"
   # PostCompact: clear the per-session ctx sidecars so the freed window is
   # treated as session-start fresh (stale-high numbers can't nudge, and the
-  # once-per-session nudge cap re-arms). Only fires on CC >= 2.1.76.
+  # nudge cadence starts over). Only fires on CC >= 2.1.76.
   post_cmd='bash $HOME/.claude/bin/handoff_compact_reset.sh 2>/dev/null || true'
   # WorktreeRemove (#142): salvage a removed worktree's handoff and raw dumps
   # into the main checkout. Fires on CC >= 2.1.300, only for worktrees Claude

@@ -161,4 +161,102 @@ check "known window, 150k (15%) -> token gate does not fire" "" "$(run_tx "$repo
 tx_line AB false claude-opus-9-9 100 150000 0 > "$repo/a.jsonl"
 check "unknown window, 150k -> token gate fires" yes "$(has "$(run_tx "$repo" AB "$repo/a.jsonl")" "window unknown")"
 
+echo "handoff_ctx_check.sh: compaction boundary (PR #177 review, item 1)"
+
+CR="$REPO_ROOT/bin/handoff_compact_reset.sh"
+boundary() {  # <sid> : the compact_boundary + summary lines Claude Code appends
+  printf '{"type":"system","subtype":"compact_boundary","sessionId":"%s","isSidechain":false}\n' "$1"
+  printf '{"type":"user","sessionId":"%s","isCompactSummary":true,"message":{"content":"summary"}}\n' "$1"
+}
+# Flag at 40%, compact, run the PostCompact reset, prompt before any new
+# assistant turn: the only usage record is pre-compact, so silent (as main).
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; d="$(bd "$repo")"; must mkdir -p "$d"
+must printf '1500000' > "$d/.ctx_CMP"; must printf '400000' > "$d/.ctx_tokens_CMP"
+must printf 'claude-opus-5-5\n' > "$d/.ctx_model_CMP"
+tx="$repo/c.jsonl"; tx_line CMP false claude-opus-5-5 100 399900 0 > "$tx"
+check "pre-compact 40% -> fires" yes "$(has "$(run_tx "$repo" CMP "$tx")" "~40% of a")"
+boundary CMP >> "$tx"
+( cd "$repo" && bash "$CR" <<<'{"session_id":"CMP"}' >/dev/null 2>&1 )
+check "post-compact, reset ran, no new turn -> silent" "" "$(run_tx "$repo" CMP "$tx")"
+tx_line CMP false claude-opus-5-5 100 199900 0 >> "$tx"
+check "post-compact turn at 20% -> silent (below 30)" "" "$(run_tx "$repo" CMP "$tx")"
+tx_line CMP false claude-opus-5-5 100 299900 0 >> "$tx"
+check "post-compact turn at 30% -> fires" yes "$(has "$(run_tx "$repo" CMP "$tx")" "~30% of a")"
+# Same, but the PostCompact hook never ran (older Claude Code): the byte size
+# and the Stop hook's record are pre-compact too, so no bytes/4 or stale
+# count may be used either.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; d="$(bd "$repo")"; must mkdir -p "$d"
+must printf '1500000' > "$d/.ctx_CMP2"; must printf '450000' > "$d/.ctx_tokens_CMP2"
+tx="$repo/c2.jsonl"; { tx_line CMP2 false claude-opus-5-5 100 449900 0; boundary CMP2; } > "$tx"
+check "boundary newest, no reset hook -> silent" "" "$(run_tx "$repo" CMP2 "$tx")"
+# Another session's boundary (resumed transcript) does not hide this session's usage.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$(bd "$repo")"
+tx="$repo/c3.jsonl"; { tx_line CMP3 false claude-opus-5-5 100 349900 0; boundary OTHER; } > "$tx"
+check "other session's boundary ignored -> fires" yes "$(has "$(run_tx "$repo" CMP3 "$tx")" "~35% of a")"
+
+echo "handoff_ctx_check.sh: never a percentage above 100 (item 2)"
+
+# bytes/4 above a table window: estimate printed, "at or above", no pct.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; d="$(bd "$repo")"; must mkdir -p "$d"
+must printf '5054004' > "$d/.ctx_OV1"; must printf 'claude-opus-5-5\n' > "$d/.ctx_model_OV1"
+printf '{"type":"user","sessionId":"OV1"}\n' > "$repo/o1.jsonl"
+out="$(run_tx "$repo" OV1 "$repo/o1.jsonl")"
+check "bytes/4 over window -> at or above, estimate kept" yes "$(has "$out" "~1263501 tokens (ESTIMATED")"
+check "bytes/4 over window -> says at or above"           yes "$(has "$out" "at or above the 1000000-token window")"
+check "bytes/4 over window -> no percentage"              no  "$(has "$out" "%")"
+# Measured count above an env pin: exceeds, no pct.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$(bd "$repo")"
+tx_line OV2 false claude-opus-5-5 100 249900 0 > "$repo/o2.jsonl"
+out="$(run_tx "$repo" OV2 "$repo/o2.jsonl" HANDOFF_CTX_WINDOW_TOKENS=200000)"
+check "measured over env pin -> exceeds the pinned window" yes "$(has "$out" "the measured count exceeds the 200000-token window pinned by HANDOFF_CTX_WINDOW_TOKENS")"
+check "measured over env pin -> no percentage"             no  "$(has "$out" "%")"
+# Status line older than the Stop hook's record: its tokens AND window drop,
+# so the 250k record is read against the table (25%, silent), never 125%.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; d="$(bd "$repo")"; must mkdir -p "$d"
+must printf '2000000' > "$d/.ctx_OV3"; must printf 'claude-opus-5-5\n' > "$d/.ctx_model_OV3"
+must printf 'window=200000\ntokens=100\n' > "$d/.ctx_sl_OV3"
+must touch -t 202001010000 "$d/.ctx_sl_OV3"
+must printf '250000' > "$d/.ctx_tokens_OV3"
+out="$(run_cc "$repo" OV3 HANDOFF_CTX_SL_MAX_AGE_SECS=2000000000 HANDOFF_CTX_THRESHOLD_PCT=20)"
+check "stale sl tokens drop its window too -> 25% of table 1M" yes "$(has "$out" "~25% of a 1000000-token window (from this hook's model table")"
+check "stale sl window -> never 125%"                          no  "$(has "$out" "125%")"
+
+echo "handoff_ctx_check.sh: anchored model table (item 3)"
+
+for m in claude-opus-5-1 claude-sonnet-5-9 claude-opus-50 claude-opus-5-5x; do
+  repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$(bd "$repo")"
+  tx_line MT false "$m" 100 349900 0 > "$repo/m.jsonl"
+  out="$(run_tx "$repo" MT "$repo/m.jsonl")"
+  check "$m -> not in the table (unknown)" yes "$(has "$out" "model id $m is not in this hook's model table")"
+  check "$m -> no percentage"               no  "$(has "$out" "%")"
+done
+for m in us.anthropic.claude-sonnet-5 anthropic.claude-opus-4-8-v1:0 claude-opus-4-8@20260101 claude-opus-5-5-20261001; do
+  repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$(bd "$repo")"
+  tx_line MT false "$m" 100 349900 0 > "$repo/m.jsonl"
+  out="$(run_tx "$repo" MT "$repo/m.jsonl")"
+  check "$m -> table 1M (prefix/suffix accepted)" yes "$(has "$out" "~35% of a 1000000-token window (from this hook's model table for $m")"
+done
+
+echo "handoff_ctx_check.sh: no flapping around a step (item 5)"
+
+# Tokens ledger (transcript only): 35, 34, 35, 34, 35 fires once; a drop to
+# 30 (a full step below 35) re-arms and fires; then 35 fires again.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$(bd "$repo")"
+tx="$repo/f.jsonl"; : > "$tx"; fires=0
+for k in 349900 339900 349900 339900 349900; do
+  tx_line FL false claude-opus-5-5 100 "$k" 0 >> "$tx"
+  case "$(run_tx "$repo" FL "$tx")" in *"<system-reminder>"*) fires=$((fires + 1)) ;; esac
+done
+check "tokens ledger: 35,34,35,34,35 -> one nudge" 1 "$fires"
+tx_line FL false claude-opus-5-5 100 299900 0 >> "$tx"
+check "drop a full step (35 -> 30) -> re-arms, fires" yes "$(has "$(run_tx "$repo" FL "$tx")" "~30% of a")"
+# Bytes ledger (Stop hook alive): same oscillation, one nudge.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; d="$(bd "$repo")"; must mkdir -p "$d"
+fires=0; b=1000000
+for k in 350000 349000 351000 348000 352000; do
+  b=$((b + 20000)); must printf '%s' "$b" > "$d/.ctx_FB"; must printf '%s' "$k" > "$d/.ctx_tokens_FB"
+  case "$(run_cc "$repo" FB "$PIN")" in *"<system-reminder>"*) fires=$((fires + 1)) ;; esac
+done
+check "bytes ledger: 35,34,35,34,35 -> one nudge" 1 "$fires"
+
 finish

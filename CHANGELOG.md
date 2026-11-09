@@ -35,7 +35,17 @@ are appended).
   each number came from, plus the `/handoff` pointer; the "quality
   degrades before the meter runs out" sentence is dropped. A status line
   cache older than `HANDOFF_CTX_SL_MAX_AGE_SECS` no longer supplies any
-  number, its window included.
+  number, its window included, and a cache whose tokens are older than
+  the Stop hook's record drops its window with them. After a compaction
+  the transcript's pre-compact usage is ignored (anything older than this
+  session's last `compact_boundary`), so the nudge stays silent until the
+  next assistant turn. No percentage above 100 is printed. The model table
+  matches only the listed family and version (with an optional provider
+  prefix, snapshot date, Bedrock `-vN:M` or Vertex `@` suffix), so an
+  unlisted id such as `claude-opus-5-1` is unknown. A step re-arms only
+  after usage falls a full step below it, so 35, 34, 35 fires once. The
+  transcript scan reads only the last 64 lines unless they hold nothing of
+  this session.
 
 ### Fixed
 - `write_handoff.sh` no longer blocks forever on an open, silent stdin

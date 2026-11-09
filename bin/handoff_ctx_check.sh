@@ -502,13 +502,17 @@ if [[ "${HANDOFF_CTX_NO_STATUSLINE:-0}" != "1" && -f "$sl_file" ]]; then
   # a frozen count forever while the Stop hook keeps measuring. If the tokens
   # file is absent, the sl cache wins outright. (Portable mtime: GNU stat -c
   # with BSD stat -f fallback, same idiom as handoff_turn_append.sh.) The
-  # cached pct is from the same payload snapshot, so it goes stale with it.
+  # cached pct is from the same payload snapshot, so it goes stale with it,
+  # and so does its window (PR #177 review: a kept window paired with a newer
+  # count from elsewhere printed 125%). The status line supplies both or
+  # neither.
   if [[ ( -n "$sl_tokens" || -n "$sl_pct" ) && -f "$tokens_file" ]]; then
     sl_mtime="$(stat -c %Y "$sl_file" 2>/dev/null || stat -f %m "$sl_file" 2>/dev/null || echo 0)"
     tk_mtime="$(stat -c %Y "$tokens_file" 2>/dev/null || stat -f %m "$tokens_file" 2>/dev/null || echo 0)"
     if [[ "$sl_mtime" =~ ^[0-9]+$ && "$tk_mtime" =~ ^[0-9]+$ ]] && (( sl_mtime < tk_mtime )); then
       sl_tokens=""
       sl_pct=""
+      sl_window=""
     fi
   fi
   # Age horizon (issue #173): a statusLine that stopped rendering, or the
@@ -544,33 +548,68 @@ fi
 # lines under its own sessionId (only this session counts; an absent sessionId
 # counts as ours); "<synthetic>" API-error placeholders carry all-zero usage
 # and would read as an empty context; isSidechain lines are a subagent's own
-# context. The scan is bounded to the last 2000 usage-bearing lines so a huge
-# transcript costs one grep, not one jq parse per line. The model id on the
-# same line is the session's own model for the window table further down.
+# context.
+#
+# Compaction (PR #177 review): Claude Code appends a "compact_boundary"
+# system line (it carries sessionId and isSidechain like any other line) and
+# writes no assistant usage until the next turn, so the last usage record is
+# the PRE-compact size. A usage line older than this session's last boundary
+# is therefore not a measurement. When the boundary is the newest relevant
+# line, nothing in the transcript measures the post-compact context, and
+# the byte size and the Stop hook's record are pre-compact too: tx_compacted
+# makes the hook stay silent until the next assistant turn, exactly as main
+# does once handoff_compact_reset.sh has cleared the ledger.
+#
+# Cost (PR #177 review: every usage line was parsed, 580 ms per prompt on a
+# 50 MB transcript): only the last 64 lines are read (`tail -n` seeks from
+# the end). Measured on macOS, 10 prompts each: 5 MB transcripts 64-67 ms per
+# prompt (main 58-63 ms), a 50 MB one with 40 KB lines 91 ms (main 62 ms).
+# Byte-bounded tails were slower: `tail -c 2097152` alone cost about 56 ms
+# per call, and 400 lines of 40 KB cost 209 ms. The whole file is scanned only
+# when those 64 lines hold no line of this session at all (a resumed
+# transcript whose current session ended earlier, a long sidechain run). The
+# model id on the measured line is the session's own model for the window
+# table further down.
 tx_tokens=""
 tx_model=""
+tx_compacted=0
+tx_scan() {  # <max lines> ; stdin: transcript. Prints the last "B" or "U<TAB>tokens<TAB>model".
+  LC_ALL=C grep -F -e '"usage"' -e 'compact_boundary' 2>/dev/null | tail -n "$1" \
+    | jq -rR --arg sid "$session_id" 'fromjson?
+        | select(.isSidechain != true and (.sessionId // $sid) == $sid)
+        | if (.type == "system" and .subtype == "compact_boundary") then "B"
+          elif (.type == "assistant" and .message.usage != null
+                and (.message.model // "") != "<synthetic>") then
+            [ "U",
+              ( (.message.usage.input_tokens // 0)
+                + (.message.usage.cache_read_input_tokens // 0)
+                + (.message.usage.cache_creation_input_tokens // 0) ),
+              (.message.model // "") ] | @tsv
+          else empty end' 2>/dev/null \
+    | grep -E $'^(B$|U\t[0-9]+\t)' | tail -n 1 || true
+}
 if [[ -z "$sl_tokens" ]]; then
   tx_path="$(jq -r '.transcript_path // empty' <<<"$payload" 2>/dev/null || true)"
   if [[ -n "$tx_path" && -f "$tx_path" && -r "$tx_path" ]]; then
-    tx_row="$(grep -F '"usage"' "$tx_path" 2>/dev/null | tail -n 2000 \
-      | jq -rR --arg sid "$session_id" 'fromjson?
-          | select(.type == "assistant" and .isSidechain != true
-                   and (.sessionId // $sid) == $sid
-                   and .message.usage != null
-                   and (.message.model // "") != "<synthetic>")
-          | [ ( (.message.usage.input_tokens // 0)
-                + (.message.usage.cache_read_input_tokens // 0)
-                + (.message.usage.cache_creation_input_tokens // 0) ),
-              (.message.model // "") ]
-          | @tsv' 2>/dev/null \
-      | grep -E $'^[0-9]+\t' | tail -n 1 || true)"
-    tx_t="${tx_row%%$'\t'*}"
-    if [[ "$tx_t" =~ ^[0-9]+$ ]] && (( tx_t > 0 )); then
-      tx_tokens="$tx_t"
-      tx_model="${tx_row#*$'\t'}"
+    tx_row="$(tail -n 64 "$tx_path" 2>/dev/null | tx_scan 64)"
+    # Nothing of this session in the last 64 candidate lines of the tail:
+    # widen to the whole file (resumed transcript, long sidechain run).
+    [[ -n "$tx_row" ]] || tx_row="$(tx_scan 1000000 < "$tx_path")"
+    if [[ "$tx_row" == "B" ]]; then
+      tx_compacted=1
+    elif [[ "$tx_row" == U$'\t'* ]]; then
+      tx_row="${tx_row#U$'\t'}"
+      tx_t="${tx_row%%$'\t'*}"
+      if [[ "$tx_t" =~ ^[0-9]+$ ]] && (( tx_t > 0 )); then
+        tx_tokens="$tx_t"
+        tx_model="${tx_row#*$'\t'}"
+      fi
     fi
   fi
 fi
+# Compacted with no post-compact measurement yet: every remaining number
+# (bytes, Stop-hook tokens) describes the pre-compact context. Silent.
+(( tx_compacted )) && exit 0
 
 # --- Progress ledger (issue #69) --------------------------------------------
 # Everything below — the nudge cooldown, the flag file, and the fences
@@ -645,10 +684,15 @@ if [[ "$ledger" == "tokens" ]]; then
   # untouched: transcript bytes only grow, so this can't fire there.
   if [[ -f "$flag_file" ]]; then
     # First field only: since issue #173 a line may carry "<progress> <step>".
+    # A line that carries a step is handled by the step cadence further down,
+    # which re-arms only after a full-step drop (PR #177 review: clearing the
+    # file here on any drop made 35, 34, 35, 34 fire every time).
     last_flagged_tok="$(tail -n 1 "$flag_file" 2>/dev/null || echo 0)"
+    tok_has_step=0
+    [[ "$last_flagged_tok" == *" "* ]] && tok_has_step=1
     last_flagged_tok="${last_flagged_tok%% *}"
     [[ "$last_flagged_tok" =~ ^[0-9]+$ ]] || last_flagged_tok=0
-    if (( progress < last_flagged_tok )); then
+    if (( ! tok_has_step && progress < last_flagged_tok )); then
       rm -f -- "$flag_file" 2>/dev/null || true
     fi
   fi
@@ -794,7 +838,10 @@ window_tokens=""
 window_source="unknown"
 window_unknown_why=""
 session_model=""
-model_charset_re='^[]A-Za-z0-9._[-]+$'
+# ':' and '@' are in the charset for provider id shapes (Bedrock
+# "anthropic.claude-opus-4-8-v1:0", Vertex "claude-opus-4-8@20260101").
+model_charset_re='^[]A-Za-z0-9._:@[-]+$'
+model_present=0
 env_window="${HANDOFF_CTX_WINDOW_TOKENS:-}"
 # A non-positive-integer override (0, negative, or garbage) would make the
 # pct arithmetic below divide by zero, fatal under `set -e`. Treat any such
@@ -807,16 +854,21 @@ elif [[ -n "$sl_window" ]] && (( sl_window > 0 )); then
   window_tokens="$sl_window"
   window_source="statusline"
 else
-  # Charset-validated with the same guard the Stop hook applies before
-  # writing (ids can carry "[1m]"), so a tampered file degrades to "no model
-  # recorded" rather than being trusted.
-  if [[ -n "$tx_model" && "$tx_model" =~ $model_charset_re ]]; then
-    session_model="$tx_model"
+  # Charset-validated (ids can carry "[1m]"), so a tampered value is never
+  # printed or trusted. An id that is present but fails the charset is still
+  # reported as present (PR #177 review: it used to say "no model id
+  # recorded").
+  if [[ -n "$tx_model" ]]; then
+    model_present=1
+    [[ "$tx_model" =~ $model_charset_re ]] && session_model="$tx_model"
   elif [[ -f "$model_file" ]]; then
     session_model="$(cat "$model_file" 2>/dev/null || true)"
+    [[ -n "$session_model" ]] && model_present=1
     [[ "$session_model" =~ $model_charset_re ]] || session_model=""
   fi
-  if [[ -z "$session_model" ]]; then
+  if [[ -z "$session_model" ]] && (( model_present )); then
+    window_unknown_why="the recorded model id is not in this hook's model table (it has characters this hook will not print)"
+  elif [[ -z "$session_model" ]]; then
     window_unknown_why="no status line, no HANDOFF_CTX_WINDOW_TOKENS, no model id recorded"
   elif [[ "$session_model" == *"[1m]"* ]]; then
     window_tokens=1000000
@@ -839,21 +891,37 @@ else
     # transcript's model id never carries that suffix (measured 2026-11-09:
     # 0 of 53,604 assistant lines across 400 local transcripts), so the id
     # alone cannot tell. CLAUDE_CODE_DISABLE_1M_CONTEXT=1 makes Claude Code
-    # treat the 1M-default models as 200k, so the table follows it. Ids are
-    # matched anywhere in the string so dated snapshots and provider
-    # prefixes ("anthropic.claude-...") resolve too. A model not listed here
-    # is UNKNOWN, never assumed: add it to the table once the docs list it.
+    # treat the 1M-default models as 200k, so the table follows it.
+    #
+    # Matching is ANCHORED to the listed family and version (PR #177 review:
+    # substring globs gave 1M to unlisted ids such as claude-opus-5-1,
+    # claude-sonnet-5-9 and claude-opus-50). Accepted around a listed id: a
+    # provider prefix ending in "anthropic." ("us.anthropic.", Bedrock), a
+    # "-YYYYMMDD" snapshot date, a Bedrock "-vN" or "-vN:M" suffix and a
+    # Vertex "@..." suffix. A model not listed is UNKNOWN, never assumed:
+    # add it here once the docs list it.
     tbl=""
-    case "$session_model" in
-      *claude-fable-5-1*|*claude-fable-5*|*claude-mythos-5-1*|*claude-mythos-5*|*claude-mythos-preview*|\
-      *claude-opus-5-5*|*claude-opus-5*|*claude-opus-4-8*|*claude-opus-4-7*|\
-      *claude-sonnet-5-5*|*claude-sonnet-5*|*claude-haiku-5-5*)
+    model_base="$session_model"
+    if [[ "$model_base" =~ ^([a-z0-9-]+\.)*anthropic\.(.+)$ ]]; then
+      model_base="${BASH_REMATCH[2]}"
+    fi
+    model_base="${model_base%%@*}"
+    if [[ "$model_base" =~ ^(.+)-v[0-9]+(:[0-9]+)?$ ]]; then
+      model_base="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$model_base" =~ ^(.+)-[0-9]{8}$ ]]; then
+      model_base="${BASH_REMATCH[1]}"
+    fi
+    case "$model_base" in
+      claude-fable-5-1|claude-fable-5|claude-mythos-5-1|claude-mythos-5|claude-mythos-preview|\
+      claude-opus-5-5|claude-opus-5|claude-opus-4-8|claude-opus-4-7|\
+      claude-sonnet-5-5|claude-sonnet-5|claude-haiku-5-5)
         tbl=1000000
         [[ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-}" == "1" ]] && tbl=200000
         ;;
-      *claude-opus-4-6*|*claude-sonnet-4-6*)
+      claude-opus-4-6|claude-sonnet-4-6)
         window_unknown_why="model id ${session_model} runs at 200k or 1M depending on whether its [1m] variant was picked, which the id does not record" ;;
-      *claude-opus-4-5*|*claude-sonnet-4-5*|*claude-haiku-4-5*)
+      claude-opus-4-5|claude-sonnet-4-5|claude-haiku-4-5)
         tbl=200000 ;;
       *)
         window_unknown_why="model id ${session_model} is not in this hook's model table" ;;
@@ -895,6 +963,14 @@ if [[ "$window_source" != "env" && -n "$sl_pct" ]]; then
 elif [[ -n "$window_tokens" ]]; then
   pct=$((est_tokens * 100 / window_tokens))
 fi
+# Never print a percentage above 100 (PR #177 review: bytes/4 printed 126%
+# and 631%, an env pin 125%). A count above the window is reported as such
+# with no percentage; internally it gates and steps as 100.
+pct_over=0
+if [[ -n "$pct" ]] && (( pct > 100 )); then
+  pct_over=1
+  pct=100
+fi
 if [[ -n "$pct" ]]; then
   (( pct < THRESHOLD_PCT )) && exit 0
   # The step this reading sits on: THRESHOLD_PCT + k * STEP_PCT.
@@ -932,10 +1008,22 @@ if [[ -f "$flag_file" ]]; then
   [[ "$last_flagged" =~ ^[0-9]+$ ]] || last_flagged=0
   [[ "$last_step" =~ ^[0-9]+$ ]] || last_step=""
   if [[ -n "$cur_step" && -n "$last_step" ]]; then
-    # Same step as the last nudge: wait for the next one. A LOWER step means
-    # usage dropped (compaction): the old step is stale, so the reading counts
-    # as a fresh crossing and fires.
+    # Same step as the last nudge: wait for the next one. A lower reading
+    # re-arms only once it is a full STEP_PCT below the last flagged step (a
+    # compaction drop qualifies): PR #177 review, 35, 34, 35, 34, 35 fired
+    # five times when any drop re-armed.
     (( cur_step == last_step )) && exit 0
+    if (( cur_step < last_step )); then
+      rearm_step="$STEP_PCT"
+      (( rearm_step > 0 )) || rearm_step=1
+      rearm_floor=$(( last_step-rearm_step ))
+      (( pct > rearm_floor )) && exit 0
+    fi
+  elif [[ "$ledger" == "tokens" ]] && (( progress < last_flagged )); then
+    # Token occupancy dropped below the last flag (compaction): the cooldown
+    # ledger is stale, so this crossing counts as fresh (see the tokens-ledger
+    # note above; there the file is cleared for step-less lines only).
+    :
   elif (( progress < last_flagged + cooldown_units )); then
     exit 0
   fi
@@ -970,6 +1058,8 @@ fi
 # the last nudge would wait for one that never comes. (audit 2026-07-17)
 if (( MAX_FLAGS > 0 && flag_count + 1 >= MAX_FLAGS )); then
   repeat_note="Automatic-nudge cap reached (HANDOFF_CTX_MAX_FLAGS=${MAX_FLAGS}): this reminder will not re-fire this session."
+elif (( pct_over )); then
+  repeat_note="This reminder re-fires only after usage drops and crosses a step again."
 elif [[ -n "$cur_step" ]] && (( STEP_PCT > 0 )); then
   repeat_note="Next reminder at ${cur_step}% + ${STEP_PCT} = $((cur_step + STEP_PCT))%."
 elif [[ -n "$cur_step" ]]; then
@@ -1011,6 +1101,17 @@ if (( desktop_mode )); then
     && repeat_note="This reminder re-fires after usage grows by another ${STEP_PCT}-point step."
   ctx_head="Context at ~${est_tokens} tokens (${tok_src}). The desktop app's own context meter is the authoritative figure for how full the window is: refer to it rather than inferring a percentage."
   flag_example="about ${est_tokens} tokens of context used (see the app's context meter)"
+elif (( pct_over )) && [[ "$token_source" == "estimated" ]]; then
+  ctx_head="Context at ~${est_tokens} tokens (${tok_src}), at or above the ${window_tokens}-token window (${win_src}), so no percentage is given."
+  flag_example="about ${est_tokens} tokens of context used (an estimate), at or above the ${window_tokens}-token window"
+elif (( pct_over )); then
+  if [[ "$window_source" == "env" ]]; then
+    over_what="the ${window_tokens}-token window pinned by HANDOFF_CTX_WINDOW_TOKENS"
+  else
+    over_what="the ${window_tokens}-token window (${win_src})"
+  fi
+  ctx_head="Context at ~${est_tokens} tokens (${tok_src}): the measured count exceeds ${over_what}, so no percentage is given."
+  flag_example="about ${est_tokens} tokens of context used, more than ${over_what}"
 elif [[ -n "$pct" && -n "$window_tokens" ]]; then
   ctx_head="Context at ~${est_tokens} tokens (${tok_src}), ~${pct}% of a ${window_tokens}-token window (${win_src}; percentage is ${pct_src})."
   flag_example="~${pct}% of context used (${window_tokens}-token window ${win_src})"
