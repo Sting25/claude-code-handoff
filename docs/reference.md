@@ -195,9 +195,9 @@ reminder injections all count), while window occupancy is capped by the
 model's context window; the two quantities don't scale together, so if
 you're tuning re-flag spacing precisely, set `HANDOFF_CTX_COOLDOWN_TOKENS`
 explicitly rather than relying on the KB-derived default.
-This matters most on **plugin installs**, where the statusline is the
-only accurate context signal available (plugins cannot set
-`statusLine`, so it is wired by hand — see [Status line](#status-line)).
+This matters most when the Stop hook is not recording, where the
+statusline is the only accurate context signal left (see [Status
+line](#status-line)).
 
 ### Stop-hook health warnings
 
@@ -238,8 +238,7 @@ healthy, both throttled to once per session:
   fires on a project's first session (nothing expected yet).
 
 Both point at running the doctor (`./install.sh --doctor` from a
-clone; the plugin's doctor command for a plugin install) as the next
-diagnostic step.
+clone) as the next diagnostic step.
 
 `HANDOFF_NO_HEALTH_WARN=1` disables both detectors — for a project
 that deliberately runs without the per-turn safety net (e.g. only
@@ -273,25 +272,12 @@ prefer). Without `jq` the script prints a static
 Code versions that don't send `context_window` in the statusLine
 payload, the line degrades to model + handoff state.
 
-**Wiring differs by install mode.** `statusLine` is a single slot in
-`~/.claude/settings.json`, only one command can occupy it, so how it
-gets wired depends on how you installed:
-
-- **Bare-scripts install** wires it for you via `./install.sh`, but
-  only if you don't already have a statusLine (an existing one is
-  never overwritten; the installer prints the manual step instead).
-- **Plugin install** cannot wire it at all: Claude Code has no
-  per-plugin mechanism for `statusLine`, so it is a manual, optional
-  paste into `~/.claude/settings.json`:
-
-  ```json
-  "statusLine": { "type": "command", "command": "bash \"$(ls -td \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"/plugins/cache/*/claude-code-handoff/*/bin/handoff_statusline.sh 2>/dev/null | head -1)\" 2>/dev/null" }
-  ```
-
-  `ls -td` picks the newest cached plugin version by directory mtime,
-  not by version number, so it can pick the wrong script if an older
-  version's cache directory was touched more recently than the
-  current one.
+**Wiring.** `statusLine` is a single slot in the settings file the
+installer patches (the project's `.claude/settings.json` with `--scope
+project`, `~/.claude/settings.json` otherwise), and only one command
+can occupy it. `./install.sh` wires it for you, but only if that file
+doesn't already have a statusLine (an existing one is never
+overwritten; the installer prints the manual step instead).
 
 ## Compaction safety net
 
@@ -860,7 +846,7 @@ calls made inside a subagent, so a subagent cannot write, reset or
 inject into the main session's handoff state. Only `agent_id` counts:
 `agent_type` is also set for main sessions started with `--agent`, and
 those must keep working. Set `HANDOFF_HOOKS_ALLOW_AGENTS=1` to run the
-hooks for subagents too. As of Claude Code 2.1.319 none of the events this plugin binds
+hooks for subagents too. As of Claude Code 2.1.319 none of the events these hooks bind
 (SessionStart, SessionEnd, PreCompact, PostCompact, Stop,
 UserPromptSubmit, WorktreeRemove) carries `agent_id`, so the guard is
 defence in depth against a future CLI threading it in, not proof the
@@ -942,12 +928,12 @@ export HANDOFF_LOCK_STALE_SECS=600
 ### Environment variables and the trust boundary
 
 A deliberate design note, so nobody rediscovers this as a "finding":
-`CLAUDE_HOME`, `CLAUDE_CONFIG_DIR`, `CLAUDE_PLUGIN_ROOT`, and
-`HANDOFF_SECRET_FILE` all *select paths* — which scripts the skills
+`CLAUDE_HOME` and
+`HANDOFF_SECRET_FILE` both *select paths*: which scripts the skills
 resolve, where the signing secret lives. Anything able to set
 environment variables for a session (for example a trusted repo's
 `.claude/settings.json` `env` block) can therefore redirect them, up to
-and including pointing the skills' plugin-cache fallback at a
+and including pointing the skills' script lookup at a
 repo-controlled directory. This tool does not defend against its own
 host environment: that is Claude Code's trust boundary (folder trust,
 settings review), and the same class applies to `PATH` or `HOME` for
@@ -1087,64 +1073,6 @@ command string or adds a new hook — that's called out in
 Run `./install.sh --doctor` anytime to confirm every installed hook
 still resolves (handy after moving or re-cloning the repo).
 
-### Plugin installs: project scope (recommended layout)
-
-The recommended plugin layout is a per-project opt-in; the commands
-and rationale are in the README under [Per-project plugin
-install](../README.md#per-project-plugin-install-recommended). Facts
-that matter when reasoning about it:
-
-- `claude plugin install claude-code-handoff@claude-code-handoff --scope project`
-  writes `enabledPlugins` to the project's `.claude/settings.json`;
-  `--scope local` writes `.claude/settings.local.json`; `--scope user`
-  is the global install.
-- Precedence is local, then project, then user. A user-level `false`
-  does not disable a project-enabled plugin, so moving from the global
-  layout means `claude plugin uninstall
-  claude-code-handoff@claude-code-handoff --scope user` first.
-- Project-scope plugins also load in that repo's worktrees.
-- Only loaded plugins register hooks and skills, so a project that has
-  not opted in gets neither.
-- Committed settings do not install the plugin for collaborators; each
-  one runs the install command.
-- Updates and uninstalls take the same `--scope` the plugin was
-  installed at.
-
-### Plugin installs: the stale-cache gotcha (dev note)
-
-Plugin installs update through Claude Code's own plugin management
-(`/plugin` in-session), not `git pull`. If you're developing the
-plugin locally, know this measured behavior (observed 2026-08-11):
-the plugin cache lives at
-`$CLAUDE_CONFIG_DIR/plugins/cache/<marketplace>/claude-code-handoff/<version>/`
-(`~/.claude/plugins/cache/...` when `CLAUDE_CONFIG_DIR` is unset), and
-reinstalling the **same version** serves the stale cached
-`plugin.json` — `/plugin marketplace update`, `/plugin update`, and
-even a full remove-and-re-add do not refresh it. Between local test
-cycles, either bump the version in `.claude-plugin/plugin.json` (+
-`VERSION`) or delete that cache directory. One more wrinkle: with a
-directory-source marketplace, `hooks/hooks.json` was read live from
-the repo path while the plugin's identity came from the cache — so
-hook edits can look live while manifest edits look stale.
-
-**End-user side, self-healing since v0.18.0:** the same cache
-directory also accumulates every OLD version once Claude Code
-installs a newer one; nothing in the CLI ever removes a superseded
-version on its own. Left alone this is more than clutter: a session
-can load this plugin's skill from a stale cached version while its
-hook scripts resolve the current one (both install.d's doctor check
-and the skills' cache-fallback loop independently pick "the" cache by
-newest mtime, so which one wins can differ from what the model's
-skill invocation actually read), mixing two versions inside one
-session. `bin/handoff_cache_prune.sh`, called from the `SessionStart`
-hook, prunes every cached sibling version except the newest by mtime
-and the version dir the running script itself lives in, on every
-session start, with no user action required. It only ever acts when
-its own resolved path proves the exact
-`plugins/cache/<marketplace>/claude-code-handoff/<version>/bin` shape
-first; anything else (a bare-scripts install, a relocated checkout, a
-sibling plugin's cache) is a silent no-op.
-
 ## Uninstall details
 
 ```bash
@@ -1170,14 +1098,17 @@ Pass `--keep-secret` to skip that deletion entirely:
 ./install.sh --uninstall --keep-secret
 ```
 
-Use this when you're leaving bare-scripts mode to switch to the plugin
-install (see the README's [Dual-mode
-warning](../README.md#dual-mode-warning)), not when you're removing the
-tool for good. The secret is per-machine identity, not per-install-mode
-state, and both modes read it from the same default path, so any
-already-signed `handoff_current.md` (and anything in
-`handoff_history/`) keeps verifying as binding rules across the
-switch instead of silently downgrading to reference data (issue #65).
+Use this when you uninstall only to reinstall (for example moving the
+wiring from user scope to `--scope project`, see the README's [Keeping
+signed handoffs across a
+reinstall](../README.md#keeping-signed-handoffs-across-a-reinstall)),
+not when you're removing the tool for good. The secret is per-machine
+identity, not per-install state, and every install reads it from the
+same default path, so any already-signed `handoff_current.md` (and
+anything in `handoff_history/`) keeps verifying as binding rules across
+the reinstall instead of silently downgrading to reference data (issue
+#65). A project-scope `--uninstall` never removes the secret, so the
+flag has no effect there.
 
 The skip message names the effective secret path it resolved before
 printing, not always the default: with `HANDOFF_SECRET_FILE` set it

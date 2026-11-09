@@ -6,12 +6,12 @@ description: Snapshot session state to .claude/handoff_current.md and tell the u
 # /handoff — write a session handoff
 
 > **Prerequisite:** this skill drives scripts and hooks from
-> https://github.com/Sting25/claude-code-handoff — `write_handoff.sh`
-> under `~/.claude/bin/` (script install) or the plugin's `bin/`
-> (plugin install) and the Stop / SessionStart / SessionEnd hooks
-> in `~/.claude/settings.json` are NOT part of this file. Run
-> `./install.sh` from that repo (or install the plugin) once per
-> machine before first use.
+> https://github.com/Sting25/claude-code-handoff: `write_handoff.sh`
+> under `~/.claude/bin/` and the Stop / SessionStart / SessionEnd hooks
+> in the project's `.claude/settings.json` (or `~/.claude/settings.json`)
+> are NOT part of this file. Run
+> `./install.sh --scope project --project <dir>` from that repo before
+> first use.
 
 Used at clean boundaries (after a commit, when a major track wraps),
 when the user signals context pressure, or whenever the user invokes
@@ -20,9 +20,8 @@ nothing gets lost across the restart boundary.
 
 ## What this skill does
 
-1. **Snapshot state** — runs `write_handoff.sh` (resolved from
-   `~/.claude/bin/` on a script install or the plugin's `bin/` on a
-   plugin install — see Steps below), which captures:
+1. **Snapshot state**: runs `write_handoff.sh` (resolved from
+   `~/.claude/bin/`, see Steps below), which captures:
    - HEAD, branch, recent commits, working-tree state for the current repo
    - Same for an optional sibling "substrate" repo (configured via
      `HANDOFF_SUBSTRATE_NAME`, e.g. a shared decisions / RFCs repo)
@@ -47,34 +46,13 @@ nothing gets lost across the restart boundary.
 
 ## Steps
 
-1. Resolve where the scripts live, then run via Bash. Script installs
-   put them under `~/.claude/bin/`; plugin installs put them under the
-   plugin's `bin/`. `CLAUDE_PLUGIN_ROOT` would name that location, but
-   measurement (2026-08-11, plugin-enabled headless session) shows the
-   CLI does NOT export it to model-driven Bash calls — the env-var
-   check stays only as cheap future-proofing, and in plugin mode the
-   cache-glob is the branch that actually resolves:
+1. Resolve where the scripts live, then run via Bash. The installer
+   puts them under `~/.claude/bin/` (`$CLAUDE_HOME/bin` when that
+   override is set):
    ```bash
-   hb=""
-   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
-     hb="${CLAUDE_PLUGIN_ROOT}/bin"
-   elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
-     hb="$HOME/.claude/bin"
-   else
-     nb=0
-     for d in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff/*/bin; do
-       if [ -f "$d/write_handoff.sh" ]; then
-         t="$(stat -f %m "$d/write_handoff.sh" 2>/dev/null || stat -c %Y "$d/write_handoff.sh" 2>/dev/null || echo 0)"
-         [ "$t" -ge "$nb" ] && nb="$t" && hb="$d"
-       fi
-     done
-   fi
-   # env var wins when set (running from that plugin), legacy bin next (existing
-   # installs), cache glob last (plugin installed but env var not visible to
-   # skill Bash); among cached versions the newest mtime wins. NOT lexical
-# last-match: glob order sorts 0.9.0 AFTER 0.14.0, so that silently ran an
-# older cached version across a digit-count boundary (fixed v0.14.1).
-   [ -n "$hb" ] || echo "MISSING: handoff scripts not installed (neither ~/.claude/bin nor a plugin install found)"
+   hb="${CLAUDE_HOME:-$HOME/.claude}/bin"
+   [ -f "$hb/write_handoff.sh" ] || hb=""
+   [ -n "$hb" ] || echo "MISSING: handoff scripts not installed (no write_handoff.sh in ${CLAUDE_HOME:-$HOME/.claude}/bin)"
    echo "handoff-bin: $hb"
    ```
    Then, if it did not print MISSING, run it. **Shell state (env vars)
@@ -98,8 +76,8 @@ nothing gets lost across the restart boundary.
    never sends EOF, and the script reads an optional hook payload from
    stdin. Installs from 0.19.1 on bound that read; older ones hang on it.
    If it prints MISSING, **stop here** — tell the user to clone
-   https://github.com/Sting25/claude-code-handoff and run `./install.sh`
-   (or install the plugin), then re-invoke `/handoff`. Do NOT attempt to
+   https://github.com/Sting25/claude-code-handoff and run `./install.sh`,
+   then re-invoke `/handoff`. Do NOT attempt to
    reconstruct the script's behavior by hand; the hooks it pairs with
    won't be installed either, and a hand-rolled snapshot breaks the
    HMAC/rotation contract.
@@ -218,20 +196,8 @@ nothing gets lost across the restart boundary.
    from Step 1's resolution — shell state doesn't carry over, so
    re-resolve `$hb` here rather than assuming it's still set:
    ```bash
-   hb=""
-   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/bin/write_handoff.sh" ]; then
-     hb="${CLAUDE_PLUGIN_ROOT}/bin"
-   elif [ -f "$HOME/.claude/bin/write_handoff.sh" ]; then
-     hb="$HOME/.claude/bin"
-   else
-     nb=0
-     for d in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-code-handoff/*/bin; do
-       if [ -f "$d/write_handoff.sh" ]; then
-         t="$(stat -f %m "$d/write_handoff.sh" 2>/dev/null || stat -c %Y "$d/write_handoff.sh" 2>/dev/null || echo 0)"
-         [ "$t" -ge "$nb" ] && nb="$t" && hb="$d"
-       fi
-     done
-   fi
+   hb="${CLAUDE_HOME:-$HOME/.claude}/bin"
+   [ -f "$hb/write_handoff.sh" ] || hb=""
    bash "$hb/write_handoff.sh" --restamp </dev/null
    ```
    This re-signs `handoff_current.md` in place with the per-machine
