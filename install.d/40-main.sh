@@ -34,8 +34,25 @@ elif [[ "$mode" == install ]]; then
   echo "symlinks:"
   install_symlinks
   echo
-  echo "settings.json:"
+  if [[ "$scope" == project ]]; then
+    # Project scope (issue #171): the scripts above are shared from
+    # $claude_home; only the wiring goes into the project. Create the
+    # project's .claude/ on demand (install mode only: --doctor and
+    # --uninstall never create anything).
+    echo "project settings ($project_dir):"
+    if [[ ! -d "$(dirname "$settings")" ]]; then
+      mkdir -p "$(dirname "$settings")"
+      echo "  new     $(dirname "$settings")/"
+    fi
+  else
+    echo "settings.json:"
+  fi
   patch_settings
+  # Record the project once its file actually carries our hooks (a refused
+  # patch, e.g. invalid JSON, wires nothing and registers nothing).
+  if [[ "$scope" == project ]] && settings_has_our_hooks "$settings"; then
+    registry_add "$project_dir" "$settings_name"
+  fi
   echo
   if [[ -z "$model_pin" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
      && jq -e 'type == "object" and ((.model // null) == null)' "$settings" >/dev/null 2>&1; then
@@ -53,6 +70,15 @@ elif [[ "$mode" == install ]]; then
     echo "      Installing the script mode too will double-fire every hook —"
     echo "      Claude Code runs both plugin and script hooks, no dedup."
     echo
+  fi
+  if [[ "$scope" == project ]]; then
+    # Checks all three files (user, project settings.json, project
+    # settings.local.json): an extra wired file is reported with the
+    # uninstall command that removes it.
+    report_wiring NOTE
+  fi
+  if [[ "$scope" == project ]]; then
+    echo "note: hooks are wired for $project_dir only ($settings)."
   fi
   echo "done. start a new Claude Code session — /handoff is available now."
   # First-run signing note — one line pointing at --doctor for the detailed
@@ -77,6 +103,32 @@ elif [[ "$mode" == install ]]; then
     echo "      ./install.sh to refresh the copies — symlinked installs update"
     echo "      automatically, copies do not."
   fi
+elif [[ "$scope" == project ]]; then
+  # Project-scope uninstall (issue #171) strips only this project's wiring.
+  # The scripts, skills, and HMAC secret under $claude_home are shared by
+  # every project on this machine, so they stay; a user-scope --uninstall is
+  # the way to remove them.
+  echo "uninstalling handoff wiring from $project_dir (project scope)"
+  echo
+  if (( project_gone )); then
+    # The directory is gone (a removed worktree, usually): nothing left to
+    # unpatch, so clear its registry line and stop cleanly.
+    echo "project settings ($project_dir):"
+    echo "  ok      $project_dir no longer exists; nothing to unpatch"
+    registry_remove "$project_dir" "$settings_name"
+    echo
+    echo "done. the repo at $repo_root is untouched."
+    exit 0
+  fi
+  echo "project settings ($project_dir):"
+  unpatch_settings
+  registry_remove "$project_dir" "$settings_name"
+  echo
+  echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
+  echo "      HMAC secret are shared by every project on this machine and were not"
+  echo "      removed. Run ./install.sh --uninstall (user scope) to remove them."
+  echo
+  echo "done. the repo at $repo_root is untouched."
 else
   echo "uninstalling handoff skill from $claude_home"
   echo
@@ -87,7 +139,26 @@ else
   unpatch_settings
   echo
   echo "local state:"
-  remove_secret_if_ours
+  # Registry first (issue #171 review): projects still wired sign their
+  # handoffs with the same per-machine secret, so deleting it here would
+  # silently downgrade every one of them. Keep it automatically while any
+  # registered project is wired; --remove-secret deletes it anyway.
+  orphan_list="$(registry_scan wired)"
+  secret_path="${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}"
+  if [[ -n "$orphan_list" ]] && (( ! remove_secret && ! keep_secret )); then
+    orphan_n="$(printf '%s\n' "$orphan_list" | wc -l | tr -d ' ')"
+    echo "  keep    $secret_path (kept: $orphan_n project-scope install(s) still sign with"
+    echo "          it; pass --remove-secret to delete it anyway)"
+    secret_note="The HMAC secret $secret_path was kept for them."
+  else
+    remove_secret_if_ours
+    if [[ -e "$secret_path" ]]; then
+      secret_note="The HMAC secret $secret_path is still in place."
+    else
+      secret_note="The HMAC secret $secret_path is gone, so their signed handoffs no longer verify as binding."
+    fi
+  fi
+  report_registry_orphans "$orphan_list" "$secret_note"
   echo
   echo "done. the repo at $repo_root is untouched."
 fi

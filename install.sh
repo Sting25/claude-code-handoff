@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 188b7d9ad030f20160707dc4d796e360e4f59eb38fce9545b8933e48e0e19237
+# SOURCE-SHA256: 48a93482dc13241785c686a1821641684918d3ec3da86c0c0d08fee6628d58c2
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -32,10 +32,10 @@ install.sh — wire this repo's handoff skill into ~/.claude/.
 What it does:
   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
-  2. Patches ~/.claude/settings.json to add six hooks
+  2. Patches ~/.claude/settings.json to add seven hooks
      (SessionStart / SessionEnd / PreCompact / PostCompact / WorktreeRemove / Stop /
-     UserPromptSubmit), six permission entries, and — only when you
-     don't already have one — a statusLine command (never overwrites
+     UserPromptSubmit), seven permission entries, and (only when you
+     don't already have one) a statusLine command (never overwrites
      an existing statusLine; prints the manual step instead).
      Requires jq; falls back to printing the snippet if jq is missing.
 
@@ -57,6 +57,28 @@ Usage:
   ./install.sh --uninstall  # remove symlinks + strip patched entries
   ./install.sh --uninstall --keep-secret  # same, but keep the per-machine HMAC secret
   ./install.sh --help
+
+Scope (where the hooks are wired):
+  --scope user       patch ~/.claude/settings.json (the default; every project)
+  --scope project    patch <project>/.claude/settings.json (one project only);
+                     the project is --project <dir>, else the current directory
+  --project <dir>    the project to wire; implies --scope project
+  --local            with project scope, patch .claude/settings.local.json
+                     instead of .claude/settings.json
+
+  Recommended (one project only):
+    ./install.sh --scope project --project ~/code/myapp
+
+  Project scope still installs the scripts and skills into ~/.claude, since
+  every project shares them. --uninstall and --doctor take the same scope
+  flags: a project-scope --uninstall strips only that project's settings
+  file and leaves ~/.claude/bin, the skills, and the HMAC secret in place.
+  The project must be an existing directory, and may not be this clone.
+  Without --project, inside a git repo the project is its toplevel.
+
+  While any project-scope install is still wired, a user-scope --uninstall
+  keeps the shared HMAC secret (those projects sign with it); add
+  --remove-secret to delete it anyway.
 
 --keep-secret only changes what --uninstall does. It is still accepted
 without --uninstall (plain install, --doctor) so a script that always
@@ -83,6 +105,30 @@ umask 077
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || repo_root=""
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
+# The user-scope file, kept separately because project scope (issue #171)
+# repoints $settings at a project file while doctor still needs this one for
+# its double-fire check.
+user_settings="$settings"
+
+# Install scope (issue #171). "user" patches $claude_home/settings.json, the
+# behaviour every release before this one had, and stays the default so an
+# existing install never changes under anyone's feet. "project" patches
+# <project>/.claude/settings.json (or settings.local.json with --local)
+# instead; the scripts and skills still go into $claude_home either way,
+# because the hook commands point at $HOME/.claude/bin. scope_flag records
+# an explicit --scope so a contradiction with --project/--local is refused
+# rather than guessed at.
+scope=user
+scope_flag=""
+project_dir=""
+use_local=0
+settings_name="settings.json"
+project_backup_dir=""
+# Registry of project-scope installs (issue #171): one line per wired
+# project file, "<absolute project dir><TAB><settings file name>". Lets a
+# user-scope --uninstall warn about projects whose hooks it is about to
+# orphan, and lets the user-scope doctor name stale entries.
+project_registry="$claude_home/handoff_projects"
 # Include the PID so two installs in the same clock second don't collide on the
 # same .bak.<ts> name — without it, the second run's `cp` would overwrite the
 # first run's pre-patch settings.json backup, destroying the only safe copy.
@@ -112,6 +158,13 @@ link_mode="auto"
 # "delete" (unchanged, opt-in only) because the secret is also genuinely
 # uninstall-scoped key material for someone leaving the tool entirely.
 keep_secret=0
+# --remove-secret (issue #171): a user-scope --uninstall keeps the secret
+# automatically while any registered project-scope install is still wired
+# (they sign with it); this flag deletes it anyway.
+remove_secret=0
+# Set when a project-scope --uninstall names a directory that is gone (a
+# removed worktree): only its registry line is cleared.
+project_gone=0
 
 # Validate $claude_home before creating or patching anything under it: an empty,
 # root, or relative value would scatter symlinks and a patched settings.json
@@ -149,11 +202,8 @@ resolve_symlink() {  # <path> -> physical path on stdout
   done
   printf '%s\n' "$p"
 }
-if [[ -L "$settings" ]]; then
-  settings_resolved="$(resolve_symlink "$settings")"
-  echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
-  settings="$settings_resolved"
-fi
+# (The symlink check itself runs after argument parsing, below, because
+# --scope project repoints $settings at a project file first.)
 
 # Recovery state for the settings.json patch/unpatch sequence. The edits are a
 # series of separate jq writes; if the script aborts (set -e) partway through,
@@ -163,6 +213,10 @@ fi
 # armed only between the backup and the successful end of the sequence.
 settings_backup=""
 patch_in_progress=0
+# Project scope only (issue #171): a settings file this run seeded as {}
+# gets no backup (there was nothing to keep), so an abort puts back what
+# was there before instead: "absent" removes the file, "empty" truncates it.
+settings_seed_state=""
 cleanup() {
   local rc=$?
   rm -f "$settings.tmp" 2>/dev/null || true
@@ -170,6 +224,14 @@ cleanup() {
      && [[ -n "$settings_backup" && -f "$settings_backup" ]]; then
     cp -f "$settings_backup" "$settings" 2>/dev/null || true
     echo "  restore $settings from $settings_backup (aborted mid-patch, rc=$rc)" >&2
+  elif (( patch_in_progress )) && (( rc != 0 )) && [[ -n "$settings_seed_state" ]]; then
+    if [[ "$settings_seed_state" == absent ]]; then
+      rm -f "$settings" 2>/dev/null || true
+      echo "  restore $settings removed again; this run created it (aborted mid-patch, rc=$rc)" >&2
+    else
+      : > "$settings" 2>/dev/null || true
+      echo "  restore $settings emptied again, as it was before this run (aborted mid-patch, rc=$rc)" >&2
+    fi
   fi
 }
 # NOT armed here. A piped `curl | bash` executes top-level statements as they
@@ -188,6 +250,7 @@ while [[ $# -gt 0 ]]; do
     --copy)        link_mode=copy ;;
     --link)        link_mode='link' ;;
     --keep-secret) keep_secret=1 ;;
+    --remove-secret) remove_secret=1 ;;
     --model)
       if [[ $# -lt 2 || -z "$2" ]]; then
         echo "ERROR: --model requires a value (e.g. --model 'opus[1m]')" >&2
@@ -195,6 +258,27 @@ while [[ $# -gt 0 ]]; do
       fi
       model_pin="$2"; shift ;;
     --model=*)   model_pin="${1#--model=}" ;;
+    --scope)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "ERROR: --scope requires a value: user or project" >&2
+        exit 2
+      fi
+      scope_flag="$2"; shift ;;
+    --scope=*)   scope_flag="${1#--scope=}" ;;
+    --project)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "ERROR: --project requires a directory (e.g. --project ~/code/myapp)" >&2
+        exit 2
+      fi
+      project_dir="$2"; shift ;;
+    --project=*)
+      project_dir="${1#--project=}"
+      if [[ -z "$project_dir" ]]; then
+        echo "ERROR: --project requires a directory (e.g. --project ~/code/myapp)" >&2
+        exit 2
+      fi
+      ;;
+    --local)     use_local=1 ;;
     --help|-h)
       usage
       exit 0
@@ -213,6 +297,118 @@ done
 if (( keep_secret )) && [[ "$mode" != uninstall ]]; then
   echo "warning: --keep-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
 fi
+if (( keep_secret && remove_secret )); then
+  echo "ERROR: --keep-secret and --remove-secret contradict each other; pass one." >&2
+  exit 2
+fi
+if (( remove_secret )) && [[ "$mode" != uninstall ]]; then
+  echo "warning: --remove-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
+fi
+
+# Resolve the install scope (issue #171). Every refusal here exits before
+# anything is created or patched.
+case "$scope_flag" in
+  "" | user | project) : ;;
+  *)
+    echo "ERROR: --scope must be 'user' or 'project' (got '$scope_flag')." >&2
+    exit 2 ;;
+esac
+if [[ -n "$project_dir" ]]; then
+  if [[ "$scope_flag" == user ]]; then
+    echo "ERROR: --project implies --scope project; it cannot be combined with --scope user." >&2
+    exit 2
+  fi
+  scope=project
+elif [[ "$scope_flag" == project ]]; then
+  scope=project
+fi
+if (( use_local )) && [[ "$scope" != project ]]; then
+  echo "ERROR: --local only applies to project scope; add --scope project or --project <dir>." >&2
+  exit 2
+fi
+if [[ "$scope" == project ]]; then
+  # No --project: the project containing the current directory, the natural
+  # shape for `cd ~/code/myapp && ~/src/claude-code-handoff/install.sh
+  # --scope project`. Inside a git repo that is its toplevel (Claude Code
+  # reads .claude/ at the project root, not in a subdirectory); outside
+  # one, the current directory itself. Said out loud either way.
+  if [[ -z "$project_dir" ]]; then
+    _top=""
+    if command -v git >/dev/null 2>&1; then
+      _top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+    fi
+    if [[ -n "$_top" ]]; then
+      project_dir="$_top"
+      echo "note: no --project given; using $project_dir (the git toplevel of the current directory)." >&2
+    else
+      project_dir="$PWD"
+      echo "note: no --project given; using $project_dir (the current directory)." >&2
+    fi
+  fi
+  if [[ ! -d "$project_dir" && "$mode" == uninstall ]]; then
+    # A project-scope uninstall of a directory that is gone (typically a
+    # removed worktree the doctor listed as stale) only clears its registry
+    # line; there is no file left to unpatch. Made absolute the only way a
+    # missing path allows, so it matches the registry's absolute entries.
+    case "$project_dir" in
+      /*) : ;;
+      *) project_dir="$PWD/$project_dir" ;;
+    esac
+    while [[ "$project_dir" == */ && "$project_dir" != / ]]; do project_dir="${project_dir%/}"; done
+    project_gone=1
+  elif [[ ! -d "$project_dir" ]]; then
+    echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
+    exit 2
+  fi
+fi
+if [[ "$scope" == project ]] && (( ! project_gone )); then
+  # Absolute and physical, so the comparisons below and the paths printed
+  # (and the backup location) never depend on how the flag was spelled.
+  project_dir="$(cd "$project_dir" && pwd -P)"
+  # Wiring the handoff clone, or any directory inside it, is almost
+  # certainly a mistake: the usual cause is running `./install.sh --scope
+  # project` from inside the clone without --project. Refuse instead of
+  # patching a .claude/ under the clone. Prefix test with a trailing slash on
+  # both sides, so /src/handoff-other is not mistaken for /src/handoff.
+  if [[ -n "$repo_root" ]]; then
+    _src_phys="$(cd "$repo_root" && pwd -P)"
+    case "$project_dir/" in
+      "$_src_phys"/*)
+        echo "ERROR: project directory '$project_dir' is the handoff clone '$_src_phys' or inside it (the install source); refusing." >&2
+        echo "       Pass --project <dir> for the project you want to wire, or run install.sh from inside that project." >&2
+        exit 2 ;;
+    esac
+  fi
+  # A project whose .claude/ IS $claude_home (a project rooted at $HOME)
+  # would make the "project" file the user-scope file under another name.
+  _proj_claude="$project_dir/.claude"
+  # (Plain string compare too, for a fresh machine where neither exists yet.)
+  if [[ "$_proj_claude" == "$claude_home" ]] \
+     || { [[ -d "$_proj_claude" && -d "$claude_home" ]] \
+          && [[ "$(cd "$_proj_claude" && pwd -P)" == "$(cd "$claude_home" && pwd -P)" ]]; }; then
+    echo "ERROR: project '$project_dir' has $claude_home as its .claude directory, which is the user-scope config; refusing." >&2
+    echo "       Use --scope user to patch $user_settings." >&2
+    exit 2
+  fi
+fi
+if [[ "$scope" == project ]]; then
+  _proj_claude="$project_dir/.claude"
+  if (( use_local )); then
+    settings_name="settings.local.json"
+  else
+    settings_name="settings.json"
+  fi
+  settings="$_proj_claude/$settings_name"
+  # Project-scope backups live OUTSIDE the project (a .bak next to a tracked
+  # settings.json is one `git add .` from being committed), one directory
+  # per project keyed by a cksum of its physical path.
+  project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$project_dir" | cksum | awk '{print $1}')"
+  # A project-scope --uninstall never touches the secret (see 40-main.sh),
+  # so --keep-secret is a no-op there too; say so, same as issue #82.
+  if (( keep_secret || remove_secret )) && [[ "$mode" == uninstall ]]; then
+    echo "warning: --keep-secret/--remove-secret have no effect with --scope project; a project-scope --uninstall never removes the secret." >&2
+  fi
+fi
 
 # Env fallback for the model pin; an explicit --model flag wins.
 if [[ -z "$model_pin" && -n "${HANDOFF_MODEL:-}" ]]; then
@@ -223,6 +419,25 @@ fi
 # inverse: the key is removed only when this installer set it AND the value
 # is still exactly what it set — a user's later edit always wins.
 model_pin_record="$claude_home/handoff-model-pin"
+# Project scope keeps one record per project settings file (keyed by a cksum
+# of its path), so a project's --uninstall can never consume the user-scope
+# record or another project's. Computed before the symlink resolution below
+# so the key is the path the user named, not wherever a dotfiles link points.
+if [[ "$scope" == project ]]; then
+  model_pin_record="$claude_home/handoff-model-pin.project.$(printf '%s' "$settings" | cksum | awk '{print $1}')"
+fi
+
+# If the settings file is a symlink (a common dotfiles pattern; stow, chezmoi
+# and friends point ~/.claude/settings.json at a tracked file), operate on its
+# TARGET. The patch writes via tmp+mv, and `mv` onto a symlink replaces the
+# LINK with a plain file, silently disconnecting the user's source of truth.
+# Resolving to the real path keeps tmp+mv atomic AND leaves the symlink intact
+# (Claude Code follows it to read). Applies to a project file the same way.
+if [[ -L "$settings" ]]; then
+  settings_resolved="$(resolve_symlink "$settings")"
+  echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
+  settings="$settings_resolved"
+fi
 
 # Canonical hook commands and permissions. Edit these together with
 # CHANGELOG.md if you ever change the snippet shape.
@@ -907,11 +1122,13 @@ migrate_legacy_ss_hook() {
 ensure_settings_json() {
   if [[ ! -f "$settings" ]]; then
     echo '{}' > "$settings"
+    settings_seed_state=absent
     echo "  new     $settings (created with {})"
     return 0
   fi
   if [[ ! -s "$settings" ]]; then
     echo '{}' > "$settings"
+    settings_seed_state=empty
     echo "  init    $settings was empty; set to {}"
     return 0
   fi
@@ -938,6 +1155,22 @@ ensure_settings_json() {
   return 0
 }
 
+# Back up $settings before the first edit and arm the path cleanup()
+# restores from. User scope keeps the historical <file>.bak.<ts> next to the
+# file. Project scope (issue #171) writes it under $project_backup_dir in
+# $claude_home instead, so a backup never sits inside the project where a
+# `git add .` would commit it.
+take_settings_backup() {
+  if [[ "$scope" == project ]]; then
+    mkdir -p "$project_backup_dir"
+    settings_backup="$project_backup_dir/$settings_name.bak.$ts"
+  else
+    settings_backup="$settings.bak.$ts"
+  fi
+  cp "$settings" "$settings_backup"
+  echo "  backup  $settings -> $settings_backup"
+}
+
 patch_settings() {
   if ! command -v jq >/dev/null 2>&1; then
     echo
@@ -946,11 +1179,16 @@ patch_settings() {
     return
   fi
   ensure_settings_json || return
-  cp "$settings" "$settings.bak.$ts"
-  echo "  backup  $settings -> $settings.bak.$ts"
+  if [[ "$scope" == project && -n "$settings_seed_state" ]]; then
+    # Project scope never backs up a file this run just seeded as {}: there
+    # is nothing to keep, and cleanup() undoes the seed itself on abort.
+    settings_backup=""
+    echo "  ok      no backup needed ($settings was just created; an abort undoes that)"
+  else
+    take_settings_backup
+  fi
   # Arm restore-on-abort: from here until the sequence completes, any abort
   # rolls settings.json back to this backup (see cleanup() / the EXIT trap).
-  settings_backup="$settings.bak.$ts"
   patch_in_progress=1
   migrate_legacy_ss_hook
   maybe_install_hook SessionStart     "$ss_marker" "$ss_cmd"
@@ -973,8 +1211,8 @@ patch_settings() {
   maybe_install_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   # If no change vs backup, drop the redundant backup.
-  if cmp -s "$settings" "$settings.bak.$ts"; then
-    rm "$settings.bak.$ts"
+  if [[ -n "$settings_backup" ]] && cmp -s "$settings" "$settings_backup"; then
+    rm "$settings_backup"
     echo "  ok      no settings.json changes (backup removed)"
   fi
 }
@@ -1016,9 +1254,7 @@ unpatch_settings() {
     echo "  ERROR   $settings is not valid JSON — refusing to edit (left untouched)."
     return
   fi
-  cp "$settings" "$settings.bak.$ts"
-  echo "  backup  $settings -> $settings.bak.$ts"
-  settings_backup="$settings.bak.$ts"
+  take_settings_backup
   patch_in_progress=1
   maybe_uninstall_hook SessionStart     "$ss_marker"
   maybe_uninstall_hook SessionStart     "$ss_legacy_marker"
@@ -1038,8 +1274,8 @@ unpatch_settings() {
   maybe_uninstall_perm "$perm_wr"
   maybe_uninstall_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
-  if cmp -s "$settings" "$settings.bak.$ts"; then
-    rm "$settings.bak.$ts"
+  if cmp -s "$settings" "$settings_backup"; then
+    rm "$settings_backup"
     echo "  ok      no settings.json changes (backup removed)"
   fi
 }
@@ -1117,6 +1353,243 @@ signing_status_reason() {
   fi
 }
 
+# The install command that re-creates THIS run's wiring, for remedies doctor
+# prints: a project-scope doctor must not tell the user to run a bare
+# ./install.sh, which would wire the user-scope file instead (issue #171).
+# In user scope it consults the wiring: when the user file is unwired but
+# the project (or, failing that, a registered project) carries our hooks, a
+# bare ./install.sh would wire the wrong scope, so it prints that project's
+# command instead (the new-machine or teammate-clone case, where a tracked
+# project settings.json arrives without the scripts).
+rerun_cmd() {
+  local proj first rp rn
+  if [[ "$scope" == project ]]; then
+    if (( use_local )); then
+      printf '%s\n' "./install.sh --scope project --project $(shq "$project_dir") --local"
+    else
+      printf '%s\n' "./install.sh --scope project --project $(shq "$project_dir")"
+    fi
+    return 0
+  fi
+  if ! settings_has_our_hooks "$user_settings"; then
+    proj="$(wiring_project_root)"
+    if settings_has_our_hooks "$proj/.claude/settings.json"; then
+      printf '%s\n' "./install.sh --scope project --project $(shq "$proj")"
+      return 0
+    fi
+    if settings_has_our_hooks "$proj/.claude/settings.local.json"; then
+      printf '%s\n' "./install.sh --scope project --project $(shq "$proj") --local"
+      return 0
+    fi
+    first="$(registry_scan wired | head -n 1 || true)"
+    if [[ -n "$first" ]]; then
+      rp="${first%%$'\t'*}"; rn="${first#*$'\t'}"
+      if [[ "$rn" == settings.local.json ]]; then
+        printf '%s\n' "./install.sh --scope project --project $(shq "$rp") --local"
+      else
+        printf '%s\n' "./install.sh --scope project --project $(shq "$rp")"
+      fi
+      return 0
+    fi
+  fi
+  printf '%s\n' "./install.sh"
+}
+
+# Single-quote a path for a printed, copy-pasteable command (a project path
+# with a space must survive the paste). Embedded single quotes become '\''.
+shq() {
+  local q
+  q="$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+  printf "'%s'" "$q"
+}
+
+# settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
+# least one of this installer's hook commands (same markers as the
+# bare_wired check in doctor). 1 otherwise, including when jq is missing.
+settings_has_our_hooks() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
+        --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" '
+      type == "object" and (
+      ( (.hooks.SessionStart // [])     | any(.. | .command? // "" | contains($ss)) ) or
+      ( (.hooks.SessionEnd // [])       | any(.. | .command? // "" | contains($se)) ) or
+      ( (.hooks.PreCompact // [])       | any(.. | .command? // "" | contains($se)) ) or
+      ( (.hooks.PostCompact // [])      | any(.. | .command? // "" | contains($post)) ) or
+      ( (.hooks.WorktreeRemove // [])   | any(.. | .command? // "" | contains($wr)) ) or
+      ( (.hooks.Stop // [])             | any(.. | .command? // "" | contains($st)) ) or
+      ( (.hooks.UserPromptSubmit // []) | any(.. | .command? // "" | contains($up)) ) )
+    ' "$f" >/dev/null 2>&1
+}
+
+# Physical path of a settings file (symlinks resolved, directory made
+# physical), so the wiring check below never counts one file twice: a
+# project rooted at $HOME, or a dotfiles link, can make two spellings name
+# the same file. Prints nothing when the directory does not exist.
+settings_phys_path() {
+  local f d
+  f="$(resolve_symlink "$1")"
+  d="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" || return 0
+  printf '%s/%s\n' "$d" "$(basename "$f")"
+}
+
+# Project root the wiring checks look at: --project in project scope; in
+# user scope the git toplevel of $PWD (so a doctor run from a subdirectory
+# still finds the project's .claude/), else $PWD itself.
+wiring_project_root() {
+  local top=""
+  if [[ "$scope" == project ]]; then
+    printf '%s\n' "$project_dir"
+    return 0
+  fi
+  if command -v git >/dev/null 2>&1; then
+    top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  fi
+  # Physical, like every project path this installer records or prints.
+  [[ -n "$top" ]] || top="$(pwd -P)"
+  printf '%s\n' "$top"
+}
+
+# Wiring layout check (issue #171). Claude Code runs an identical handler
+# defined in more than one settings file once, so several wired files do
+# not double fire. What this reports instead:
+#   (a) user-scope wiring present alongside a project-scope layout (or at all,
+#     in project scope): the hooks then fire in EVERY project on the
+#     machine, which the project-only layout exists to avoid;
+#   (b) both project files wired: redundant, one can go.
+# Lists exactly which of the three files carry our hooks and the uninstall
+# command for each extra one. <label> is WARN (doctor) or NOTE (install).
+# Advisory only, never counts toward `broken`.
+report_wiring() {
+  local label="$1" proj pu ps pl u=0 sw=0 lw=0 user_issue=0 dup_issue=0 p1 pc
+  proj="$(wiring_project_root)"
+  pu="$(settings_phys_path "$user_settings")"
+  ps="$(settings_phys_path "$proj/.claude/settings.json")"
+  pl="$(settings_phys_path "$proj/.claude/settings.local.json")"
+  if [[ -n "$pu" ]] && settings_has_our_hooks "$pu"; then u=1; fi
+  if [[ -n "$ps" && "$ps" != "$pu" ]] && settings_has_our_hooks "$ps"; then sw=1; fi
+  if [[ -n "$pl" && "$pl" != "$pu" && "$pl" != "$ps" ]] && settings_has_our_hooks "$pl"; then lw=1; fi
+  if (( u )) && { [[ "$scope" == project ]] || (( sw || lw )); }; then user_issue=1; fi
+  if (( sw && lw )); then dup_issue=1; fi
+  (( user_issue || dup_issue )) || return 0
+  if [[ "$label" == NOTE ]]; then p1="NOTE: "; pc="      "; else p1="  WARN    "; pc="          "; fi
+  echo "${p1}this installer's hooks are wired in these settings files for $proj:"
+  if (( u ));  then echo "${pc}  $user_settings (user scope)"; fi
+  if (( sw )); then echo "${pc}  $proj/.claude/settings.json (project)"; fi
+  if (( lw )); then echo "${pc}  $proj/.claude/settings.local.json (project, local)"; fi
+  if (( user_issue )); then
+    echo "${pc}User-scope wiring present: these hooks fire in every project on this"
+    echo "${pc}machine, which the project-only layout exists to avoid. To remove it run"
+    echo "${pc}'./install.sh --uninstall --keep-secret'. Keep the secret: the per-machine"
+    echo "${pc}HMAC secret is shared by project-scope installs, and dropping it would"
+    echo "${pc}invalidate the signed handoffs in every wired project. A user-scope"
+    echo "${pc}uninstall also removes the shared scripts in $claude_home/bin, so re-run"
+    echo "${pc}the project install afterwards:"
+    if (( sw )); then echo "${pc}  ./install.sh --scope project --project $(shq "$proj")"; fi
+    if (( lw )); then echo "${pc}  ./install.sh --scope project --project $(shq "$proj") --local"; fi
+    if (( ! sw && ! lw )); then echo "${pc}  $(rerun_cmd)"; fi
+  fi
+  if (( dup_issue )); then
+    echo "${pc}Both project files carry the hooks. Claude Code runs them once, so this"
+    echo "${pc}is redundant rather than broken; keep one. To remove the extra one run:"
+    if [[ "$scope" == project ]] && (( use_local )); then
+      echo "${pc}  ./install.sh --uninstall --scope project --project $(shq "$proj")"
+    else
+      echo "${pc}  ./install.sh --uninstall --scope project --project $(shq "$proj") --local"
+    fi
+    if [[ "$scope" != project ]]; then
+      echo "${pc}  (or drop settings.json instead: the same command without --local)"
+    fi
+  fi
+  echo
+}
+
+# --- project registry (issue #171) -------------------------------------------
+# $project_registry holds one "<project dir><TAB><file name>" line per
+# project-scope install. Never written through a symlink, like the other
+# per-user state under $claude_home.
+registry_add() {  # <project dir> <settings file name>
+  local line="$1"$'\t'"$2"
+  if [[ -L "$project_registry" ]]; then
+    echo "  skip    registry ($project_registry is a symlink; not writing through it)"
+    return 0
+  fi
+  if [[ -f "$project_registry" ]] && grep -Fxq -- "$line" "$project_registry"; then
+    echo "  ok      registry entry present: $1 ($2)"
+    return 0
+  fi
+  mkdir -p "$claude_home"
+  printf '%s\n' "$line" >> "$project_registry"
+  echo "  add     registry: $1 ($2) in $project_registry"
+}
+
+registry_remove() {  # <project dir> <settings file name>
+  local line="$1"$'\t'"$2"
+  [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
+  grep -Fxq -- "$line" "$project_registry" || return 0
+  # grep -v exits 1 when no line survives; that is the empty-registry case.
+  grep -Fxv -- "$line" "$project_registry" > "$project_registry.tmp" || true
+  mv "$project_registry.tmp" "$project_registry"
+  [[ -s "$project_registry" ]] || rm -f "$project_registry"
+  echo "  remove  registry: $1 ($2)"
+}
+
+# registry_scan <wired|stale>: print "<dir><TAB><name>" for each registered
+# project whose file does (wired) or does not (stale) carry our hooks.
+registry_scan() {
+  local want="$1" rp rn has
+  [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
+  while IFS=$'\t' read -r rp rn || [[ -n "$rp" ]]; do
+    [[ -n "$rp" ]] || continue
+    case "$rn" in settings.json|settings.local.json) ;; *) continue ;; esac
+    has=stale
+    if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
+    if [[ "$has" == "$want" ]]; then printf '%s\t%s\n' "$rp" "$rn"; fi
+  done < "$project_registry"
+  return 0
+}
+
+# registry_list_cmds <list>: one indented line per "<dir><TAB><name>" entry,
+# the entry itself and the copy-pasteable project uninstall for it.
+registry_list_cmds() {
+  local rp rn flag
+  while IFS=$'\t' read -r rp rn; do
+    [[ -n "$rp" ]] || continue
+    flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
+    echo "            $rp ($rn)"
+    echo "              ./install.sh --uninstall --scope project --project $(shq "$rp")$flag"
+  done <<< "$1"
+}
+
+# User-scope --uninstall: warn about every registered project still wired,
+# since their hooks call the scripts this uninstall removes. <secret_note>
+# says what happened to the shared HMAC secret.
+report_registry_orphans() {
+  local list="$1" secret_note="$2"
+  [[ -n "$list" ]] || return 0
+  echo "  WARN    project-scope installs still wired (from $project_registry):"
+  registry_list_cmds "$list"
+  echo "          Their hooks call the scripts this uninstall removes from"
+  echo "          $claude_home/bin, so they will silently no-op until each project is"
+  echo "          re-wired with ./install.sh --scope project --project <dir>, or"
+  echo "          uninstalled with the command listed under it."
+  echo "          $secret_note"
+}
+
+# User-scope doctor: name registered projects whose file no longer carries
+# our hooks. Informational only.
+report_registry_stale() {
+  local list
+  list="$(registry_scan stale)"
+  [[ -n "$list" ]] || return 0
+  echo "  note    stale project registry entries (the file no longer carries this"
+  echo "          installer's hooks), from $project_registry; clear each with the"
+  echo "          command under it (works for a directory that is gone, too):"
+  registry_list_cmds "$list"
+  echo
+}
+
 # Self-check: verify each installed hook script under $claude_home/bin actually
 # resolves. A dangling symlink (e.g. installed from a temp checkout that was
 # later cleaned up) makes the corresponding hook no-op silently, so surface it
@@ -1146,6 +1619,10 @@ doctor() {
   # when there's no cache; that's a normal, expected outcome, not an error).
   plugin_dir="$(find_plugin_cache_dir || true)"
 
+  if [[ "$scope" == project ]]; then
+    echo "doctor: project scope, checking $settings"
+    echo
+  fi
   echo "doctor: checking runtime dependencies"
   # jq is a RUNTIME dependency of the Stop hook (payload parsing), the ctx
   # nudge, and the /handoff-recover tail rescue — a resolving script link is
@@ -1319,7 +1796,7 @@ doctor() {
       echo "          docs/reference.md, Status line section, to enable the"
       echo "          context nudge's most accurate signal in plugin mode)"
     else
-      echo "  info    statusLine unset (re-run ./install.sh to wire it)"
+      echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
     fi
     echo
   elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
@@ -1348,7 +1825,7 @@ doctor() {
       echo "          docs/reference.md, Status line section, to enable the"
       echo "          context nudge's most accurate signal in plugin mode)"
     else
-      echo "  info    statusLine unset (re-run ./install.sh to wire it)"
+      echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
     fi
     # Model context-window check — advisory only, never counts toward broken:
     # a bare 'opus'/'claude-opus-4-8' pin silently runs at a 200k context
@@ -1524,6 +2001,10 @@ doctor() {
     fi
     echo
   fi
+  report_wiring WARN
+  if [[ "$scope" == user ]]; then
+    report_registry_stale
+  fi
   if (( broken )); then
     echo "doctor: $broken issue(s) found." >&2
     if (( plugin_only )); then
@@ -1535,7 +2016,7 @@ doctor() {
       echo "        Reinstall the plugin instead: '/plugin uninstall claude-code-handoff'," >&2
       echo "        then '/plugin install claude-code-handoff@claude-code-handoff'." >&2
     else
-      echo "        Re-run ./install.sh from a persistent clone (not a /tmp checkout)." >&2
+      echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)." >&2
     fi
     return 1
   fi
@@ -1578,8 +2059,25 @@ elif [[ "$mode" == install ]]; then
   echo "symlinks:"
   install_symlinks
   echo
-  echo "settings.json:"
+  if [[ "$scope" == project ]]; then
+    # Project scope (issue #171): the scripts above are shared from
+    # $claude_home; only the wiring goes into the project. Create the
+    # project's .claude/ on demand (install mode only: --doctor and
+    # --uninstall never create anything).
+    echo "project settings ($project_dir):"
+    if [[ ! -d "$(dirname "$settings")" ]]; then
+      mkdir -p "$(dirname "$settings")"
+      echo "  new     $(dirname "$settings")/"
+    fi
+  else
+    echo "settings.json:"
+  fi
   patch_settings
+  # Record the project once its file actually carries our hooks (a refused
+  # patch, e.g. invalid JSON, wires nothing and registers nothing).
+  if [[ "$scope" == project ]] && settings_has_our_hooks "$settings"; then
+    registry_add "$project_dir" "$settings_name"
+  fi
   echo
   if [[ -z "$model_pin" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
      && jq -e 'type == "object" and ((.model // null) == null)' "$settings" >/dev/null 2>&1; then
@@ -1597,6 +2095,15 @@ elif [[ "$mode" == install ]]; then
     echo "      Installing the script mode too will double-fire every hook —"
     echo "      Claude Code runs both plugin and script hooks, no dedup."
     echo
+  fi
+  if [[ "$scope" == project ]]; then
+    # Checks all three files (user, project settings.json, project
+    # settings.local.json): an extra wired file is reported with the
+    # uninstall command that removes it.
+    report_wiring NOTE
+  fi
+  if [[ "$scope" == project ]]; then
+    echo "note: hooks are wired for $project_dir only ($settings)."
   fi
   echo "done. start a new Claude Code session — /handoff is available now."
   # First-run signing note — one line pointing at --doctor for the detailed
@@ -1621,6 +2128,32 @@ elif [[ "$mode" == install ]]; then
     echo "      ./install.sh to refresh the copies — symlinked installs update"
     echo "      automatically, copies do not."
   fi
+elif [[ "$scope" == project ]]; then
+  # Project-scope uninstall (issue #171) strips only this project's wiring.
+  # The scripts, skills, and HMAC secret under $claude_home are shared by
+  # every project on this machine, so they stay; a user-scope --uninstall is
+  # the way to remove them.
+  echo "uninstalling handoff wiring from $project_dir (project scope)"
+  echo
+  if (( project_gone )); then
+    # The directory is gone (a removed worktree, usually): nothing left to
+    # unpatch, so clear its registry line and stop cleanly.
+    echo "project settings ($project_dir):"
+    echo "  ok      $project_dir no longer exists; nothing to unpatch"
+    registry_remove "$project_dir" "$settings_name"
+    echo
+    echo "done. the repo at $repo_root is untouched."
+    exit 0
+  fi
+  echo "project settings ($project_dir):"
+  unpatch_settings
+  registry_remove "$project_dir" "$settings_name"
+  echo
+  echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
+  echo "      HMAC secret are shared by every project on this machine and were not"
+  echo "      removed. Run ./install.sh --uninstall (user scope) to remove them."
+  echo
+  echo "done. the repo at $repo_root is untouched."
 else
   echo "uninstalling handoff skill from $claude_home"
   echo
@@ -1631,7 +2164,26 @@ else
   unpatch_settings
   echo
   echo "local state:"
-  remove_secret_if_ours
+  # Registry first (issue #171 review): projects still wired sign their
+  # handoffs with the same per-machine secret, so deleting it here would
+  # silently downgrade every one of them. Keep it automatically while any
+  # registered project is wired; --remove-secret deletes it anyway.
+  orphan_list="$(registry_scan wired)"
+  secret_path="${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}"
+  if [[ -n "$orphan_list" ]] && (( ! remove_secret && ! keep_secret )); then
+    orphan_n="$(printf '%s\n' "$orphan_list" | wc -l | tr -d ' ')"
+    echo "  keep    $secret_path (kept: $orphan_n project-scope install(s) still sign with"
+    echo "          it; pass --remove-secret to delete it anyway)"
+    secret_note="The HMAC secret $secret_path was kept for them."
+  else
+    remove_secret_if_ours
+    if [[ -e "$secret_path" ]]; then
+      secret_note="The HMAC secret $secret_path is still in place."
+    else
+      secret_note="The HMAC secret $secret_path is gone, so their signed handoffs no longer verify as binding."
+    fi
+  fi
+  report_registry_orphans "$orphan_list" "$secret_note"
   echo
   echo "done. the repo at $repo_root is untouched."
 fi

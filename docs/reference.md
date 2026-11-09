@@ -1026,6 +1026,96 @@ Requires `jq`. If `jq` is not on PATH, the installer refuses to install
 all depend on it at runtime. (The `--uninstall` and `--doctor` modes still
 work without `jq`.)
 
+### Install scope: user vs. project
+
+`--scope user` (the default, and the only behaviour before #171) patches
+`~/.claude/settings.json`, so the hooks fire in every project.
+`--scope project` patches `<project>/.claude/settings.json` instead, where
+`<project>` is `--project <dir>` or, without it, the current directory;
+`--project <dir>` on its own implies `--scope project`, and `--local`
+switches the target to `.claude/settings.local.json`. The tracked
+`settings.json` is the default because `settings.local.json` is
+gitignored and per checkout, so it is absent from git worktrees of the
+project; a clone without this install is unaffected, since every hook
+command ends in `2>/dev/null || true` and simply no-ops. One thing the
+tracked file does carry: the seven `permissions.allow` entries hold the
+installer's absolute home path (for example
+`Bash(bash /Users/you/.claude/bin/write_handoff.sh)`), so committing the
+file publishes that path. `--local` keeps it out of git, at the cost of
+not applying inside worktrees.
+
+Without `--project`, the project is the git toplevel of the current
+directory when it is inside a repo (Claude Code reads `.claude/` at the
+project root, not in a subdirectory), else the current directory; the
+choice is printed. The project directory is resolved to an absolute
+physical path and must already exist; `.claude/` inside it is created
+when missing. The
+installer refuses (exit 2, nothing written) when the directory is
+missing, when it is the handoff clone holding `install.sh` or any
+directory inside it (the usual cause is running
+`./install.sh --scope project` from inside the clone), when its `.claude/`
+is `~/.claude` itself, and when `--scope user` is combined with
+`--project` or `--local`. In both scopes the scripts and skills go into
+`~/.claude/bin` and `~/.claude/skills` exactly as before, because the hook
+commands point at `$HOME/.claude/bin`. A symlinked project settings file
+is patched through its target, same as the user file.
+
+Project-scope backups never go inside the project (a `.bak` next to a
+tracked file is one `git add .` from being committed). They are written to
+`~/.claude/handoff_settings_backups/<cksum of the project path>/settings.json.bak.<timestamp>`
+(or `settings.local.json.bak.<timestamp>`), the path is printed, and an
+aborted patch restores from it and names it. A file the run has just
+created as `{}` gets no backup at all; an abort removes it again (or
+empties it, if it was empty before). User scope keeps the historical
+`settings.json.bak.<timestamp>` next to the file.
+
+Each project-scope install is recorded in `~/.claude/handoff_projects`, one
+line per wired file: the absolute project path, a tab, and the file name.
+A repeat install adds no duplicate, and `--uninstall --scope project`
+removes the line. A user-scope `--uninstall` prints every registered
+project whose file still carries the hooks and warns that those hooks
+will silently no-op (the scripts they call are being removed) until each
+project is re-wired or uninstalled with
+`./install.sh --uninstall --scope project --project <dir>`. While any
+registered project is still wired, that uninstall also keeps the
+per-machine HMAC secret (the projects sign with it) and says so; pass
+`--remove-secret` to delete it anyway. The user-scope `--doctor` lists
+registered projects whose file no longer carries the hooks (stale
+entries), each with its uninstall command, which also works when the
+directory is gone (a removed worktree): it then clears the registry line
+and exits 0. Every printed command single-quotes its paths, so a project
+path with a space can be pasted as is. When the user file is unwired but
+the project (or a registered project) is, the doctor's "re-run" remedy
+names the project-scope command rather than a bare `./install.sh`.
+
+`--uninstall --scope project [--project <dir>] [--local]` strips only
+that project file (hooks, permissions, our `statusLine`, and a model pin
+this installer wrote there). It never removes `~/.claude/bin`, the
+skills, or the HMAC secret, since other projects on the machine share
+them, and it says so in its output; a user-scope `--uninstall` is the
+way to remove those. A `--model` pin in project scope is recorded in
+`~/.claude/handoff-model-pin.project.<cksum of the settings path>`, one
+record per project file, so it can never consume the user-scope record.
+
+`--doctor --scope project` checks the project file. Claude Code runs an
+identical hook handler once even when several settings files define it,
+so wiring in more than one file does not double fire. What the doctor
+reports instead (and a project-scope install prints as a NOTE) is the
+layout: it lists exactly which of the user file, the project's
+`settings.json`, and its `settings.local.json` carry the hooks (the
+project being `--project`, or in user scope the git toplevel of the
+current directory, falling back to the directory itself). User-scope
+wiring next to a project layout means the hooks fire in every project on
+the machine, which the project-only layout exists to avoid; the remedy is
+`./install.sh --uninstall --keep-secret`. Keep the secret: the
+per-machine HMAC secret is shared by project-scope installs, and dropping
+it would invalidate the signed handoffs in every wired project. A
+user-scope uninstall also removes the shared scripts, so the doctor
+prints the project install to re-run afterwards. When both project files
+carry the hooks, the doctor names the extra one and the
+`--uninstall --scope project --project <dir> [--local]` command that
+removes it.
+
 ### Install modes: symlink vs. copy
 
 By default the bin scripts are **symlinked**, so a `git pull` in the

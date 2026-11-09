@@ -36,6 +36,19 @@ help_present="no"
 [[ "$out" == *"--help"* ]] && help_present="yes"
 check "--help in output" yes "$help_present"
 
+# Install scope flags (issue #171), plus the recommended project example.
+for flag in "--scope user" "--scope project" "--project <dir>" "--local" "--remove-secret" \
+            "./install.sh --scope project --project"; do
+  flag_present="no"
+  [[ "$out" == *"$flag"* ]] && flag_present="yes"
+  check "'$flag' in output" yes "$flag_present"
+done
+
+# The hook and permission counts are seven each (WorktreeRemove made seven).
+check "help says seven hooks" yes "$([[ "$out" == *"add seven hooks"* ]] && echo yes || echo no)"
+check "help says seven permission entries" yes "$([[ "$out" == *"seven permission entries"* ]] && echo yes || echo no)"
+check "help no longer says six" no "$([[ "$out" == *" six "* ]] && echo yes || echo no)"
+
 echo
 echo "install.sh --help (piped: script on stdin, as with curl | bash -s -- --help)"
 
