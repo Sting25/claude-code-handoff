@@ -3,10 +3,12 @@
 # die silently, and the first thing that used to notice was /handoff itself —
 # the worst possible moment, since that's exactly when context is saturated.
 #
-# Detector A (handoff_ctx_check.sh, UserPromptSubmit, same session): a
-# per-session prompt counter (.ctx_prompts_<sid>) that, once it crosses
-# HANDOFF_HEALTH_PROMPTS fires with .ctx_<sid> still absent, warns once that
-# the Stop hook appears dead.
+# Detector A (handoff_ctx_check.sh, UserPromptSubmit, same session): once the
+# prompt counter (.ctx_prompts_<sid>) AND the number of COMPLETED turns in the
+# transcript (distinct message.id of this session's main-chain assistant
+# end_turn lines, issue #159) both reach HANDOFF_HEALTH_PROMPTS with .ctx_<sid>
+# still absent, warns once that the Stop hook appears dead. Prompts alone never
+# warn (API errors, interrupts and queued prompts fire no Stop).
 #
 # Detector B (handoff_session_start.sh, SessionStart, retrospective): if the
 # most recent previous session represented in handoff_backups/ has no
@@ -28,9 +30,24 @@ exists() { [[ -e "$1" ]] && echo yes || echo no; }
 # --- Detector A: handoff_ctx_check.sh ---------------------------------------
 echo "handoff_ctx_check.sh — Stop-hook health detector A"
 
+# Issue #159: the warning counts COMPLETED turns (assistant end_turn lines in
+# the transcript), not prompts. fire_a simulates a healthy-transcript session
+# whose Stop hook wrote nothing: each call appends one completed turn to a
+# fixture transcript, then fires the prompt hook with a real-shaped payload.
 fire_a() {  # <repo> <sid> [ENV=VAL ...]
   local repo="$1" sid="$2"; shift 2
-  ( cd "$repo" && env "$@" bash "$CC" <<<"{\"session_id\":\"$sid\"}" 2>/dev/null )
+  local tp="$repo/transcript_$sid.jsonl"
+  local n; n="$( (wc -l < "$tp") 2>/dev/null || echo 0)"; n="${n//[[:space:]]/}"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' \
+    "{\"type\":\"assistant\",\"sessionId\":\"$sid\",\"message\":{\"id\":\"msg_${sid}_$n\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}" >> "$tp"
+  fire_raw "$repo" "$sid" "$@"
+}
+# One prompt fire with NO new completed turn (transcript left as is).
+fire_raw() {  # <repo> <sid> [ENV=VAL ...]
+  local repo="$1" sid="$2"; shift 2
+  local tp="$repo/transcript_$sid.jsonl"
+  ( cd "$repo" && env "$@" bash "$CC" \
+      <<<"{\"session_id\":\"$sid\",\"transcript_path\":\"$tp\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"continue\"}" 2>/dev/null )
 }
 
 # F1 regression: handoff_backups/ does NOT pre-exist (the flagship scenario —
@@ -55,7 +72,7 @@ check "prompt counter incremented"        yes "$(exists "$repo/.claude/handoff_b
 # At threshold (3rd fire), .ctx_<sid> absent -> warns.
 out3="$(fire_a "$repo" BELOW)"
 check "at threshold, .ctx_ absent -> warns"       yes "$(has "$out3" "does not appear to be running")"
-check "warning names likely causes (jq)"          yes "$(has "$out3" "jq not on PATH")"
+check "warning names likely causes (hooks)"       yes "$(has "$out3" "hooks not registered")"
 check "warning points to doctor"                  yes "$(has "$out3" "--doctor")"
 check "warn flag recorded"                        yes "$(exists "$repo/.claude/handoff_backups/.ctx_health_BELOW")"
 
@@ -125,12 +142,111 @@ repo="$(mk_repo)"; cleanup_on_exit "$repo"
 bd="$repo/.claude/handoff_backups"; must mkdir -p "$bd"
 must printf 'window=1000\ntokens=600\n' > "$bd/.ctx_sl_LEDGER"
 must printf '2\n' > "$bd/.ctx_prompts_LEDGER"
+for i in 1 2; do   # two completed turns already in the transcript (issue #159)
+  printf '%s\n' "{\"type\":\"assistant\",\"sessionId\":\"LEDGER\",\"message\":{\"id\":\"msg_seed_$i\",\"stop_reason\":\"end_turn\",\"content\":[]}}" >> "$repo/transcript_LEDGER.jsonl"
+done
 out="$(fire_a "$repo" LEDGER HANDOFF_CTX_WINDOW_TOKENS=1000)"
 check "coexistence: health warning present"   yes "$(has "$out" "does not appear to be running")"
 check "coexistence: token-ledger nudge present too" yes "$(has "$out" "<system-reminder>")"
 health_pos=$(printf '%s' "$out" | grep -bo "does not appear to be running" | head -1 | cut -d: -f1)
 nudge_pos=$(printf '%s' "$out" | grep -bo "<system-reminder>" | head -1 | cut -d: -f1)
 check "coexistence: warning precedes the nudge" yes "$([[ "$health_pos" -lt "$nudge_pos" ]] && echo yes || echo no)"
+rm -rf "$repo"
+
+# Issue #159 (a): repeated prompts with no completed turn between them (API error,
+# interrupt, queued prompts) must NOT warn, even well past the threshold.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+out=""
+for _ in 1 2 3 4; do out="$out$(fire_raw "$repo" NOTURNS)"; done
+check "#159a: 4 prompts, 0 completed turns -> silent" no "$(has "$out" "does not appear to be running")"
+check "#159a: no health flag recorded"               no "$(exists "$repo/.claude/handoff_backups/.ctx_health_NOTURNS")"
+# Sidechain and non-end_turn assistant lines are not completed main-chain turns.
+for _ in 1 2 3; do
+  printf '%s\n' '{"type":"assistant","isSidechain":true,"message":{"stop_reason":"end_turn","content":[]}}' \
+    '{"type":"assistant","message":{"stop_reason":"tool_use","content":[]}}' >> "$repo/transcript_NOTURNS.jsonl"
+done
+out="$(fire_raw "$repo" NOTURNS)"
+check "#159a: sidechain/tool_use lines do not count"  no "$(has "$out" "does not appear to be running")"
+# Missing transcript_path: no warning.
+out=""
+for _ in 1 2 3 4; do out="$out$(cd "$repo" && bash "$CC" <<<'{"session_id":"NOPATH"}' 2>/dev/null)"; done
+check "#159a: no transcript_path -> silent"           no "$(has "$out" "does not appear to be running")"
+check "#159a: no transcript_path -> no health flag"   no "$(exists "$repo/.claude/handoff_backups/.ctx_health_NOPATH")"
+rm -rf "$repo"
+
+# Issue #159 D3: real-shaped thinking+text turns. Each turn is TWO assistant
+# lines sharing one message.id, both end_turn; a synthetic API-error line and
+# a tool_use line must not count either. 2 turns -> silent, 3rd turn -> warns.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+tp="$repo/transcript_DUPID.jsonl"
+dup_turn() {  # <message-id>
+  printf '%s\n' \
+    "{\"type\":\"assistant\",\"uuid\":\"u-$1-a\",\"sessionId\":\"DUPID\",\"message\":{\"id\":\"$1\",\"model\":\"claude-x\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"hm\"}]}}" \
+    "{\"type\":\"assistant\",\"uuid\":\"u-$1-b\",\"sessionId\":\"DUPID\",\"message\":{\"id\":\"$1\",\"model\":\"claude-x\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}" >> "$tp"
+}
+printf '%s\n' '{"type":"assistant","uuid":"u-syn","message":{"id":"msg_syn","model":"<synthetic>","stop_reason":"stop_sequence","content":[]}}' \
+  '{"type":"assistant","uuid":"u-syn2","message":{"id":"msg_syn2","model":"<synthetic>","stop_reason":"end_turn","content":[]}}' \
+  '{"type":"assistant","uuid":"u-tu","message":{"id":"msg_tu","model":"claude-x","stop_reason":"tool_use","content":[]}}' >> "$tp"
+fire_raw "$repo" DUPID >/dev/null; fire_raw "$repo" DUPID >/dev/null   # prompts 1-2, so the next fire is at the prompt threshold
+dup_turn msg_1; dup_turn msg_2
+out="$(fire_raw "$repo" DUPID)"
+check "#159 D3: 2 duplicate-id turns (4 end_turn lines) -> silent" no "$(has "$out" "does not appear to be running")"
+dup_turn msg_3
+out="$(fire_raw "$repo" DUPID)"
+check "#159 D3: 3rd distinct turn -> warns"                       yes "$(has "$out" "does not appear to be running")"
+check "#159 D3: warning counts 3 turns"                           yes "$(has "$out" "3 completed turns")"
+rm -rf "$repo"
+
+# Issue #159 review: a resumed or forked session's transcript carries earlier
+# sessions' completed turns under their own sessionId. 29 foreign turns plus
+# 1 of its own must stay silent at prompt 3.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+tp="$repo/transcript_MIXED.jsonl"
+for i in $(seq 1 29); do
+  printf '%s\n' "{\"type\":\"assistant\",\"uuid\":\"u-old-$i\",\"sessionId\":\"OLDSID\",\"message\":{\"id\":\"msg_old_$i\",\"model\":\"claude-x\",\"stop_reason\":\"end_turn\",\"content\":[]}}" >> "$tp"
+done
+printf '%s\n' '{"type":"assistant","uuid":"u-own-1","sessionId":"MIXED","message":{"id":"msg_own_1","model":"claude-x","stop_reason":"end_turn","content":[]}}' >> "$tp"
+out=""
+for _ in 1 2 3; do out="$out$(fire_raw "$repo" MIXED)"; done
+check "#159 review: foreign-session turns do not count -> silent" no "$(has "$out" "does not appear to be running")"
+check "#159 review: mixed sessionIds -> no health flag"            no "$(exists "$repo/.claude/handoff_backups/.ctx_health_MIXED")"
+rm -rf "$repo"
+
+# end_turn lines lacking message.id fall back to uuid: 3 distinct uuids -> warns.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+tp="$repo/transcript_NOID.jsonl"
+for i in 1 2 3; do
+  printf '%s\n' "{\"type\":\"assistant\",\"uuid\":\"u-noid-$i\",\"sessionId\":\"NOID\",\"message\":{\"model\":\"claude-x\",\"stop_reason\":\"end_turn\",\"content\":[]}}" >> "$tp"
+done
+out=""
+for _ in 1 2 3; do out="$out$(fire_raw "$repo" NOID)"; done
+check "#159 review: no message.id -> uuid fallback counts, warns" yes "$(has "$out" "does not appear to be running")"
+rm -rf "$repo"
+
+# Unreadable transcript: detector A stays silent by design (detector B covers it).
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+tp="$repo/transcript_UNREAD.jsonl"
+for i in 1 2 3; do
+  printf '%s\n' "{\"type\":\"assistant\",\"sessionId\":\"UNREAD\",\"message\":{\"id\":\"msg_u$i\",\"stop_reason\":\"end_turn\",\"content\":[]}}" >> "$tp"
+done
+must chmod 000 "$tp"
+if [[ -r "$tp" ]]; then
+  skip "unreadable transcript case (root ignores chmod)"
+else
+  out=""
+  for _ in 1 2 3; do out="$out$(fire_raw "$repo" UNREAD)"; done
+  check "#159 review: unreadable transcript -> silent" no "$(has "$out" "does not appear to be running")"
+fi
+chmod 600 "$tp" 2>/dev/null || true
+rm -rf "$repo"
+
+# Issue #159 (b): three completed turns, no dump marker -> warns once the third
+# turn has completed, not before.
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$repo/.claude/handoff_backups"
+fire_a "$repo" TURNS3 >/dev/null; o2="$(fire_a "$repo" TURNS3)"; o3="$(fire_a "$repo" TURNS3)"
+check "#159b: 2 completed turns -> silent"            no  "$(has "$o2" "does not appear to be running")"
+check "#159b: 3 completed turns, no dump -> warns"    yes "$(has "$o3" "does not appear to be running")"
+check "#159b: warning counts completed turns"         yes "$(has "$o3" "3 completed turns")"
 rm -rf "$repo"
 
 # --- Detector B: handoff_session_start.sh -----------------------------------
