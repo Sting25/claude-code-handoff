@@ -367,10 +367,10 @@ wiring_project_root() {
 # Wiring layout check (issue #171). Claude Code runs an identical handler
 # defined in more than one settings file once, so several wired files do
 # not double fire. What this reports instead:
-#   - user-scope wiring present alongside a project-scope layout (or at all,
+#   (a) user-scope wiring present alongside a project-scope layout (or at all,
 #     in project scope): the hooks then fire in EVERY project on the
 #     machine, which the project-only layout exists to avoid;
-#   - both project files wired: redundant, one can go.
+#   (b) both project files wired: redundant, one can go.
 # Lists exactly which of the three files carry our hooks and the uninstall
 # command for each extra one. <label> is WARN (doctor) or NOTE (install).
 # Advisory only, never counts toward `broken`.
