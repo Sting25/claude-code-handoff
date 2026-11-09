@@ -122,11 +122,19 @@ Versions up to 0.19 also shipped as a Claude Code plugin, and 0.19.0 is
 the last version published as a plugin. That distribution is gone;
 `install.sh` is the only install path. To move a plugin install over:
 
-1. Remove the plugin at the scope you installed it with (`--scope
-   project` for a per-project install, `--scope user` for a global one,
-   `--scope local` if you used that; the default is `user`). Project and
-   local scope act on the `.claude/` settings of the directory you run the
-   command in, so run it from inside the project directory:
+1. Remove the plugin at the scope you installed it with. Run
+   `claude plugin list` to see that scope (the installer and
+   `./install.sh --doctor` also print the matching command while the
+   plugin is still installed). For a global install:
+
+   ```bash
+   claude plugin uninstall claude-code-handoff@claude-code-handoff --scope user
+   ```
+
+   For a per-project install, run it from inside the project directory,
+   since project and local scope act on the `.claude/` settings of the
+   directory you run the command in (use `--scope local` if you installed
+   with that):
 
    ```bash
    cd <dir>
@@ -166,10 +174,9 @@ installer's, so both sets would run on every event.
 - `openssl` — optional. Without it, handoffs aren't HMAC-signed and
   the rules layer loads as reference data instead of binding; nothing
   errors.
-- Tested on Linux — that CI job blocks. The macOS CI job (bash 3.2 /
-  BSD userland) is advisory, non-blocking; the scripts handle BSD
-  differences like `flock` and `date`. Windows (Git Bash / WSL) is
-  untested in CI.
+- Tested in CI on Linux (bash 5) and macOS (bash 3.2, BSD userland);
+  both jobs are required to merge. The scripts handle BSD differences
+  like `flock` and `date`. Windows (Git Bash / WSL) is untested in CI.
 
 ## How it works
 
