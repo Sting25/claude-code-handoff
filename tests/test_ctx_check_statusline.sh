@@ -5,8 +5,6 @@
 # pin still beats everything (the tested contract), (b) malformed/stale cache
 # values degrade to the pre-statusline chain exactly, and (c) the opt-out
 # HANDOFF_CTX_NO_STATUSLINE=1 restores today's behavior verbatim.
-# (tests/test_ctx_check.sh passing UNMODIFIED is the other half of the
-# acceptance gate — the sl-absent chain is byte-for-byte unchanged.)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CC="$REPO_ROOT/bin/handoff_ctx_check.sh"
@@ -44,7 +42,7 @@ has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 echo "handoff_ctx_check.sh — statusline cache preference"
 
 # --- sl tokens over threshold, Stop tokens under -> sl wins, fires -----------
-# Window pinned 1000, threshold 40% -> 400. Stop says 100 (silent on its own);
+# Window pinned 1000, threshold 30% -> 300. Stop says 100 (silent on its own);
 # sl says 600. The sl file is written AFTER the tokens file, so it is fresh.
 repo="$(mk_repo)"; seed "$repo" SLW 4000 100; seed_sl "$repo" SLW "tokens=600"
 out="$(run_cc "$repo" SLW)"
@@ -98,17 +96,19 @@ check "NO_STATUSLINE=1 -> sl ignored -> silent" "" "$out"
 rm -rf "$repo"
 
 # --- Window adoption: sl window replaces the model-regex guesswork -----------
-# Auto mode, no model file, no .claude.json (HOME jailed). Stop measured 90k
-# tokens. With sl window=1M: 90k/1M = 9% < 40% -> silent. Same seed WITHOUT
-# the sl file: auto-detect falls to 200k -> 90k/200k = 45% -> fires. The pair
-# proves the sl window (not the tokens) is what changed the outcome.
+# Auto mode, HOME jailed. The session's model (claude-sonnet-4-5) is a 200k
+# model in the table; Stop measured 90k tokens. With sl window=1M: 90k/1M =
+# 9% < 30% -> silent. Same seed WITHOUT the sl file: the table's 200k ->
+# 90k/200k = 45% -> fires. The pair proves the sl window beats the table.
 repo="$(mk_repo)"; seed "$repo" WIN 4000 90000; seed_sl "$repo" WIN "window=1000000"
+printf 'claude-sonnet-4-5\n' > "$repo/.claude/handoff_backups/.ctx_model_WIN"
 out="$(run_cc_auto "$repo" WIN)"
-check "sl window 1M adopted -> 90k silent" "" "$out"
+check "sl window 1M beats model table -> 90k silent" "" "$out"
 rm -rf "$repo"
 repo="$(mk_repo)"; seed "$repo" WIN2 4000 90000
+printf 'claude-sonnet-4-5\n' > "$repo/.claude/handoff_backups/.ctx_model_WIN2"
 out="$(run_cc_auto "$repo" WIN2)"
-check "no sl -> 200k window -> 90k fires" yes "$(has "$out" "200000-token window")"
+check "no sl -> model table 200k -> 90k fires" yes "$(has "$out" "~45% of a 200000-token window (from this hook's model table")"
 rm -rf "$repo"
 
 # --- Ratchet never applies against a statusline-reported window --------------
@@ -145,24 +145,27 @@ check "env pin -> CC pct not used"      no  "$(has "$out" "73%")"
 rm -rf "$repo"
 
 # A stale sl cache's pct is dropped with its tokens (same payload snapshot).
+# "Stale" here is the older-than-the-tokens-file guard, so the age horizon is
+# lifted (its own test is in test_ctx_check_cadence.sh): the window= survives.
 repo="$(mk_repo)"; seed "$repo" STPCT 4000 600
 seed_sl "$repo" STPCT "window=1000" "tokens=600" "pct=73"
 must touch -t 202001010000 "$repo/.claude/handoff_backups/.ctx_sl_STPCT"
 must touch "$repo/.claude/handoff_backups/.ctx_tokens_STPCT"
-out="$(run_cc_auto "$repo" STPCT)"
+out="$(run_cc_auto "$repo" STPCT HANDOFF_CTX_SL_MAX_AGE_SECS=2000000000)"
 check "stale sl pct dropped -> 60%"     yes "$(has "$out" "~60% of a 1000-token window")"
 check "stale sl pct dropped -> not 73"  no  "$(has "$out" "73%")"
 rm -rf "$repo"
 
-# --- No CC figure + window guessed from the model id -> labelled estimate ---
-# The desktop-app case: no sl cache, auto window from .ctx_model_. The pct is
-# still reported but must say it is an estimate and name the model it came from.
+# --- No CC figure + window from the model table -> source named --------------
+# The desktop-app case: no sl cache, window from .ctx_model_ via the table.
+# The pct is reported with where the window came from and what was measured.
 repo="$(mk_repo)"; seed "$repo" GUESS 4000 150000
 printf 'claude-opus-5-5\n' > "$repo/.claude/handoff_backups/.ctx_model_GUESS"
 out="$(run_cc_auto "$repo" GUESS HANDOFF_CTX_THRESHOLD_PCT=10)"
-check "guessed window -> labelled estimated" yes "$(has "$out" "~15% (estimated) of a 1000000-token window")"
-check "guessed window -> names the model"    yes "$(has "$out" "inferred from the model id (claude-opus-5-5)")"
-check "guessed window -> flag line labelled" yes "$(has "$out" "15% (estimated) of context used")"
+check "table window -> pct of 1M"           yes "$(has "$out" "~15% of a 1000000-token window")"
+check "table window -> names table + model" yes "$(has "$out" "from this hook's model table for claude-opus-5-5")"
+check "table window -> names token source"  yes "$(has "$out" "measured by the Stop hook")"
+check "table window -> flag line has pct"   yes "$(has "$out" "15% of context used")"
 rm -rf "$repo"
 # An env-pinned window is the user's own number, not a guess: no label.
 repo="$(mk_repo)"; seed "$repo" PINNED 4000 600
@@ -188,46 +191,32 @@ out="$(run_cc_auto "$repo" PCT100)"
 check "pct=100.00 accepted" yes "$(has "$out" "~100% of a 1000-token window")"
 rm -rf "$repo"
 
-# --- F5: window_note names the SOURCE that actually decided the window ------
-# (a) Widened by the >200k-token ratchet: no model file, no ~/.claude.json,
-#     but measured usage exceeds 200k. Before the fix this still said
-#     "inferred from the model id (not recorded)", which is not what decided
-#     the 1M window here.
+# --- F5 / #173: no guessed window is ever printed ---------------------------
+# (a) No model file, no ~/.claude.json, measured usage above 200k. The old
+#     chain "ratcheted" a guessed 200k to 1M; now the window is unknown and
+#     the absolute gate (250k >= 100k) fires with no percentage.
 repo="$(mk_repo)"; seed "$repo" RATCHNOTE 4000 250000
-out="$(run_cc_auto "$repo" RATCHNOTE HANDOFF_CTX_THRESHOLD_PCT=10)"
-check "ratchet window -> 1M"                     yes "$(has "$out" "1000000-token window")"
-check "ratchet window -> note names the ratchet" yes "$(has "$out" "widened")"
-check "ratchet window -> not the model-id wording" no "$(has "$out" "inferred from the model id (not recorded)")"
+out="$(run_cc_auto "$repo" RATCHNOTE)"
+check "no evidence -> window unknown"   yes "$(has "$out" "window unknown (no status line, no HANDOFF_CTX_WINDOW_TOKENS, no model id recorded)")"
+check "no evidence -> no percentage"    no  "$(has "$out" "%")"
 rm -rf "$repo"
 
-# (b) Decided from ~/.claude.json lastModelUsage (no session model file).
-# Before the fix this also said "inferred from the model id (not recorded)",
-# even though no model id file existed for this session at all.
-repo="$(mk_repo)"; seed "$repo" CJSONNOTE 4000 90000
+# (b) ~/.claude.json lastModelUsage is not consulted (another project's model).
+repo="$(mk_repo)"; seed "$repo" CJSONNOTE 4000 150000
 must printf '%s' '{"projects":{"/elsewhere":{"lastModelUsage":{"claude-fable-5":{"count":1}}}}}' \
   > "$repo/.claude.json"
-out="$(run_cc_auto "$repo" CJSONNOTE HANDOFF_CTX_THRESHOLD_PCT=5)"
-check "claude.json window -> 1M"                  yes "$(has "$out" "1000000-token window")"
-check "claude.json window -> note names claude.json" yes \
-  "$(has "$out" "recorded for this project in ~/.claude.json")"
-check "claude.json window -> not the model-id wording" no "$(has "$out" "inferred from the model id (not recorded)")"
+out="$(run_cc_auto "$repo" CJSONNOTE)"
+check "claude.json ignored -> window unknown" yes "$(has "$out" "window unknown")"
+check "claude.json ignored -> no 1M window"   no  "$(has "$out" "1000000-token window")"
 rm -rf "$repo"
 
-# (c) Regression guard: the session-model-file case keeps its original wording
-# byte-for-byte (already covered by the "guessed window" case above); no new
-# assertion needed here beyond that existing pass.
-
-# (d) U4: ratchet fired AFTER a session-model-file detection (claude-sonnet-4-5
-# -> 200k, then measured usage of 250000 ratchets to 1M). Before the fix the
-# note claimed "widened from the 200k default" even though the pre-ratchet
-# 200k came from the session's own recorded model id, not from having no
-# evidence at all. The wording must not claim "default" here.
+# (c) Measured usage contradicts the table (claude-sonnet-4-5 is 200k, 250k
+#     measured): unknown, never widened.
 repo="$(mk_repo)"; seed "$repo" RATCHMODEL 4000 250000
 printf 'claude-sonnet-4-5\n' > "$repo/.claude/handoff_backups/.ctx_model_RATCHMODEL"
-out="$(run_cc_auto "$repo" RATCHMODEL HANDOFF_CTX_THRESHOLD_PCT=10)"
-check "ratchet after model-id -> 1M"                yes "$(has "$out" "1000000-token window")"
-check "ratchet after model-id -> note names widened" yes "$(has "$out" "widened")"
-check "ratchet after model-id -> not mislabeled default" no "$(has "$out" "200k default")"
+out="$(run_cc_auto "$repo" RATCHMODEL)"
+check "contradicted table -> window unknown" yes "$(has "$out" "exceed the 200000-token window listed for claude-sonnet-4-5")"
+check "contradicted table -> no 1M"          no  "$(has "$out" "1000000-token window")"
 rm -rf "$repo"
 
 # (d) Cache has pct= but no window=: the cached pct must still be used (no
@@ -236,7 +225,7 @@ rm -rf "$repo"
 repo="$(mk_repo)"; seed "$repo" PCTNOWIN 4000 100
 seed_sl "$repo" PCTNOWIN "tokens=90000" "pct=42"
 out="$(run_cc_auto "$repo" PCTNOWIN HANDOFF_CTX_THRESHOLD_PCT=10)"
-check "pct without window -> uses cached 42%" yes "$(has "$out" "~42%")"
+check "pct without window -> uses cached 42%" yes "$(has "$out" "~42% used (Claude Code's own used_percentage; the window size was not reported)")"
 check "pct without window -> not labelled estimated" no "$(has "$out" "estimated")"
 check "pct without window -> not the bogus ~0%" no "$(has "$out" "~0%")"
 rm -rf "$repo"

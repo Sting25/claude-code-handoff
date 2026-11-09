@@ -12,9 +12,8 @@
 # exists (unchanged in every respect), tokens when it does not but the
 # statusline cache is present and fresh.
 #
-# The acceptance gate is two-sided. These checks cover the new token ledger;
-# tests/test_ctx_check.sh and tests/test_ctx_check_statusline.sh passing
-# UNMODIFIED cover the promise that the byte path did not move.
+# Since issue #173 the token ledger can also be fed by the transcript's own
+# usage record (see test_ctx_check_cadence.sh).
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CC="$REPO_ROOT/bin/handoff_ctx_check.sh"
@@ -38,7 +37,7 @@ exists() { [[ -e "$1" ]] && echo yes || echo no; }
 echo "handoff_ctx_check.sh — progress ledger (Stop hook absent)"
 
 # --- the headline case: no Stop data, fresh statusline over threshold --------
-# Window pinned 1000, threshold 40% -> 400. sl says 600.
+# Window pinned 1000, threshold 30% -> 300. sl says 600.
 repo="$(mk_repo)"; cleanup_on_exit "$repo"; seed_sl_only "$repo" TOKA 600
 out="$(run_cc "$repo" TOKA)"
 check "sl-only over threshold -> fires"        yes "$(has "$out" "<system-reminder>")"
@@ -77,21 +76,28 @@ check "NO_STATUSLINE=1 disables token ledger"   no \
 echo "handoff_ctx_check.sh — token cooldown + ledger isolation"
 
 # --- cooldown is denominated in tokens, not bytes ---------------------------
-# MAX_FLAGS=0 (uncapped) so the cooldown is what actually gates the re-fire.
-# Default token cooldown = COOLDOWN_KB(100) * 1024 / 4 = 25600.
-repo="$(mk_repo)"; cleanup_on_exit "$repo"; seed_sl_only "$repo" TOKC 600
-out="$(run_cc "$repo" TOKC HANDOFF_CTX_MAX_FLAGS=0)"
+# Since issue #173 the cooldown spaces re-flags only when the window is
+# UNKNOWN (a known window uses the 5-point step instead), so this runs with
+# no env pin and a cache that carries tokens= but no window=, over the 100k
+# absolute gate. Default token cooldown = COOLDOWN_KB(100) * 1024 / 4 = 25600.
+seed_sl_nowin() {  # <repo> <sid> <tokens>
+  local d; d="$(bd "$1")"; mkdir -p "$d"
+  printf 'tokens=%s\n' "$3" > "$d/.ctx_sl_$2"
+}
+run_unk() { run_cc "$@" HANDOFF_CTX_WINDOW_TOKENS=; }
+repo="$(mk_repo)"; cleanup_on_exit "$repo"; seed_sl_nowin "$repo" TOKC 150000
+out="$(run_unk "$repo" TOKC)"
 check "token cooldown: first crossing fires"   yes "$(has "$out" "<system-reminder>")"
 check "token cooldown: repeat_note in tokens"  yes "$(has "$out" "tokens of context growth")"
 check "token cooldown: repeat_note not in KB"  no  "$(has "$out" "KB of transcript growth")"
-seed_sl_only "$repo" TOKC 700   # +100 tokens — far inside the cooldown
+seed_sl_nowin "$repo" TOKC 150100   # +100 tokens, far inside the cooldown
 check "token cooldown: small growth -> silent" no \
-  "$(has "$(run_cc "$repo" TOKC HANDOFF_CTX_MAX_FLAGS=0)" "<system-reminder>")"
-seed_sl_only "$repo" TOKC 900   # still inside 600+25600
+  "$(has "$(run_unk "$repo" TOKC)" "<system-reminder>")"
+seed_sl_nowin "$repo" TOKC 160000   # still inside 150000+25600
 check "token cooldown: still inside -> silent" no \
-  "$(has "$(run_cc "$repo" TOKC HANDOFF_CTX_MAX_FLAGS=0)" "<system-reminder>")"
+  "$(has "$(run_unk "$repo" TOKC)" "<system-reminder>")"
 check "token cooldown: override lets it re-fire" yes \
-  "$(has "$(run_cc "$repo" TOKC HANDOFF_CTX_MAX_FLAGS=0 HANDOFF_CTX_COOLDOWN_TOKENS=100)" "<system-reminder>")"
+  "$(has "$(run_unk "$repo" TOKC HANDOFF_CTX_COOLDOWN_TOKENS=100)" "<system-reminder>")"
 
 # --- a byte ledger left over from a working session cannot gate the token one
 # The two ledgers must never be read as one number: 600 tokens is not "less
@@ -127,7 +133,7 @@ echo "handoff_ctx_check.sh — token ledger survives a context DROP (F3)"
 #     forever and the ledger never fires again.
 repo="$(mk_repo)"; cleanup_on_exit "$repo"; seed_sl_only "$repo" TOKDROP 900
 must printf '900\n' > "$(bd "$repo")/.ctx_flagged_tok_TOKDROP"
-seed_sl_only "$repo" TOKDROP 600   # drop: 900 -> 600, still over the 400 threshold
+seed_sl_only "$repo" TOKDROP 600   # drop: 900 -> 600, still over the 300 threshold
 out="$(run_cc "$repo" TOKDROP HANDOFF_CTX_MAX_FLAGS=0)"
 check "token drop below last-flagged -> nudge fires" yes "$(has "$out" "<system-reminder>")"
 check "token drop -> reports the new (lower) count"  yes "$(has "$out" "600 tokens")"

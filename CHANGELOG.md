@@ -12,6 +12,31 @@ are appended).
 
 ## [Unreleased]
 
+### Changed
+- Context nudge cadence and measurement (#173). The first nudge now comes
+  at 30% of the context window (`HANDOFF_CTX_THRESHOLD_PCT`, was 40%), then
+  again every 5 percentage points (`HANDOFF_CTX_STEP_PCT`, new) for as long
+  as the session runs: suggest mode is no longer capped at one nudge
+  (`HANDOFF_CTX_MAX_FLAGS` defaults to 0; set it to 1 for the old
+  behavior). The absolute `HANDOFF_CTX_THRESHOLD_TOKENS` gate (100,000)
+  now applies only when the window is unknown, so a 1M window no longer
+  nudges at 10%. With no live status line, usage is measured from the
+  transcript's last usage record for this session (input plus cache read
+  plus cache creation tokens), skipping earlier sessions' lines, sidechain
+  lines and `<synthetic>` placeholders; the bytes/4 estimate is the last
+  fallback and is labeled as one. The window comes from
+  `HANDOFF_CTX_WINDOW_TOKENS`, the status line's `context_window_size`, or
+  the session's model id (a `[1m]` suffix, `HANDOFF_CTX_1M_MODEL_REGEX`
+  when set, or a model table checked against the model docs on
+  2026-11-09). The `~/.claude.json` lastModelUsage probe, the built-in 1M
+  regex and the >200k "ratchet" are gone: when no source applies the
+  reminder says "window unknown" and prints no percentage. Each reminder
+  is now one line naming the measured token count, the window and where
+  each number came from, plus the `/handoff` pointer; the "quality
+  degrades before the meter runs out" sentence is dropped. A status line
+  cache older than `HANDOFF_CTX_SL_MAX_AGE_SECS` no longer supplies any
+  number, its window included.
+
 ### Fixed
 - `write_handoff.sh` no longer blocks forever on an open, silent stdin
   (#158). The `/handoff` skill runs `--restamp` through the Claude Code

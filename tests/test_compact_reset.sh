@@ -15,7 +15,8 @@ run_reset() {  # <repo> <sid>
   ( cd "$1" && bash "$CR" <<<"{\"session_id\":\"$2\"}" 2>/dev/null )
 }
 run_cc() {  # <repo> <sid>
-  ( cd "$1" && env HANDOFF_CTX_WINDOW_TOKENS=1000 \
+  # MAX_FLAGS=1 pins the pre-#173 once-only cap these integrations exercise.
+  ( cd "$1" && env HANDOFF_CTX_WINDOW_TOKENS=1000 HANDOFF_CTX_MAX_FLAGS=1 \
       bash "$CC" <<<"{\"session_id\":\"$2\"}" 2>/dev/null )
 }
 has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
