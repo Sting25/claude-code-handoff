@@ -28,7 +28,6 @@ are appended).
 - **Skills: a follow-up block whose scripts are missing now prints the MISSING line and stops (#171)** instead of running `bash "/write_handoff.sh"` (rc 127, "No such file or directory"). The snippets resolve `${CLAUDE_HOME:-$HOME/.claude}/bin`.
 - **Docs: the README installation section describes the single install path (#171),** with `--scope project` as the recommended invocation, a short `--keep-secret` note for reinstalls, and the plugin migration steps.
 
-### Changed
 - Context nudge cadence and measurement (#173). The first nudge now comes
   at 30% of the context window (`HANDOFF_CTX_THRESHOLD_PCT`, was 40%), then
   again every 5 percentage points (`HANDOFF_CTX_STEP_PCT`, new) for as long
