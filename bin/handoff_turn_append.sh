@@ -32,7 +32,33 @@ set -euo pipefail
 umask 077
 
 # --- Read hook payload ---
-payload="$(cat)"
+# --- Bounded stdin read (issue #160). Canonical copy: read_hook_payload() in
+# bin/write_handoff.sh (rationale there); tests/test_stdin_readers_bounded.sh
+# diffs this copy against it. Duplicated, not sourced, because the plugin
+# (${CLAUDE_PLUGIN_ROOT}/bin) and install.sh ($HOME/.claude/bin) layouts differ
+# and this hook must stay dependency-light. Waits HANDOFF_STDIN_TIMEOUT whole
+# seconds (default 2, min 1) for a first line, then drains to EOF; a closed
+# pipe returns EOF at once.
+read_hook_payload() {
+  local first="" timeout="${HANDOFF_STDIN_TIMEOUT:-2}"
+  # 1 to 4 digits: a longer number passes a bare digit test but `read -t`
+  # rejects it ("invalid timeout specification") and the payload would be lost.
+  [[ "$timeout" =~ ^[0-9]{1,4}$ ]] || timeout=2
+  (( timeout < 1 )) && timeout=1
+  if IFS= read -r -t "$timeout" first; then
+    # A newline-terminated first line arrived: the rest ends at EOF.
+    printf '%s\n%s' "$first" "$(cat 2>/dev/null || true)"
+  else
+    # EOF, or timeout (first stays empty). bash 4+ keeps an unterminated
+    # last line in first (a payload printed without a trailing newline). On
+    # bash 3.2 a timeout that fires before any newline discards the partial
+    # data, so only a complete first line or an EOF-terminated one survives
+    # there (see the issue filed from #158/#160). Nothing more is read.
+    printf '%s' "$first"
+  fi
+}
+payload=""
+[[ -t 0 ]] || payload="$(read_hook_payload)"
 
 # --- jq preflight (issue #68) -----------------------------------------------
 # The two jq calls below are UNGUARDED (no `2>/dev/null || true`) and this
