@@ -36,9 +36,11 @@ binding_has() {  # <output> <needle> -> yes|no (after the Standing rules header)
 # Exact header paragraphs: what this writer emits for ~/.claude/bin, and the
 # v0.18.7 plugin arm (its self_dir line filled with a plugin-cache path).
 BARE_HEADER="Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
-\`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).
-Auto-loaded into the next session by the \`SessionStart\` hook in the
-same settings file."
+\`/handoff\` skill + the \`SessionEnd\` hook wired in the Claude Code settings
+file the installer patched: \`~/.claude/settings.json\` for a user-scope
+install, the project's \`.claude/settings.json\` (or \`settings.local.json\`)
+for \`--scope project\`; \`install.sh --doctor\` shows which). Auto-loaded into
+the next session by the \`SessionStart\` hook in the same settings file."
 PLUGIN_DIR="/Users/someone/.claude/plugins/cache/claude-code-handoff/claude-code-handoff/0.18.7/bin"
 PLUGIN_HEADER="Auto-written by the claude-code-handoff plugin's \`bin/write_handoff.sh\`
 (called from the \`/handoff\` skill + the \`SessionEnd\` hook wired in the

@@ -6,8 +6,8 @@
 # Prints the absolute path of the written handoff to stdout.
 #
 # Triggers: /handoff skill, SessionEnd hook, or manual invocation.
-# Auto-loaded by the next session via the SessionStart hook in
-# ~/.claude/settings.json.
+# Auto-loaded by the next session via the SessionStart hook in the settings
+# file the installer patched (user or project scope, see the header below).
 #
 # Flags:
 #   --if-curated           Skip (no rotation, no write) if handoff_current.md
@@ -209,9 +209,11 @@ else
   case "$self_dir" in
     "$handoff_bare_scripts_bin")
       handoff_mode_intro="Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
-\`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).
-Auto-loaded into the next session by the \`SessionStart\` hook in the
-same settings file."
+\`/handoff\` skill + the \`SessionEnd\` hook wired in the Claude Code settings
+file the installer patched: \`~/.claude/settings.json\` for a user-scope
+install, the project's \`.claude/settings.json\` (or \`settings.local.json\`)
+for \`--scope project\`; \`install.sh --doctor\` shows which). Auto-loaded into
+the next session by the \`SessionStart\` hook in the same settings file."
       ;;
     *)
       handoff_mode_intro="Auto-written by \`$handoff_self_dir_safe/write_handoff.sh\`, which is not the

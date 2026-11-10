@@ -50,6 +50,14 @@ OLD_HEADER_TEXT="Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from
 Auto-loaded into the next session by the \`SessionStart\` hook in the
 same settings file."
 
+# Issue #176: the bare-scripts arm used to claim the hooks live in
+# ~/.claude/settings.json, which is wrong for `install.sh --scope project`
+# (hooks in <project>/.claude/settings.json). The arm is now scope-neutral.
+# The OLD text above stays as the pinned legacy wording that already-signed
+# docs carry (they must keep verifying and keep their bytes through restamp).
+NEW_SCOPE_TEXT="the project's \`.claude/settings.json\` (or \`settings.local.json\`)
+for \`--scope project\`"
+
 # Marker text of the "anything else" arm (relocated bin/, clone run
 # directly).
 OTHER_TEXT="is not the
@@ -158,7 +166,29 @@ sec2="$(mktemp -d)/secret"; cleanup_on_exit "$(dirname "$sec2")"
     bash "$bare_bin/write_handoff.sh" >/dev/null 2>&1 </dev/null )
 doc2="$proj2/.claude/handoff_current.md"
 must test -f "$doc2"
-check "bare-scripts shape -> exact pre-#66 wording" yes "$(has "$(cat "$doc2")" "$OLD_HEADER_TEXT")"
+check "bare-scripts shape -> scope-neutral wording (#176)" yes "$(has "$(cat "$doc2")" "$NEW_SCOPE_TEXT")"
+check "bare-scripts shape -> names user-scope file too (#176)" yes "$(has "$(cat "$doc2")" "\`~/.claude/settings.json\` for a user-scope")"
+check "bare-scripts shape -> no longer the pre-#176 wording" no "$(has "$(cat "$doc2")" "$OLD_HEADER_TEXT")"
+# Rebuild doc2 as a doc written by the PRE-#176 code: swap the paragraph back
+# in a scratch copy of the script, then regenerate. Stands in for an
+# already-signed handoff in the backward-compat section below.
+# The paragraph is five source lines starting at the "hook wired in" line;
+# line-based surgery avoids ${var/pat/rep}, whose backslash handling differs
+# across bash 3.2 and 5.x.
+legacy_src="$bare_bin/write_handoff.sh"
+# shellcheck disable=SC2016  # literal backticks, nothing to expand
+hw_line="$(grep -n 'SessionEnd.* hook wired in the Claude Code settings$' "$legacy_src" | cut -d: -f1)"
+must test -n "$hw_line"
+# shellcheck disable=SC2016  # literal backticks, nothing to expand
+printf '%s\n' '\`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).' \
+  'Auto-loaded into the next session by the \`SessionStart\` hook in the' \
+  'same settings file."' > "$legacy_src.para"
+{ head -n $((hw_line - 1)) "$legacy_src"; cat "$legacy_src.para"; tail -n +$((hw_line + 5)) "$legacy_src"; } > "$legacy_src.new"
+must mv "$legacy_src.new" "$legacy_src"
+( cd "$proj2" && HOME="$bare_home" CLAUDE_HOME="$bare_home/.claude" \
+    HANDOFF_SECRET_FILE="$sec2" CLAUDE_PROJECT_DIR="$proj2" \
+    bash "$bare_bin/write_handoff.sh" >/dev/null 2>&1 </dev/null )
+check "legacy fixture carries the pre-#176 wording" yes "$(has "$(cat "$doc2")" "$OLD_HEADER_TEXT")"
 check "bare-scripts shape -> no relocated wording"  no  "$(has "$(cat "$doc2")" "$OTHER_TEXT")"
 
 # --- Shape 3: neither (git clone run directly / relocated bin) --------------
