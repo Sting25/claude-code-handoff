@@ -363,7 +363,7 @@ ta_reclaim_stale_lock() {  # <lock_dir>
         elif [[ -e "$reap" ]] \
              && ! ( set -o noclobber; printf '%s\n' "$tok" > "$lock_dir/owner" ) 2>/dev/null \
              && [[ -d "$lock_dir" ]]; then
-          echo "lock reclaim: could not hand a live holder's token back to $lock_dir (another process claimed it meanwhile)." >&2
+          echo "lock reclaim: could not hand a live holder's token back to $lock_dir (another process claimed it meanwhile, or the create failed)." >&2
         fi
       fi
       rm -f "$reap" 2>/dev/null || true

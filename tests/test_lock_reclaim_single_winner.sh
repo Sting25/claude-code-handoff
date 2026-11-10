@@ -61,8 +61,8 @@
 #      handed back (owner stays absent, a third acquirer still misses, the
 #      holder's release frees the lock), and one filled during the pause is.
 #  16. (#188) Group 1's barrier race with the ln stub on every racer and a
-#      `date` that sleeps a random 0 to 90 ms, so unordered racers go through
-#      the fallback (HANDOFF_RACE_N / 4, at least 5 iterations per site; the
+#      `date` that sleeps a random 0 to 190 ms, so unordered racers go through
+#      the fallback (HANDOFF_RACE_N / 4, at least 10 iterations per site; the
 #      number of stub calls is printed).
 set -u
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -683,17 +683,17 @@ done
 # offsets): the loser captures a live token only if its stretch from age
 # check to capture (one `date`, then `mv`) outlasts the winner's from capture
 # to claim (`mv`, two `stat`s, `rm -rf`, the claim), so it needs to be
-# descheduled there. A `date` that sleeps 0 to 90 ms at random, called by
+# descheduled there. A `date` that sleeps 0 to 190 ms at random, called by
 # every racer between its age check and its capture, supplies that without
 # ordering anyone (measured: 15 hand-backs in 20 iterations).
 jitter="$work/jitter"; mkdir -p "$jitter"
 cat > "$jitter/date" <<SHIM
 #!/usr/bin/env bash
-sleep "0.0\$(( RANDOM % 10 ))" 2>/dev/null || true
+sleep "\$(printf '0.%02d' \$(( RANDOM % 20 )))" 2>/dev/null || true
 exec "$real_date" "\$@"
 SHIM
 chmod +x "$jitter/date"
-NL_N=$(( N / 4 )); (( NL_N < 5 )) && NL_N=5
+NL_N=$(( N / 4 )); (( NL_N < 10 )) && NL_N=10
 for site in wh ta; do
   bad=0; tokbad=0; first_bad=""
   rm -f "$nolink/calls"
@@ -720,6 +720,9 @@ for site in wh ta; do
   done
   [[ -n "$first_bad" ]] && echo "  (site $site, no hard links: first bad iteration $first_bad of $NL_N)"
   echo "  (site $site, no hard links: the ln stub ran $( [[ -f "$nolink/calls" ]] && wc -l < "$nolink/calls" | tr -d ' ' || echo 0) times in $NL_N iterations)"
+  calls=0; [[ -f "$nolink/calls" ]] && calls="$(wc -l < "$nolink/calls" | tr -d ' ')"
+  check "$site no-link barrier race x$NL_N: the fallback ran at least once" yes \
+    "$( (( calls >= 1 )) && echo yes || echo no)"
   check "$site no-link barrier race x$NL_N: iterations without exactly one winner" 0 "$bad"
   check "$site no-link barrier race x$NL_N: iterations where the token is not the winner's" 0 "$tokbad"
 done
