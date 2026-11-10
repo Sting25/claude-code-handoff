@@ -223,7 +223,7 @@ check "stale sl window -> never 125%"                          no  "$(has "$out"
 
 echo "handoff_ctx_check.sh: anchored model table (item 3)"
 
-for m in claude-opus-5-1 claude-sonnet-5-9 claude-opus-50 claude-opus-5-5x claude-fable-5-3 claude-fable-5-22 claude-fable-5-2x; do
+for m in claude-opus-5-1 claude-sonnet-5-9 claude-opus-50 claude-opus-5-5x claude-fable-5-3 claude-fable-5-22 claude-fable-5-2x claude-mythos-5-3 claude-mythos-5-2x; do
   repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$(bd "$repo")"
   tx_line MT false "$m" 100 349900 0 > "$repo/m.jsonl"
   out="$(run_tx "$repo" MT "$repo/m.jsonl")"
@@ -232,7 +232,9 @@ for m in claude-opus-5-1 claude-sonnet-5-9 claude-opus-50 claude-opus-5-5x claud
 done
 for m in us.anthropic.claude-sonnet-5 anthropic.claude-opus-4-8-v1:0 claude-opus-4-8@20260101 claude-opus-5-5-20261001 \
          claude-fable-5-2 claude-fable-5-1 claude-sonnet-5-5 claude-haiku-5-5 \
-         anthropic.claude-fable-5-2 claude-fable-5-2@20261109 claude-fable-5-2-20261109; do
+         anthropic.claude-fable-5-2 claude-fable-5-2@20261109 claude-fable-5-2-20261109 \
+         us.anthropic.claude-fable-5-2-v1:0 claude-mythos-5-2 anthropic.claude-mythos-5-2 \
+         us.anthropic.claude-mythos-5-2-v1:0 claude-mythos-5-2@20261109 claude-mythos-5-2-20261109; do
   repo="$(mk_repo)"; cleanup_on_exit "$repo"; must mkdir -p "$(bd "$repo")"
   tx_line MT false "$m" 100 349900 0 > "$repo/m.jsonl"
   out="$(run_tx "$repo" MT "$repo/m.jsonl")"
