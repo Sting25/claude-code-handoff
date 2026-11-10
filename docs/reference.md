@@ -1149,7 +1149,7 @@ symlinks.
 ./install.sh --copy      # force copy mode (snapshot; survives source deletion)
 ./install.sh --link      # force symlinks even from a volatile path
 ./install.sh --model 'opus[1m]'   # also pin "model" in settings.json (env: HANDOFF_MODEL)
-./install.sh --doctor     # report any dangling/missing installed hooks (exit ≠0 if broken)
+./install.sh --doctor     # report any dangling/missing installed hooks (exit ≠0 if broken, or when jq fails to read a settings file)
 ```
 
 **Model pin (new machines).** Claude Code's model choice lives in each

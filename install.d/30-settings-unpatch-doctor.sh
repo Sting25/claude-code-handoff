@@ -468,8 +468,14 @@ shq() {
 # settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
 # least one of this installer's hook commands (the markers the patcher
 # writes). 1 otherwise, including when jq is missing.
-# Set to 1 by settings_has_our_hooks (and doctor's own reads) on a jq failure.
+# Set to 1 by settings_has_our_hooks (and doctor's own reads) on a jq failure;
+# sh_jq_failed_file names the last file settings_has_our_hooks could not read.
+# wired() is total like probe_hook: every level is guarded (`objects`,
+# `strings`, `// empty`), so a string, number, boolean, null or array at
+# .hooks, .hooks.<event> or deeper is a plain "no", never a jq error that
+# would read as a jq failure (tests/test_install_jq_probes_187.sh, matrix).
 sh_jq_failed=0
+sh_jq_failed_file=""
 settings_has_our_hooks() {
   local f="$1" rc=0
   [[ -f "$f" ]] || return 1
@@ -479,8 +485,8 @@ settings_has_our_hooks() {
   # shellcheck disable=SC2016  # jq variables, bound by --arg
   jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
         --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" '
-      def wired($k; $m): ((.hooks? | objects | .[$k]?) // [])
-        | any(.. | (.command? // "") | (type == "string" and contains($m)));
+      def wired($k; $m): [(.hooks? | objects | .[$k]?) // empty | ..
+        | objects | .command? | strings | select(contains($m))] | length > 0;
       type == "object" and (
         wired("SessionStart"; $ss) or wired("SessionEnd"; $se)
         or wired("PreCompact"; $se) or wired("PostCompact"; $post)
@@ -494,6 +500,7 @@ settings_has_our_hooks() {
     echo "  WARN    jq failed (exit $rc) while checking whether $f wires handoff hooks;" >&2
     echo "          treating it as unknown. Fix jq and re-run." >&2
     sh_jq_failed=1
+    sh_jq_failed_file="$f"
     return 1
   fi
   return "$rc"
@@ -614,14 +621,28 @@ registry_remove() {  # <project dir> <settings file name>
 # registry_scan <wired|stale>: print "<dir><TAB><name>" for each registered
 # project whose file does (wired) or does not (stale) carry our hooks.
 registry_scan() {
-  local want="$1" rp rn has
+  registry_collect "$1"
+  if [[ -n "$REGISTRY_OUT" ]]; then printf '%s\n' "$REGISTRY_OUT"; fi
+  return 0
+}
+# registry_collect <wired|stale>: the same scan, with the lines left in
+# REGISTRY_OUT instead of printed. It runs in the caller's shell (no command
+# substitution), so a jq failure it hits stays visible in sh_jq_failed; a
+# caller that acts on the result (user-scope --uninstall deleting the shared
+# secret) must check that, since every unreadable file reads as stale.
+REGISTRY_OUT=""
+registry_collect() {
+  local want="$1" rp rn has nl=$'\n'
+  REGISTRY_OUT=""
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
   while IFS=$'\t' read -r rp rn || [[ -n "$rp" ]]; do
     [[ -n "$rp" ]] || continue
     case "$rn" in settings.json|settings.local.json) ;; *) continue ;; esac
     has=stale
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
-    if [[ "$has" == "$want" ]]; then printf '%s\t%s\n' "$rp" "$rn"; fi
+    if [[ "$has" == "$want" ]]; then
+      REGISTRY_OUT="${REGISTRY_OUT:+$REGISTRY_OUT$nl}$rp"$'\t'"$rn"
+    fi
   done < "$project_registry"
   return 0
 }
@@ -821,6 +842,14 @@ doctor() {
   # is worth naming even when there is no file to inspect.
   if command -v jq >/dev/null 2>&1 && [[ ! -f "$settings" ]]; then
     echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
+    echo
+  elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
+       && ! jq -e . "$settings" >/dev/null 2>&1 \
+       && ! jq empty "$settings" >/dev/null 2>&1; then
+    # Not valid JSON: the reads below would only report jq failures, and
+    # re-running doctor cannot fix the file, so name it once as broken.
+    echo "  BROKEN  $settings is not valid JSON"
+    broken=$((broken + 1))
     echo
   elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
     # Read-only, so a jq failure (exit 2 or more, #187) is a WARN naming the

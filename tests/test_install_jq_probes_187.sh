@@ -34,7 +34,7 @@ HOME_DIR=""
 # run_sh <fail-match|""> <args...> ; runs install.sh in $HOME_DIR; sets RC, OUT, ERR.
 run_sh() {
   local m="$1"; shift
-  OUT="$(FAIL_JQ_MATCH="$m" HANDOFF_MODEL="" PATH="$SHIM:$PATH" CLAUDE_HOME="$HOME_DIR" \
+  OUT="$(FAIL_JQ_MATCH="$m" HANDOFF_MODEL="" PATH="$SHIM:$PATH" HOME="$HOME_DIR" CLAUDE_HOME="$HOME_DIR" \
     bash "$SRC/install.sh" "$@" 2>"$HOME_DIR/err" </dev/null)"
   RC=$?
   ERR="$(cat "$HOME_DIR/err")"
@@ -227,5 +227,78 @@ check "uninstall model, read fails: bin/ scripts present" "$BASE_NBIN" "$(nbin)"
 run_sh '.model? //' --doctor
 check "doctor model read fails: WARN"          yes "$(has "$OUT" 'while reading model')"
 check "doctor model read fails: exit nonzero"  yes "$(nz $RC)"
+
+# 14. settings_has_our_hooks' wired() is total: a healthy jq never exits 2 or
+#     more on any shape (a jq error there would read as "jq failed"). Matrix:
+#     the root itself, then each value shape at .hooks, .hooks.<event>,
+#     .hooks.<event>[].hooks and .hooks.<event>[].hooks[].command. The filter
+#     is read out of the built install.sh, so the test runs what ships.
+WIRED_F="$(awk '/def wired\(\$k; \$m\)/{f=1} f&&/^    '"'"' "\$f"/{exit} f{print}' "$SRC/install.sh")"
+check "wired matrix: filter extracted"         yes "$(has "$WIRED_F" 'UserPromptSubmit')"
+MX="$(mktemp -d)"; cleanup_on_exit "$MX"
+cells=0; bad=0; bad_list=""
+mx_cell() {  # <json>
+  local rc=0
+  printf '%s' "$1" > "$MX/s.json"
+  # shellcheck disable=SC2016  # jq filter text from install.sh
+  "$REAL_JQ" -e --arg ss m1 --arg se m2 --arg post m3 --arg wr m4 --arg st m5 --arg up m6 \
+    "$WIRED_F" "$MX/s.json" >/dev/null 2>&1 || rc=$?
+  cells=$((cells + 1))
+  if [[ $rc -ge 2 ]]; then bad=$((bad + 1)); bad_list="$bad_list $1"; fi
+}
+for v in '{}' '[]' '42' '"x"' 'null' 'true' 'false'; do mx_cell "$v"; done
+for v in 'null' '"s"' '42' '[]' '[1,"s",null]' '{}' 'true' 'false'; do
+  mx_cell "{\"hooks\":$v}"
+  mx_cell "{\"hooks\":{\"Stop\":$v}}"
+  mx_cell "{\"hooks\":{\"Stop\":[{\"hooks\":$v}]}}"
+  mx_cell "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":$v}]}]}}"
+done
+check "wired matrix: 39 cells run"             39  "$cells"
+check "wired matrix: cells with jq exit >= 2 ($bad_list )" 0 "$bad"
+# The marker still matches at the canonical depth.
+printf '%s' '{"hooks":{"Stop":[{"hooks":[{"command":"bash x/m5.sh"}]}]}}' > "$MX/s.json"
+check "wired matrix: canonical command found"  0 "$("$REAL_JQ" -e --arg ss m1 --arg se m2 --arg post m3 \
+  --arg wr m4 --arg st m5 --arg up m6 "$WIRED_F" "$MX/s.json" >/dev/null 2>&1; echo $?)"
+# End to end, the review's case: a string event value is a quiet "not wired".
+fresh_home
+run_sh ""
+printf '%s' '{"hooks":{"Stop":"s"}}' > "$HOME_DIR/settings.json"
+run_sh "" --doctor
+check "doctor Stop string: exit 0"             0   "$RC"
+check "doctor Stop string: no jq failed"       no  "$(has "$ERR$OUT" 'jq failed')"
+
+# 15. User-scope --uninstall with the registry scan's wiring read failing:
+#     every registered project would read as stale, so the shared secret must
+#     survive and the run must fail, not delete it and exit 0.
+fresh_home
+run_sh ""
+mkdir -p "$HOME_DIR/proj"
+run_sh "" --scope project --project "$HOME_DIR/proj"
+check "registry scan: project install exit 0"  0   "$RC"
+check "registry scan: project registered"      yes "$(grep -q proj "$HOME_DIR/handoff_projects" 2>/dev/null && echo yes || echo no)"
+printf '%064d\n' 0 | tr 0 a > "$HOME_DIR/handoff_secret"; chmod 600 "$HOME_DIR/handoff_secret"
+SECRET_SUM="$(cksum < "$HOME_DIR/handoff_secret")"
+REG_SUM="$(cksum < "$HOME_DIR/handoff_projects")"
+run_sh 'def wired' --uninstall
+check "registry scan fails: exit nonzero"      yes "$(nz $RC)"
+check "registry scan fails: secret kept"       "$SECRET_SUM" "$(cksum < "$HOME_DIR/handoff_secret" 2>/dev/null)"
+check "registry scan fails: registry intact"   "$REG_SUM" "$(cksum < "$HOME_DIR/handoff_projects" 2>/dev/null)"
+check "registry scan fails: no 'remove' secret" no "$(has "$OUT" 'per-machine HMAC secret')"
+check "registry scan fails: ERROR on stderr"   yes "$(has "$ERR" 'ERROR   jq failed while reading ')"
+check "registry scan fails: ERROR names file"  yes "$(has "$ERR" 'proj/.claude/settings.json from the project registry')"
+run_sh "" --uninstall
+check "registry scan healthy re-run: exit 0"   0   "$RC"
+check "registry scan healthy re-run: secret kept for wired project" yes "$(has "$OUT" 'still sign with')"
+
+# 16. --doctor on a settings file that is not valid JSON: one BROKEN line,
+#     counted as broken, and none of the jq-failure WARNs.
+fresh_home
+run_sh ""
+printf '%s' '{"hooks": trailing,}' > "$HOME_DIR/settings.json"
+run_sh "" --doctor
+check "doctor invalid JSON: exit nonzero"      yes "$(nz $RC)"
+check "doctor invalid JSON: BROKEN line"       yes "$(has "$OUT" "BROKEN  $HOME_DIR/settings.json is not valid JSON")"
+check "doctor invalid JSON: counted"           yes "$(has "$ERR" 'doctor: 1 issue(s) found.')"
+check "doctor invalid JSON: no jq failed WARN" no  "$(has "$ERR$OUT" 'jq failed')"
 
 finish
