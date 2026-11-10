@@ -53,6 +53,11 @@ elif [[ "$mode" == install ]]; then
   if [[ "$scope" == project ]] && settings_has_our_hooks "$settings"; then
     registry_add "$project_dir" "$settings_name"
   fi
+  if (( sh_jq_failed )); then
+    echo "  ERROR   jq failed while checking $settings for our hooks; the project was NOT registered." >&2
+    echo "          fix jq and re-run $(rerun_cmd)." >&2
+    exit 1
+  fi
   echo
   if [[ -z "$model_pin" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
      && jq -e 'type == "object" and ((.model // null) == null)' "$settings" >/dev/null 2>&1; then
@@ -125,11 +130,14 @@ elif [[ "$scope" == project ]]; then
 else
   echo "uninstalling handoff skill from $claude_home"
   echo
-  echo "symlinks:"
-  uninstall_symlinks
-  echo
+  # Settings first, then files: a jq-probe abort inside unpatch_settings (#187)
+  # restores settings.json and must leave the bin/ scripts the hooks call in
+  # place, so a re-run of --uninstall finds everything it needs.
   echo "settings.json:"
   unpatch_settings
+  echo
+  echo "symlinks:"
+  uninstall_symlinks
   echo
   echo "local state:"
   # Registry first (issue #171 review): projects still wired sign their

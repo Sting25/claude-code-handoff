@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 2a2d496e88c3734d4159ee4df8bccdfa42cafbe955c2b2c4725cbef515a7b100
+# SOURCE-SHA256: 3035dc97995a3e85b5570617e553ef2ec93ef1ddd16f3211c82bd7bc0946a5c3
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -899,8 +899,8 @@ commit_settings_tmp() {
 # false/null (a real answer). Reading "not 0" as "absent" turned a jq failure
 # into a quiet wrong answer (a second healthy install appended every hook and
 # permission again; --uninstall left a dangling statusLine). So every probe
-# filter is TOTAL (`?` and type guards: a shape it does not expect evaluates
-# to a plain false, never a runtime error, and it always emits exactly one
+# filter is TOTAL (`?` and type guards: a shape it does not expect, a
+# non-object root included, evaluates to a plain false, never a runtime error, and it always emits exactly one
 # value, since no output makes `jq -e` exit 4), and for valid settings JSON an
 # exit of 2 or more can only mean jq itself failed. Keep the filters total if
 # you edit them.
@@ -912,17 +912,48 @@ probe_hook='[(.hooks? | objects | .[$e]?) // empty | .. | (.command? // "")
             | select(type == "string" and contains($m))] | length > 0'
 # shellcheck disable=SC2016  # jq variable, see probe_hook
 probe_perm='((.permissions? | objects | .allow?) // []) | (if type == "array" then index($p) else null end)'
-# jq_probe <what> <jq args...>: 0 = true, 1 = false, exit 1 on a jq failure.
+# Statusline "ours" filter, total on every root shape: `.statusLine? | objects`
+# turns a non-object root or a non-object statusLine into no value, which the
+# `// ""` turns into "" (a plain false). Shared by install, uninstall and doctor.
+# shellcheck disable=SC2016  # jq variable, see probe_hook
+probe_sl_ours='((.statusLine? | objects | .command?) // "") | (type == "string" and contains($m))'
+# shellcheck disable=SC2016  # jq filter text, no shell variables
+probe_sl_present='(.statusLine? // null) != null'
+probe_model_read='(.model? // "")'
+
+# jq_abort <rc> <what>: the one abort path for a failed probe or read. The
+# EXIT trap restores the settings file; the text names the mode, because the
+# recovery differs (install keeps the bin/ links it already made, uninstall
+# unpatches settings BEFORE removing any file, so nothing was removed).
+jq_abort() {
+  echo "  ERROR   jq failed (exit $1) while probing $2 in $settings; aborting." >&2
+  if [[ "${mode:-install}" == uninstall ]]; then
+    echo "          $settings was restored and no bin/ or skills files were removed;" >&2
+    echo "          fix jq and re-run ./install.sh --uninstall." >&2
+  else
+    echo "          $settings was restored to its state before this run;" >&2
+    echo "          fix jq and re-run ./install.sh." >&2
+  fi
+  exit 1
+}
+# jq_probe <what> <jq args...>: 0 = true, 1 = false, abort on a jq failure.
 jq_probe() {
   local what="$1" rc=0
   shift
   jq -e "$@" >/dev/null 2>&1 || rc=$?
-  if [[ $rc -gt 1 ]]; then
-    echo "  ERROR   jq failed (exit $rc) while probing $what in $settings; aborting." >&2
-    echo "          nothing further was changed; fix jq and re-run ./install.sh." >&2
-    exit 1
-  fi
+  if [[ $rc -gt 1 ]]; then jq_abort "$rc" "$what"; fi
   return "$rc"
+}
+# jq_read <what> <jq args...>: runs `jq -r`, leaves the output in JQ_OUT (no
+# command substitution, so the abort exits the script, not a subshell). Any
+# nonzero jq exit aborts: an empty read must mean empty, never "jq failed".
+JQ_OUT=""
+jq_read() {
+  local what="$1" rc=0
+  shift
+  JQ_OUT="$(jq -r "$@" 2>/dev/null)" || rc=$?
+  if [[ $rc -ne 0 ]]; then jq_abort "$rc" "$what"; fi
+  return 0
 }
 
 # Install-or-reconcile one hook. Three cases per event:
@@ -945,9 +976,11 @@ maybe_install_hook() {
   local event="$1" marker="$2" cmd="$3"
   if jq_probe "hook $event" --arg e "$event" --arg m "$marker" "$probe_hook" "$settings"; then
     local stale
-    stale="$(jq -r --arg e "$event" --arg m "$marker" --arg c "$cmd" \
-      '(.hooks[$e] // []) | [.. | (.command? // "") | select(type == "string" and contains($m) and . != $c)] | .[]' \
-      "$settings" 2>/dev/null)"
+    # shellcheck disable=SC2016  # jq variables, bound by --arg
+    jq_read "stale command of hook $event" --arg e "$event" --arg m "$marker" --arg c "$cmd" \
+      '((.hooks? | objects | .[$e]?) // []) | [.. | (.command? // "") | select(type == "string" and contains($m) and . != $c)] | .[]' \
+      "$settings"
+    stale="$JQ_OUT"
     if [[ -z "$stale" ]]; then
       echo "  ok      hook $event (already present)"
       return
@@ -1003,7 +1036,8 @@ maybe_install_perm() {
 maybe_install_model() {
   [[ -n "$model_pin" ]] || return 0
   local cur
-  cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+  jq_read model "$probe_model_read" "$settings"
+  cur="$JQ_OUT"
   if [[ -z "$cur" ]]; then
     jq --arg m "$model_pin" '.model = $m' "$settings" > "$settings.tmp"
     commit_settings_tmp
@@ -1024,7 +1058,8 @@ maybe_uninstall_model() {
   fi
   local rec cur
   rec="$(tr -d '[:space:]' < "$model_pin_record" 2>/dev/null || true)"
-  cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+  jq_read model "$probe_model_read" "$settings"
+  cur="$JQ_OUT"
   if [[ -n "$rec" && "$cur" == "$rec" ]]; then
     jq 'del(.model)' "$settings" > "$settings.tmp"
     commit_settings_tmp
@@ -1047,38 +1082,23 @@ maybe_uninstall_model() {
 #     "padding") survive.
 #   - present and NOT ours   -> untouched; print the documented manual step.
 #
-# Each probe is a `jq -e`: exit 0 = true, 1 = false/null (a real answer). The
-# filters are written to be TOTAL (the `?` and the type guard make a statusLine
-# that is a string, an array, or has a non-string .command evaluate to a plain
-# answer instead of a runtime error), so for valid settings JSON an exit of 2 or
-# more can only mean jq itself failed (usage, compile, no output, runtime,
-# missing binary, a signal). Treating "not 0" as "a foreign statusLine exists"
-# printed `skip` and exited 0 with nothing wired (#174), so a jq failure is
-# fatal here, like commit_settings_tmp. Keep the filters total if you edit them.
-sl_probe_fail() {
-  echo "  ERROR   jq failed (exit $1) while probing statusLine in $settings; aborting." >&2
-  echo "          statusLine was NOT wired; fix jq and re-run ./install.sh." >&2
-  exit 1
-}
+# Each probe is a `jq -e` through jq_probe (exit 0 = true, 1 = false/null, a
+# real answer; 2 or more = jq itself failed, fatal like commit_settings_tmp).
+# The filters are TOTAL on every root shape (probe_sl_ours / probe_sl_present
+# above), so treating "not 0" as "a foreign statusLine exists" can no longer
+# print `skip` and exit 0 with nothing wired (#174). Keep them total.
 maybe_install_statusline() {
-  local rc=0
-  jq -e '(.statusLine? // null) == null' "$settings" >/dev/null 2>&1 || rc=$?
-  if [[ $rc -gt 1 ]]; then sl_probe_fail "$rc"; fi
-  if [[ $rc -eq 0 ]]; then
+  if ! jq_probe statusLine "$probe_sl_present" "$settings"; then
     jq --arg c "$sl_cmd" '.statusLine = {"type": "command", "command": $c}' \
       "$settings" > "$settings.tmp"
     commit_settings_tmp
     echo "  add     statusLine"
     return
   fi
-  rc=0
-  jq -e --arg m "$sl_marker" \
-    '(.statusLine.command? // "") | (type == "string" and contains($m))' \
-    "$settings" >/dev/null 2>&1 || rc=$?
-  if [[ $rc -gt 1 ]]; then sl_probe_fail "$rc"; fi
-  if [[ $rc -eq 0 ]]; then
+  if jq_probe statusLine --arg m "$sl_marker" "$probe_sl_ours" "$settings"; then
     local cur_sl
-    cur_sl="$(jq -r '.statusLine.command // ""' "$settings" 2>/dev/null)"
+    jq_read statusLine '.statusLine.command // ""' "$settings"
+    cur_sl="$JQ_OUT"
     if [[ "$cur_sl" == "$sl_cmd" ]]; then
       echo "  ok      statusLine (already ours)"
       return
@@ -1097,13 +1117,11 @@ maybe_install_statusline() {
 }
 
 maybe_uninstall_statusline() {
-  # shellcheck disable=SC2016  # $m is a jq variable bound by --arg
-  if jq_probe statusLine --arg m "$sl_marker" \
-       '(.statusLine.command? // "") | (type == "string" and contains($m))' "$settings"; then
+  if jq_probe statusLine --arg m "$sl_marker" "$probe_sl_ours" "$settings"; then
     jq 'del(.statusLine)' "$settings" > "$settings.tmp"
     commit_settings_tmp
     echo "  remove  statusLine"
-  elif jq_probe statusLine '(.statusLine? // null) != null' "$settings"; then
+  elif jq_probe statusLine "$probe_sl_present" "$settings"; then
     echo "  ok      statusLine (not ours; leaving alone)"
   else
     echo "  ok      statusLine (not present)"
@@ -1580,21 +1598,35 @@ shq() {
 # settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
 # least one of this installer's hook commands (the markers the patcher
 # writes). 1 otherwise, including when jq is missing.
+# Set to 1 by settings_has_our_hooks (and doctor's own reads) on a jq failure.
+sh_jq_failed=0
 settings_has_our_hooks() {
-  local f="$1"
+  local f="$1" rc=0
   [[ -f "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
+  # Unparseable JSON is a real "no" (documented above), not a jq failure.
+  jq empty "$f" >/dev/null 2>&1 || return 1
+  # shellcheck disable=SC2016  # jq variables, bound by --arg
   jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
         --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" '
+      def wired($k; $m): ((.hooks? | objects | .[$k]?) // [])
+        | any(.. | (.command? // "") | (type == "string" and contains($m)));
       type == "object" and (
-      ( (.hooks.SessionStart // [])     | any(.. | .command? // "" | contains($ss)) ) or
-      ( (.hooks.SessionEnd // [])       | any(.. | .command? // "" | contains($se)) ) or
-      ( (.hooks.PreCompact // [])       | any(.. | .command? // "" | contains($se)) ) or
-      ( (.hooks.PostCompact // [])      | any(.. | .command? // "" | contains($post)) ) or
-      ( (.hooks.WorktreeRemove // [])   | any(.. | .command? // "" | contains($wr)) ) or
-      ( (.hooks.Stop // [])             | any(.. | .command? // "" | contains($st)) ) or
-      ( (.hooks.UserPromptSubmit // []) | any(.. | .command? // "" | contains($up)) ) )
-    ' "$f" >/dev/null 2>&1
+        wired("SessionStart"; $ss) or wired("SessionEnd"; $se)
+        or wired("PreCompact"; $se) or wired("PostCompact"; $post)
+        or wired("WorktreeRemove"; $wr) or wired("Stop"; $st)
+        or wired("UserPromptSubmit"; $up) )
+    ' "$f" >/dev/null 2>&1 || rc=$?
+  if [[ $rc -gt 1 ]]; then
+    # A jq failure on parseable JSON is not "not wired" (#187). The callers
+    # take 0/1, so say it loudly here and record it: doctor exits non-zero,
+    # install aborts before registering.
+    echo "  WARN    jq failed (exit $rc) while checking whether $f wires handoff hooks;" >&2
+    echo "          treating it as unknown. Fix jq and re-run." >&2
+    sh_jq_failed=1
+    return 1
+  fi
+  return "$rc"
 }
 
 # Physical path of a settings file (symlinks resolved, directory made
@@ -1814,7 +1846,7 @@ report_plugin_leftover() {
 # it. (issue #21)
 
 doctor() {
-  local broken=0 dst tgt name mdl secret smode sign_reason
+  local broken=0 dst tgt name mdl mdl_rc sl_rc secret smode sign_reason
 
   if [[ "$scope" == project ]]; then
     echo "doctor: project scope, checking $settings"
@@ -1925,14 +1957,12 @@ doctor() {
     # unknown state rather than an abort, and not counted toward `broken`
     # (re-running the installer cannot fix jq). Never a quiet "user's own".
     sl_rc=0
-    jq -e --arg m "$sl_marker" \
-      '(.statusLine.command? // "") | (type == "string" and contains($m))' \
-      "$settings" >/dev/null 2>&1 || sl_rc=$?
+    jq -e --arg m "$sl_marker" "$probe_sl_ours" "$settings" >/dev/null 2>&1 || sl_rc=$?
     if [[ $sl_rc -eq 0 ]]; then
       echo "  ok      statusLine wired (ours)"
     elif [[ $sl_rc -eq 1 ]]; then
       sl_rc=0
-      jq -e '(.statusLine? // null) != null' "$settings" >/dev/null 2>&1 || sl_rc=$?
+      jq -e "$probe_sl_present" "$settings" >/dev/null 2>&1 || sl_rc=$?
       if [[ $sl_rc -eq 1 ]]; then
         echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
       elif [[ $sl_rc -eq 0 ]]; then
@@ -1942,12 +1972,21 @@ doctor() {
     if [[ $sl_rc -gt 1 ]]; then
       echo "  WARN    jq failed (exit $sl_rc) while probing statusLine in $settings;"
       echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
+      sh_jq_failed=1
     fi
     # Model context-window check — advisory only, never counts toward broken:
     # a bare 'opus'/'claude-opus-4-8' pin silently runs at a 200k context
     # window; the 1M variant needs the [1m] suffix. Any other value (including
     # absent) is a legitimate choice we stay quiet about.
-    mdl="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+    mdl=""
+    mdl_rc=0
+    mdl="$(jq -r "$probe_model_read" "$settings" 2>/dev/null)" || mdl_rc=$?
+    if [[ $mdl_rc -ne 0 ]]; then
+      mdl=""
+      echo "  WARN    jq failed (exit $mdl_rc) while reading model from $settings;"
+      echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
+      sh_jq_failed=1
+    fi
     case "$mdl" in
       opus|claude-opus-4-8)
         echo "  WARN    model '$mdl' in settings.json is the 200k-context variant —"
@@ -1965,6 +2004,12 @@ doctor() {
   if (( broken )); then
     echo "doctor: $broken issue(s) found." >&2
     rerun_remedy >&2
+    return 1
+  fi
+  if (( sh_jq_failed )); then
+    # Exits non-zero (owner decision, see the PR for #187): a jq failure means
+    # some state above is unknown, which a clean exit would hide from CI.
+    echo "doctor: jq failed while reading settings (see WARN above); fix jq and re-run ./install.sh --doctor." >&2
     return 1
   fi
   echo "doctor: all hooks resolve."
@@ -2024,6 +2069,11 @@ elif [[ "$mode" == install ]]; then
   # patch, e.g. invalid JSON, wires nothing and registers nothing).
   if [[ "$scope" == project ]] && settings_has_our_hooks "$settings"; then
     registry_add "$project_dir" "$settings_name"
+  fi
+  if (( sh_jq_failed )); then
+    echo "  ERROR   jq failed while checking $settings for our hooks; the project was NOT registered." >&2
+    echo "          fix jq and re-run $(rerun_cmd)." >&2
+    exit 1
   fi
   echo
   if [[ -z "$model_pin" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
@@ -2097,11 +2147,14 @@ elif [[ "$scope" == project ]]; then
 else
   echo "uninstalling handoff skill from $claude_home"
   echo
-  echo "symlinks:"
-  uninstall_symlinks
-  echo
+  # Settings first, then files: a jq-probe abort inside unpatch_settings (#187)
+  # restores settings.json and must leave the bin/ scripts the hooks call in
+  # place, so a re-run of --uninstall finds everything it needs.
   echo "settings.json:"
   unpatch_settings
+  echo
+  echo "symlinks:"
+  uninstall_symlinks
   echo
   echo "local state:"
   # Registry first (issue #171 review): projects still wired sign their

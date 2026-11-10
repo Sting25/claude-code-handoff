@@ -34,7 +34,7 @@ HOME_DIR=""
 # run_sh <fail-match|""> <args...> ; runs install.sh in $HOME_DIR; sets RC, OUT, ERR.
 run_sh() {
   local m="$1"; shift
-  OUT="$(FAIL_JQ_MATCH="$m" PATH="$SHIM:$PATH" CLAUDE_HOME="$HOME_DIR" \
+  OUT="$(FAIL_JQ_MATCH="$m" HANDOFF_MODEL="" PATH="$SHIM:$PATH" CLAUDE_HOME="$HOME_DIR" \
     bash "$SRC/install.sh" "$@" 2>"$HOME_DIR/err" </dev/null)"
   RC=$?
   ERR="$(cat "$HOME_DIR/err")"
@@ -43,6 +43,7 @@ fresh_home() { HOME_DIR="$(mktemp -d)"; cleanup_on_exit "$HOME_DIR"; }
 has() { [[ "$1" == *"$2"* ]] && echo yes || echo no; }
 nz() { [[ $1 -ne 0 ]] && echo yes || echo no; }
 snap() { cksum < "$HOME_DIR/settings.json"; }
+nbin() { find "$HOME_DIR/bin" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' '; }
 
 # A healthy install first, so every later run starts from a fully wired file.
 fresh_home
@@ -51,15 +52,27 @@ check "healthy install: exit 0" 0 "$RC"
 BASE_HOOKS="$(jq -c '.hooks' "$HOME_DIR/settings.json")"
 BASE_PERMS="$(jq -c '.permissions.allow' "$HOME_DIR/settings.json")"
 BASE_SUM="$(snap)"
+BASE_NBIN="$(nbin)"
+check "healthy install: bin/ scripts linked"    yes "$([[ $BASE_NBIN -gt 0 ]] && echo yes || echo no)"
 
 # Failing-probe fragments: hooks `.hooks?`, permissions `index($p)`,
 # statusLine `.statusLine.command?`.
-# 1. Second install, hook probe fails: must not append a second Stop group.
-run_sh '.hooks? | objects'
+# 1. Second install, the maybe_install_hook probe fails. The fragment names
+#    the PreCompact event, which only maybe_install_hook probes in install mode
+#    (the legacy SessionStart migrate probe runs first with `--arg e SessionStart`).
+run_sh '--arg e PreCompact'
 check "install hook probe: exit nonzero"        yes "$(nz $RC)"
 check "install hook probe: ERROR names hook"    yes "$(has "$ERR" 'jq failed (exit 5) while probing hook')"
 check "install hook probe: settings identical"  "$BASE_SUM" "$(snap)"
 check "install hook probe: hooks not doubled"   "$BASE_HOOKS" "$(jq -c '.hooks' "$HOME_DIR/settings.json")"
+check "install hook probe: names PreCompact"    yes "$(has "$ERR" 'probing hook PreCompact')"
+check "install hook probe: install re-run hint" yes "$(has "$ERR" 're-run ./install.sh.')"
+
+# 1b. The legacy SessionStart migrate probe (runs first in patch_settings).
+run_sh '--arg e SessionStart'
+check "install legacy-migrate probe: exit nonzero"   yes "$(nz $RC)"
+check "install legacy-migrate probe: ERROR names it" yes "$(has "$ERR" 'probing hook SessionStart')"
+check "install legacy-migrate probe: settings identical" "$BASE_SUM" "$(snap)"
 
 # 2. Second install, permission probe fails: allow list must not double.
 run_sh "index(\$p)"
@@ -75,11 +88,13 @@ check "healthy reinstall: settings identical"   "$BASE_SUM" "$(snap)"
 
 # 4. Uninstall, statusLine probe fails: must not report 'not ours' and leave
 #    a dangling statusLine; the run aborts and restores the file.
-run_sh '.statusLine.command?' --uninstall
+run_sh 'objects | .command?' --uninstall
 check "uninstall statusLine probe: exit nonzero"     yes "$(nz $RC)"
 check "uninstall statusLine probe: no 'not ours'"    no  "$(has "$OUT" 'not ours')"
 check "uninstall statusLine probe: ERROR on stderr"  yes "$(has "$ERR" 'jq failed (exit 5) while probing statusLine')"
 check "uninstall statusLine probe: settings identical" "$BASE_SUM" "$(snap)"
+check "uninstall statusLine probe: bin/ scripts still present" "$BASE_NBIN" "$(nbin)"
+check "uninstall statusLine probe: ERROR names --uninstall" yes "$(has "$ERR" 're-run ./install.sh --uninstall')"
 
 # 5. Uninstall, hook probe fails.
 run_sh '.hooks? | objects' --uninstall
@@ -97,18 +112,120 @@ check "uninstall perm probe: ERROR on stderr"   yes "$(has "$ERR" 'jq failed (ex
 check "uninstall perm probe: settings identical" "$BASE_SUM" "$(snap)"
 
 # 7. --doctor, statusLine probe fails: a WARN, never "user's own".
-run_sh '.statusLine.command?' --doctor
+run_sh 'objects | .command?' --doctor
 check "doctor statusLine probe: WARN printed"   yes "$(has "$OUT" 'jq failed (exit 5) while probing statusLine')"
 check "doctor statusLine probe: not 'user's own'" no "$(has "$OUT" "user's own")"
 check "doctor statusLine probe: settings identical" "$BASE_SUM" "$(snap)"
 run_sh "" --doctor
 check "doctor healthy: statusLine wired (ours)" yes "$(has "$OUT" 'statusLine wired (ours)')"
 
-# 8. Odd shapes of the probed keys are plain answers, not jq errors: install
-#    must not abort on a non-string hook command or a non-object .hooks.
+# 8. Odd shapes of the probed keys are plain answers, not jq errors: with a
+#    healthy jq each of these installs (exit 0) and wires the hooks.
+for shape in '{"permissions":{}}' '{"statusLine":"s"}' '{"hooks":{}}' \
+             '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":42}]}]}}'; do
+  fresh_home
+  printf '%s' "$shape" > "$HOME_DIR/settings.json"
+  run_sh ""
+  check "odd shape $shape: exit 0"       0   "$RC"
+  check "odd shape $shape: no probe abort" no "$(has "$ERR" 'while probing')"
+  check "odd shape $shape: SessionStart wired" yes \
+    "$(jq -e '.hooks.SessionStart | length > 0' "$HOME_DIR/settings.json" >/dev/null 2>&1 && echo yes || echo no)"
+done
+
+# 8b. A string where the installer APPENDS to a list ("allow":"x", "Stop":"s",
+#     "hooks":"s") fails in the append itself, not in a probe (pre-existing
+#     behaviour, out of scope for #187). The abort must be explicit (nonzero,
+#     the jq error and "aborted mid-patch" on stderr) and leave the file as it was.
+for shape in '{"permissions":{"allow":"x"}}' '{"hooks":{"Stop":"s"}}' '{"hooks":"s"}'; do
+  fresh_home
+  printf '%s' "$shape" > "$HOME_DIR/settings.json"
+  BEFORE="$(snap)"
+  run_sh ""
+  check "append onto $shape: exit nonzero"       yes "$(nz $RC)"
+  check "append onto $shape: explicit abort text" yes "$(has "$ERR$OUT" 'aborted mid-patch')"
+  check "append onto $shape: settings restored"  "$BEFORE" "$(snap)"
+done
+
+# 9. D1: a non-object root (valid JSON, so the unpatch/doctor gates let it
+#    through) must not make the statusLine filters fail.
+for root in '[]' '42' '"x"'; do
+  fresh_home
+  printf '%s' "$root" > "$HOME_DIR/settings.json"
+  run_sh "" --uninstall
+  check "uninstall root $root: exit 0"         0   "$RC"
+  check "uninstall root $root: no jq failed"   no  "$(has "$ERR$OUT" 'jq failed')"
+  fresh_home
+  run_sh ""                       # healthy bin/ so doctor has no other fault
+  printf '%s' "$root" > "$HOME_DIR/settings.json"
+  run_sh "" --doctor
+  check "doctor root $root: exit 0"            0   "$RC"
+  check "doctor root $root: no jq failed"      no  "$(has "$ERR$OUT" 'jq failed')"
+done
+
+# 10. D6: the second statusLine probe (a statusLine that is not ours).
 fresh_home
-printf '%s' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":42}]}]},"permissions":{"allow":"x"}}' > "$HOME_DIR/settings.json"
 run_sh ""
-check "odd shapes: no jq-probe abort"           no  "$(has "$ERR" 'while probing')"
+printf '%s' '{"statusLine":{"type":"command","command":"/x/own.sh"}}' > "$HOME_DIR/settings.json"
+OWN_SUM="$(snap)"
+run_sh "" --doctor
+check "doctor own statusLine: info, exit 0"    0   "$RC"
+run_sh '// null) != null' --uninstall
+check "uninstall 2nd statusLine probe: exit nonzero" yes "$(nz $RC)"
+check "uninstall 2nd statusLine probe: ERROR"  yes "$(has "$ERR" 'jq failed (exit 5) while probing statusLine')"
+check "uninstall 2nd statusLine probe: settings identical" "$OWN_SUM" "$(snap)"
+run_sh '// null) != null' --doctor
+check "doctor 2nd statusLine probe: WARN"      yes "$(has "$OUT" 'jq failed (exit 5) while probing statusLine')"
+check "doctor 2nd statusLine probe: exit nonzero (D7)" yes "$(nz $RC)"
+
+# 11. D7: any doctor jq failure makes doctor exit nonzero.
+fresh_home
+run_sh ""
+run_sh 'objects | .command?' --doctor
+check "doctor jq failure: exit nonzero"        yes "$(nz $RC)"
+run_sh 'objects | .command?' --doctor
+check "doctor jq failure: stderr says so"      yes "$(has "$ERR" 'jq failed while reading settings')"
+# settings_has_our_hooks (wired(...) helper) failing.
+run_sh 'def wired' --doctor
+check "doctor wiring check failure: WARN"      yes "$(has "$ERR" 'jq failed (exit 5) while checking')"
+check "doctor wiring check failure: exit nonzero" yes "$(nz $RC)"
+
+# 12. D3: the stale-command extraction. A stale marker-matching command is
+#     rewritten by a healthy run; with the extraction failing, the run aborts
+#     and leaves the file untouched instead of reading "no stale command".
+fresh_home
+run_sh ""
+jq '.hooks.Stop[0].hooks[0].command = (.hooks.Stop[0].hooks[0].command + " --old-flag")' \
+  "$HOME_DIR/settings.json" > "$HOME_DIR/s.new" && mv "$HOME_DIR/s.new" "$HOME_DIR/settings.json"
+STALE_SUM="$(snap)"
+# shellcheck disable=SC2016  # jq filter text, matched literally by the shim
+run_sh '. != $c)]'
+check "stale extraction: exit nonzero"         yes "$(nz $RC)"
+check "stale extraction: ERROR names it"       yes "$(has "$ERR" 'stale command of hook')"
+check "stale extraction: settings identical"   "$STALE_SUM" "$(snap)"
+run_sh ""
+check "stale extraction healthy: exit 0"       0   "$RC"
+check "stale extraction healthy: rewritten"    yes "$(has "$OUT" 'UPDATE  hook Stop')"
+
+# 13. D4: the model reads. An unreadable model must not become "no model".
+fresh_home
+printf '%s' '{"model":"mine"}' > "$HOME_DIR/settings.json"
+M_SUM="$(snap)"
+run_sh '.model? //' --model 'opus[1m]'
+check "install --model, read fails: exit nonzero"   yes "$(nz $RC)"
+check "install --model, read fails: user model kept" mine "$(jq -r .model "$HOME_DIR/settings.json")"
+check "install --model, read fails: settings identical" "$M_SUM" "$(snap)"
+run_sh "" --model 'opus[1m]'
+check "install --model healthy: keeps user model" mine "$(jq -r .model "$HOME_DIR/settings.json")"
+fresh_home
+run_sh "" --model 'opus[1m]'
+M2_SUM="$(snap)"
+run_sh '.model? //' --uninstall
+check "uninstall model, read fails: exit nonzero"   yes "$(nz $RC)"
+check "uninstall model, read fails: settings identical" "$M2_SUM" "$(snap)"
+check "uninstall model, read fails: pin record kept" yes "$([[ -f "$HOME_DIR/handoff-model-pin" ]] && echo yes || echo no)"
+check "uninstall model, read fails: bin/ scripts present" "$BASE_NBIN" "$(nbin)"
+run_sh '.model? //' --doctor
+check "doctor model read fails: WARN"          yes "$(has "$OUT" 'while reading model')"
+check "doctor model read fails: exit nonzero"  yes "$(nz $RC)"
 
 finish

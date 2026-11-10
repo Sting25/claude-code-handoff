@@ -69,8 +69,8 @@ commit_settings_tmp() {
 # false/null (a real answer). Reading "not 0" as "absent" turned a jq failure
 # into a quiet wrong answer (a second healthy install appended every hook and
 # permission again; --uninstall left a dangling statusLine). So every probe
-# filter is TOTAL (`?` and type guards: a shape it does not expect evaluates
-# to a plain false, never a runtime error, and it always emits exactly one
+# filter is TOTAL (`?` and type guards: a shape it does not expect, a
+# non-object root included, evaluates to a plain false, never a runtime error, and it always emits exactly one
 # value, since no output makes `jq -e` exit 4), and for valid settings JSON an
 # exit of 2 or more can only mean jq itself failed. Keep the filters total if
 # you edit them.
@@ -82,17 +82,48 @@ probe_hook='[(.hooks? | objects | .[$e]?) // empty | .. | (.command? // "")
             | select(type == "string" and contains($m))] | length > 0'
 # shellcheck disable=SC2016  # jq variable, see probe_hook
 probe_perm='((.permissions? | objects | .allow?) // []) | (if type == "array" then index($p) else null end)'
-# jq_probe <what> <jq args...>: 0 = true, 1 = false, exit 1 on a jq failure.
+# Statusline "ours" filter, total on every root shape: `.statusLine? | objects`
+# turns a non-object root or a non-object statusLine into no value, which the
+# `// ""` turns into "" (a plain false). Shared by install, uninstall and doctor.
+# shellcheck disable=SC2016  # jq variable, see probe_hook
+probe_sl_ours='((.statusLine? | objects | .command?) // "") | (type == "string" and contains($m))'
+# shellcheck disable=SC2016  # jq filter text, no shell variables
+probe_sl_present='(.statusLine? // null) != null'
+probe_model_read='(.model? // "")'
+
+# jq_abort <rc> <what>: the one abort path for a failed probe or read. The
+# EXIT trap restores the settings file; the text names the mode, because the
+# recovery differs (install keeps the bin/ links it already made, uninstall
+# unpatches settings BEFORE removing any file, so nothing was removed).
+jq_abort() {
+  echo "  ERROR   jq failed (exit $1) while probing $2 in $settings; aborting." >&2
+  if [[ "${mode:-install}" == uninstall ]]; then
+    echo "          $settings was restored and no bin/ or skills files were removed;" >&2
+    echo "          fix jq and re-run ./install.sh --uninstall." >&2
+  else
+    echo "          $settings was restored to its state before this run;" >&2
+    echo "          fix jq and re-run ./install.sh." >&2
+  fi
+  exit 1
+}
+# jq_probe <what> <jq args...>: 0 = true, 1 = false, abort on a jq failure.
 jq_probe() {
   local what="$1" rc=0
   shift
   jq -e "$@" >/dev/null 2>&1 || rc=$?
-  if [[ $rc -gt 1 ]]; then
-    echo "  ERROR   jq failed (exit $rc) while probing $what in $settings; aborting." >&2
-    echo "          nothing further was changed; fix jq and re-run ./install.sh." >&2
-    exit 1
-  fi
+  if [[ $rc -gt 1 ]]; then jq_abort "$rc" "$what"; fi
   return "$rc"
+}
+# jq_read <what> <jq args...>: runs `jq -r`, leaves the output in JQ_OUT (no
+# command substitution, so the abort exits the script, not a subshell). Any
+# nonzero jq exit aborts: an empty read must mean empty, never "jq failed".
+JQ_OUT=""
+jq_read() {
+  local what="$1" rc=0
+  shift
+  JQ_OUT="$(jq -r "$@" 2>/dev/null)" || rc=$?
+  if [[ $rc -ne 0 ]]; then jq_abort "$rc" "$what"; fi
+  return 0
 }
 
 # Install-or-reconcile one hook. Three cases per event:
@@ -115,9 +146,11 @@ maybe_install_hook() {
   local event="$1" marker="$2" cmd="$3"
   if jq_probe "hook $event" --arg e "$event" --arg m "$marker" "$probe_hook" "$settings"; then
     local stale
-    stale="$(jq -r --arg e "$event" --arg m "$marker" --arg c "$cmd" \
-      '(.hooks[$e] // []) | [.. | (.command? // "") | select(type == "string" and contains($m) and . != $c)] | .[]' \
-      "$settings" 2>/dev/null)"
+    # shellcheck disable=SC2016  # jq variables, bound by --arg
+    jq_read "stale command of hook $event" --arg e "$event" --arg m "$marker" --arg c "$cmd" \
+      '((.hooks? | objects | .[$e]?) // []) | [.. | (.command? // "") | select(type == "string" and contains($m) and . != $c)] | .[]' \
+      "$settings"
+    stale="$JQ_OUT"
     if [[ -z "$stale" ]]; then
       echo "  ok      hook $event (already present)"
       return
@@ -173,7 +206,8 @@ maybe_install_perm() {
 maybe_install_model() {
   [[ -n "$model_pin" ]] || return 0
   local cur
-  cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+  jq_read model "$probe_model_read" "$settings"
+  cur="$JQ_OUT"
   if [[ -z "$cur" ]]; then
     jq --arg m "$model_pin" '.model = $m' "$settings" > "$settings.tmp"
     commit_settings_tmp
@@ -194,7 +228,8 @@ maybe_uninstall_model() {
   fi
   local rec cur
   rec="$(tr -d '[:space:]' < "$model_pin_record" 2>/dev/null || true)"
-  cur="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+  jq_read model "$probe_model_read" "$settings"
+  cur="$JQ_OUT"
   if [[ -n "$rec" && "$cur" == "$rec" ]]; then
     jq 'del(.model)' "$settings" > "$settings.tmp"
     commit_settings_tmp
@@ -217,38 +252,23 @@ maybe_uninstall_model() {
 #     "padding") survive.
 #   - present and NOT ours   -> untouched; print the documented manual step.
 #
-# Each probe is a `jq -e`: exit 0 = true, 1 = false/null (a real answer). The
-# filters are written to be TOTAL (the `?` and the type guard make a statusLine
-# that is a string, an array, or has a non-string .command evaluate to a plain
-# answer instead of a runtime error), so for valid settings JSON an exit of 2 or
-# more can only mean jq itself failed (usage, compile, no output, runtime,
-# missing binary, a signal). Treating "not 0" as "a foreign statusLine exists"
-# printed `skip` and exited 0 with nothing wired (#174), so a jq failure is
-# fatal here, like commit_settings_tmp. Keep the filters total if you edit them.
-sl_probe_fail() {
-  echo "  ERROR   jq failed (exit $1) while probing statusLine in $settings; aborting." >&2
-  echo "          statusLine was NOT wired; fix jq and re-run ./install.sh." >&2
-  exit 1
-}
+# Each probe is a `jq -e` through jq_probe (exit 0 = true, 1 = false/null, a
+# real answer; 2 or more = jq itself failed, fatal like commit_settings_tmp).
+# The filters are TOTAL on every root shape (probe_sl_ours / probe_sl_present
+# above), so treating "not 0" as "a foreign statusLine exists" can no longer
+# print `skip` and exit 0 with nothing wired (#174). Keep them total.
 maybe_install_statusline() {
-  local rc=0
-  jq -e '(.statusLine? // null) == null' "$settings" >/dev/null 2>&1 || rc=$?
-  if [[ $rc -gt 1 ]]; then sl_probe_fail "$rc"; fi
-  if [[ $rc -eq 0 ]]; then
+  if ! jq_probe statusLine "$probe_sl_present" "$settings"; then
     jq --arg c "$sl_cmd" '.statusLine = {"type": "command", "command": $c}' \
       "$settings" > "$settings.tmp"
     commit_settings_tmp
     echo "  add     statusLine"
     return
   fi
-  rc=0
-  jq -e --arg m "$sl_marker" \
-    '(.statusLine.command? // "") | (type == "string" and contains($m))' \
-    "$settings" >/dev/null 2>&1 || rc=$?
-  if [[ $rc -gt 1 ]]; then sl_probe_fail "$rc"; fi
-  if [[ $rc -eq 0 ]]; then
+  if jq_probe statusLine --arg m "$sl_marker" "$probe_sl_ours" "$settings"; then
     local cur_sl
-    cur_sl="$(jq -r '.statusLine.command // ""' "$settings" 2>/dev/null)"
+    jq_read statusLine '.statusLine.command // ""' "$settings"
+    cur_sl="$JQ_OUT"
     if [[ "$cur_sl" == "$sl_cmd" ]]; then
       echo "  ok      statusLine (already ours)"
       return
@@ -267,13 +287,11 @@ maybe_install_statusline() {
 }
 
 maybe_uninstall_statusline() {
-  # shellcheck disable=SC2016  # $m is a jq variable bound by --arg
-  if jq_probe statusLine --arg m "$sl_marker" \
-       '(.statusLine.command? // "") | (type == "string" and contains($m))' "$settings"; then
+  if jq_probe statusLine --arg m "$sl_marker" "$probe_sl_ours" "$settings"; then
     jq 'del(.statusLine)' "$settings" > "$settings.tmp"
     commit_settings_tmp
     echo "  remove  statusLine"
-  elif jq_probe statusLine '(.statusLine? // null) != null' "$settings"; then
+  elif jq_probe statusLine "$probe_sl_present" "$settings"; then
     echo "  ok      statusLine (not ours; leaving alone)"
   else
     echo "  ok      statusLine (not present)"

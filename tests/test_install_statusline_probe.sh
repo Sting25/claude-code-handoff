@@ -42,7 +42,7 @@ sl() { jq -c '.statusLine // null' "$HOME_DIR/settings.json"; }
 has() { [[ "$1" == *"$2"* ]] && echo yes || echo no; }
 
 # 1. probe 1 (absent/null?) fails: install must fail loudly, not skip.
-run_install '{}' '(.statusLine? // null) == null'
+run_install '{}' '(.statusLine? // null) != null'
 check "probe1 jq failure: exit nonzero"        yes "$([[ $RC -ne 0 ]] && echo yes || echo no)"
 check "probe1 jq failure: no 'skip statusLine'" no  "$(has "$OUT" 'skip    statusLine')"
 check "probe1 jq failure: ERROR on stderr"      yes "$(has "$ERR" 'jq failed (exit 5) while probing statusLine')"
@@ -50,9 +50,9 @@ check "probe1 jq failure: statusLine not wired" null "$(sl)"
 
 # 2. probe 2 (ours?) fails on a foreign statusLine: same.
 FOREIGN='{"statusLine":{"type":"command","command":"echo mine"}}'
-# Match on `.statusLine.command?` (not `contains($m)`, which the hook probes
+# Match on `objects | .command?` (not `contains($m)`, which the hook probes
 # share since #187: they would fail first and the ERROR would name a hook).
-run_install "$FOREIGN" '.statusLine.command?'
+run_install "$FOREIGN" 'objects | .command?'
 check "probe2 jq failure: exit nonzero"        yes "$([[ $RC -ne 0 ]] && echo yes || echo no)"
 check "probe2 jq failure: no 'skip statusLine'" no  "$(has "$OUT" 'skip    statusLine')"
 check "probe2 jq failure: ERROR on stderr"      yes "$(has "$ERR" 'jq failed (exit 5) while probing statusLine')"

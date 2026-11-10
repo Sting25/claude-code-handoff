@@ -468,21 +468,35 @@ shq() {
 # settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
 # least one of this installer's hook commands (the markers the patcher
 # writes). 1 otherwise, including when jq is missing.
+# Set to 1 by settings_has_our_hooks (and doctor's own reads) on a jq failure.
+sh_jq_failed=0
 settings_has_our_hooks() {
-  local f="$1"
+  local f="$1" rc=0
   [[ -f "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
+  # Unparseable JSON is a real "no" (documented above), not a jq failure.
+  jq empty "$f" >/dev/null 2>&1 || return 1
+  # shellcheck disable=SC2016  # jq variables, bound by --arg
   jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
         --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" '
+      def wired($k; $m): ((.hooks? | objects | .[$k]?) // [])
+        | any(.. | (.command? // "") | (type == "string" and contains($m)));
       type == "object" and (
-      ( (.hooks.SessionStart // [])     | any(.. | .command? // "" | contains($ss)) ) or
-      ( (.hooks.SessionEnd // [])       | any(.. | .command? // "" | contains($se)) ) or
-      ( (.hooks.PreCompact // [])       | any(.. | .command? // "" | contains($se)) ) or
-      ( (.hooks.PostCompact // [])      | any(.. | .command? // "" | contains($post)) ) or
-      ( (.hooks.WorktreeRemove // [])   | any(.. | .command? // "" | contains($wr)) ) or
-      ( (.hooks.Stop // [])             | any(.. | .command? // "" | contains($st)) ) or
-      ( (.hooks.UserPromptSubmit // []) | any(.. | .command? // "" | contains($up)) ) )
-    ' "$f" >/dev/null 2>&1
+        wired("SessionStart"; $ss) or wired("SessionEnd"; $se)
+        or wired("PreCompact"; $se) or wired("PostCompact"; $post)
+        or wired("WorktreeRemove"; $wr) or wired("Stop"; $st)
+        or wired("UserPromptSubmit"; $up) )
+    ' "$f" >/dev/null 2>&1 || rc=$?
+  if [[ $rc -gt 1 ]]; then
+    # A jq failure on parseable JSON is not "not wired" (#187). The callers
+    # take 0/1, so say it loudly here and record it: doctor exits non-zero,
+    # install aborts before registering.
+    echo "  WARN    jq failed (exit $rc) while checking whether $f wires handoff hooks;" >&2
+    echo "          treating it as unknown. Fix jq and re-run." >&2
+    sh_jq_failed=1
+    return 1
+  fi
+  return "$rc"
 }
 
 # Physical path of a settings file (symlinks resolved, directory made
@@ -702,7 +716,7 @@ report_plugin_leftover() {
 # it. (issue #21)
 
 doctor() {
-  local broken=0 dst tgt name mdl secret smode sign_reason
+  local broken=0 dst tgt name mdl mdl_rc sl_rc secret smode sign_reason
 
   if [[ "$scope" == project ]]; then
     echo "doctor: project scope, checking $settings"
@@ -813,14 +827,12 @@ doctor() {
     # unknown state rather than an abort, and not counted toward `broken`
     # (re-running the installer cannot fix jq). Never a quiet "user's own".
     sl_rc=0
-    jq -e --arg m "$sl_marker" \
-      '(.statusLine.command? // "") | (type == "string" and contains($m))' \
-      "$settings" >/dev/null 2>&1 || sl_rc=$?
+    jq -e --arg m "$sl_marker" "$probe_sl_ours" "$settings" >/dev/null 2>&1 || sl_rc=$?
     if [[ $sl_rc -eq 0 ]]; then
       echo "  ok      statusLine wired (ours)"
     elif [[ $sl_rc -eq 1 ]]; then
       sl_rc=0
-      jq -e '(.statusLine? // null) != null' "$settings" >/dev/null 2>&1 || sl_rc=$?
+      jq -e "$probe_sl_present" "$settings" >/dev/null 2>&1 || sl_rc=$?
       if [[ $sl_rc -eq 1 ]]; then
         echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
       elif [[ $sl_rc -eq 0 ]]; then
@@ -830,12 +842,21 @@ doctor() {
     if [[ $sl_rc -gt 1 ]]; then
       echo "  WARN    jq failed (exit $sl_rc) while probing statusLine in $settings;"
       echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
+      sh_jq_failed=1
     fi
     # Model context-window check — advisory only, never counts toward broken:
     # a bare 'opus'/'claude-opus-4-8' pin silently runs at a 200k context
     # window; the 1M variant needs the [1m] suffix. Any other value (including
     # absent) is a legitimate choice we stay quiet about.
-    mdl="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+    mdl=""
+    mdl_rc=0
+    mdl="$(jq -r "$probe_model_read" "$settings" 2>/dev/null)" || mdl_rc=$?
+    if [[ $mdl_rc -ne 0 ]]; then
+      mdl=""
+      echo "  WARN    jq failed (exit $mdl_rc) while reading model from $settings;"
+      echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
+      sh_jq_failed=1
+    fi
     case "$mdl" in
       opus|claude-opus-4-8)
         echo "  WARN    model '$mdl' in settings.json is the 200k-context variant —"
@@ -853,6 +874,12 @@ doctor() {
   if (( broken )); then
     echo "doctor: $broken issue(s) found." >&2
     rerun_remedy >&2
+    return 1
+  fi
+  if (( sh_jq_failed )); then
+    # Exits non-zero (owner decision, see the PR for #187): a jq failure means
+    # some state above is unknown, which a clean exit would hide from CI.
+    echo "doctor: jq failed while reading settings (see WARN above); fix jq and re-run ./install.sh --doctor." >&2
     return 1
   fi
   echo "doctor: all hooks resolve."
