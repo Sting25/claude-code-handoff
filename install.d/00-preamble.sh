@@ -348,6 +348,14 @@ if [[ "$scope" == project ]]; then
       *) project_dir="$PWD/$project_dir" ;;
     esac
     while [[ "$project_dir" == */ && "$project_dir" != / ]]; do project_dir="${project_dir%/}"; done
+    # The install recorded the PHYSICAL path (registry line, backup key). A
+    # path reached through a symlink (a dangling link to the removed project,
+    # or a link above it) must be made physical the same way a missing path
+    # allows: follow a dangling final link, then resolve the parent (#194).
+    project_dir="$(resolve_symlink "$project_dir")"
+    if [[ -d "$(dirname "$project_dir")" ]]; then
+      project_dir="$(cd "$(dirname "$project_dir")" && pwd -P)/$(basename "$project_dir")"
+    fi
     project_gone=1
   elif [[ ! -d "$project_dir" ]]; then
     echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2

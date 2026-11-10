@@ -1153,15 +1153,18 @@ symlinks.
 ```
 
 **Model pin (new machines).** Claude Code's model choice lives in each
-machine's `~/.claude/settings.json`, so a fresh install defaults wrong —
-notably, a bare `opus` runs at a **200k** context window (the 1M variant
-is `opus[1m]`). `--model` pins the value during install, but **never
-overwrites** a model you already set — a differing request is reported
-and skipped. A plain install with no model configured prints a one-line
-NOTE instead of leaving the gap silent, and `--doctor` warns whenever the
-pinned model is a bare 200k variant. The one-liner for a new machine:
-`./install.sh --model 'opus[1m]'`. `--uninstall` removes the key only if
-this installer set it and you never changed it since.
+machine's `~/.claude/settings.json`, so a fresh install may default to a
+model you did not pick. The window matters because the context nudge
+measures against it: Opus 4.7 and later (including the bare `opus` alias)
+run at 1M, while Opus 4.6 and Sonnet 4.6 run at 200k unless you pick the
+`[1m]` variant, which the bare id does not record. `--model` pins the value
+during install, but **never overwrites** a model you already set: a
+differing request is reported and skipped. A plain install with no model
+configured prints a one-line NOTE instead of leaving the gap silent, and
+`--doctor` warns when the pinned model is a bare `claude-opus-4-6` or
+`claude-sonnet-4-6` (it may be running at 200k). The one-liner for a new
+machine: `./install.sh --model 'opus[1m]'`. `--uninstall` removes the key
+only if this installer set it and you never changed it since.
 
 If a path the installer manages already holds a symlink of **yours**
 pointing somewhere else (a customized fork, a second clone, a dotfiles

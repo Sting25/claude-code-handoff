@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 23725d8c3fbfdf4fce1e12ccb026efe751320bacd0de7bfd6a87225a570398c1
+# SOURCE-SHA256: ebc5883ee55f532f2e041ea2bb964038c7d6e3661976cee26c9330ff8f366b32
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -360,6 +360,14 @@ if [[ "$scope" == project ]]; then
       *) project_dir="$PWD/$project_dir" ;;
     esac
     while [[ "$project_dir" == */ && "$project_dir" != / ]]; do project_dir="${project_dir%/}"; done
+    # The install recorded the PHYSICAL path (registry line, backup key). A
+    # path reached through a symlink (a dangling link to the removed project,
+    # or a link above it) must be made physical the same way a missing path
+    # allows: follow a dangling final link, then resolve the parent (#194).
+    project_dir="$(resolve_symlink "$project_dir")"
+    if [[ -d "$(dirname "$project_dir")" ]]; then
+      project_dir="$(cd "$(dirname "$project_dir")" && pwd -P)/$(basename "$project_dir")"
+    fi
     project_gone=1
   elif [[ ! -d "$project_dir" ]]; then
     echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
@@ -1308,6 +1316,31 @@ remove_created_settings_if_empty() {
   rm -f "$m"
 }
 
+# Project scope (#194): the project's .claude/ directory, when THIS installer
+# made it, is recorded in a marker beside the file markers. --uninstall then
+# removes it again, with rmdir only (never recursive), once the strip has
+# left it empty. A pre-existing directory has no marker and is never touched.
+# Best effort, like the file marker.
+claude_dir_marker() { printf '%s\n' "$project_backup_dir/claude_dir.mkdir"; }
+record_created_claude_dir() {
+  [[ "$scope" == project ]] || return 0
+  ( mkdir -p "$project_backup_dir" && : > "$(claude_dir_marker)" ) 2>/dev/null || true
+}
+remove_created_claude_dir_if_empty() {
+  local m d
+  m="$(claude_dir_marker)"
+  [[ -f "$m" && ! -L "$m" ]] || return 0
+  d="$(dirname "$settings")"
+  if [[ ! -d "$d" ]]; then
+    rm -f "$m"
+  elif [[ ! -L "$d" ]] && rmdir "$d" 2>/dev/null; then
+    echo "  remove  $d/ (this installer created it; it is empty)"
+    rm -f "$m"
+  fi
+  # Not empty (another settings file is still there): keep the marker so the
+  # uninstall that removes the last one cleans up.
+}
+
 patch_settings() {
   if ! command -v jq >/dev/null 2>&1; then
     echo
@@ -1321,7 +1354,11 @@ patch_settings() {
     # Neither scope backs up a file this run just seeded as {}: there is
     # nothing to keep, and cleanup() undoes the seed itself on abort.
     settings_backup=""
-    echo "  ok      no backup needed ($settings was just created; an abort undoes that)"
+    if [[ "$settings_seed_state" == absent ]]; then
+      echo "  ok      no backup needed ($settings was just created; an abort undoes that)"
+    else
+      echo "  ok      no backup needed ($settings was empty; an abort empties it again)"
+    fi
   else
     take_settings_backup
   fi
@@ -1512,8 +1549,8 @@ rerun_cmd() {
 }
 
 # The doctor's closing remedy. When the user file is unwired and the only
-# wiring is in several registered projects, a single command would leave the
-# others broken, so it prints one command per wired project (issue #178).
+# wiring is in several registered projects it names one command (any of them
+# restores the shared scripts) and lists the projects it repairs (#178, #194).
 # Every other case keeps the one-line form.
 rerun_remedy() {
   local list n rp rn flag proj tab nl line
@@ -1535,11 +1572,15 @@ rerun_remedy() {
   n=0
   if [[ -n "$list" ]]; then n="$(printf '%s\n' "$list" | wc -l | tr -d ' ')"; fi
   if (( n > 1 )); then
-    echo "        Re-run one command per wired project, from a persistent clone (not a /tmp checkout):"
+    # The scripts are shared under $claude_home/bin, so one re-run restores
+    # them for every wired project: print one command, list the others (#194).
+    IFS=$'\t' read -r rp rn <<< "$(printf '%s\n' "$list" | head -n 1)"
+    flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
+    echo "        Re-run ./install.sh --scope project --project $(shq "$rp")$flag from a persistent clone (not a /tmp checkout)."
+    echo "        The scripts are shared by every wired project, so that one run repairs all $n:"
     while IFS=$'\t' read -r rp rn; do
       [[ -n "$rp" ]] || continue
-      flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
-      echo "          ./install.sh --scope project --project $(shq "$rp")$flag"
+      echo "          $rp"
     done <<< "$list"
   else
     echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)."
@@ -1906,16 +1947,20 @@ doctor() {
     else
       echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
     fi
-    # Model context-window check — advisory only, never counts toward broken:
-    # a bare 'opus'/'claude-opus-4-8' pin silently runs at a 200k context
-    # window; the 1M variant needs the [1m] suffix. Any other value (including
-    # absent) is a legitimate choice we stay quiet about.
+    # Model context-window check: advisory only, never counts toward broken.
+    # Only an id whose window depends on the variant picked is worth a WARN:
+    # Opus 4.6 and Sonnet 4.6 run at 200k unless the [1m] variant is chosen,
+    # which the bare id does not record. Opus 4.7 and later (including the
+    # bare `opus` alias) default to 1M, as bin/handoff_ctx_check.sh's model
+    # table says, so they stay quiet. Any other value (including absent) is a
+    # legitimate choice we stay quiet about.
     mdl="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
     case "$mdl" in
-      opus|claude-opus-4-8)
-        echo "  WARN    model '$mdl' in settings.json is the 200k-context variant —"
-        echo "          for the 1M window set \"model\": \"${mdl}[1m]\" (edit settings.json"
-        echo "          or run /model ${mdl}[1m] in a session)."
+      claude-opus-4-6|claude-sonnet-4-6)
+        echo "  WARN    model '$mdl' in settings.json may run at a 200k context window"
+        echo "          (the id does not say which variant is picked); for the 1M window"
+        echo "          set \"model\": \"${mdl}[1m]\" (edit settings.json or run"
+        echo "          /model ${mdl}[1m] in a session)."
         ;;
     esac
     echo
@@ -1964,6 +2009,13 @@ elif [[ "$mode" == install ]]; then
     echo "  and re-run ./install.sh." >&2
     exit 1
   fi
+  if [[ -z "$repo_root" ]]; then
+    # Piped (`curl ... | bash`): there is no clone to install from, and an
+    # empty root used to surface as `cp: /bin/write_handoff.sh` (#194).
+    echo "ERROR: install.sh was read from a pipe, so there is no clone to install from." >&2
+    echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
+    exit 2
+  fi
   echo "installing handoff skill from $repo_root into $claude_home"
   echo
   echo "symlinks:"
@@ -1978,6 +2030,7 @@ elif [[ "$mode" == install ]]; then
     if [[ ! -d "$(dirname "$settings")" ]]; then
       mkdir -p "$(dirname "$settings")"
       echo "  new     $(dirname "$settings")/"
+      record_created_claude_dir
     fi
   else
     echo "settings.json:"
@@ -2041,7 +2094,7 @@ elif [[ "$scope" == project ]]; then
     echo "project settings ($project_dir):"
     echo "  ok      $project_dir no longer exists; nothing to unpatch"
     registry_remove "$project_dir" "$settings_name"
-    rm -f "$(created_marker)" 2>/dev/null || true   # no file left for it to describe
+    rm -f "$(created_marker)" "$(claude_dir_marker)" 2>/dev/null || true   # no file or dir left for them to describe
     echo
     echo "done. the repo at $repo_root is untouched."
     exit 0
@@ -2050,6 +2103,7 @@ elif [[ "$scope" == project ]]; then
   check_created_settings
   unpatch_settings
   remove_created_settings_if_empty
+  remove_created_claude_dir_if_empty
   registry_remove "$project_dir" "$settings_name"
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"

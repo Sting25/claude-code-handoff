@@ -29,6 +29,13 @@ elif [[ "$mode" == install ]]; then
     echo "  and re-run ./install.sh." >&2
     exit 1
   fi
+  if [[ -z "$repo_root" ]]; then
+    # Piped (`curl ... | bash`): there is no clone to install from, and an
+    # empty root used to surface as `cp: /bin/write_handoff.sh` (#194).
+    echo "ERROR: install.sh was read from a pipe, so there is no clone to install from." >&2
+    echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
+    exit 2
+  fi
   echo "installing handoff skill from $repo_root into $claude_home"
   echo
   echo "symlinks:"
@@ -43,6 +50,7 @@ elif [[ "$mode" == install ]]; then
     if [[ ! -d "$(dirname "$settings")" ]]; then
       mkdir -p "$(dirname "$settings")"
       echo "  new     $(dirname "$settings")/"
+      record_created_claude_dir
     fi
   else
     echo "settings.json:"
@@ -106,7 +114,7 @@ elif [[ "$scope" == project ]]; then
     echo "project settings ($project_dir):"
     echo "  ok      $project_dir no longer exists; nothing to unpatch"
     registry_remove "$project_dir" "$settings_name"
-    rm -f "$(created_marker)" 2>/dev/null || true   # no file left for it to describe
+    rm -f "$(created_marker)" "$(claude_dir_marker)" 2>/dev/null || true   # no file or dir left for them to describe
     echo
     echo "done. the repo at $repo_root is untouched."
     exit 0
@@ -115,6 +123,7 @@ elif [[ "$scope" == project ]]; then
   check_created_settings
   unpatch_settings
   remove_created_settings_if_empty
+  remove_created_claude_dir_if_empty
   registry_remove "$project_dir" "$settings_name"
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
