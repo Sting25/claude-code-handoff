@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: ee98e462c4b9a0b1d3ded638af6e8dc28b2509ff7fa69c7e484663b4c90a8015
+# SOURCE-SHA256: c61a54dbab29603bae7e5910e29bbad7a18d4c023dba5f45dd2c53ce6677415d
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1806,13 +1806,18 @@ doctor() {
       # --local install checked without --local, or the reverse): say so
       # instead of leaving the line above as the only file named (#190).
       if (( use_local )); then
-        other="$project_dir/.claude/settings.json"; hint="drop --local"
+        other="$project_dir/.claude/settings.json"; hint="settings.json"
       else
-        other="$project_dir/.claude/settings.local.json"; hint="add --local"
+        other="$project_dir/.claude/settings.local.json"; hint="settings.local.json"
       fi
       if settings_has_our_hooks "$other"; then
-        echo "  note    $settings carries no handoff hooks; $other does"
-        echo "          ($hint to check that file)."
+        # Switch to the detected file BEFORE the statusLine, model and remedy
+        # checks run, so they read it and rerun_cmd carries --local exactly
+        # when the wired file is settings.local.json (D1/D2 of the #190 review).
+        echo "  note    $settings carries no handoff hooks; $other does,"
+        echo "          so this doctor run checks $hint instead (the flag named the other file)."
+        settings="$other"; settings_name="$hint"
+        if [[ "$hint" == settings.local.json ]]; then use_local=1; else use_local=0; fi
       fi
     fi
     echo
