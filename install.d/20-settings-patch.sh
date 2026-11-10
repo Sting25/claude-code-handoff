@@ -196,7 +196,7 @@ maybe_uninstall_model() {
 # printed `skip` and exited 0 with nothing wired (#174), so a jq failure is
 # fatal here, like commit_settings_tmp.
 sl_probe_fail() {
-  echo "  ERROR   jq failed (exit $1) while probing statusLine in $settings — aborting." >&2
+  echo "  ERROR   jq failed (exit $1) while probing statusLine in $settings; aborting." >&2
   echo "          statusLine was NOT wired; fix jq and re-run ./install.sh." >&2
   exit 1
 }

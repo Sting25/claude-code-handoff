@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 0e60fa2512baae69300e7dac86485949565144d32d203de449028008e6c4bc25
+# SOURCE-SHA256: c5c946b872679b9b4fca61086feea09b32a08ef6228f8a1889ecce76e84d46f7
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1013,7 +1013,7 @@ maybe_uninstall_model() {
 # printed `skip` and exited 0 with nothing wired (#174), so a jq failure is
 # fatal here, like commit_settings_tmp.
 sl_probe_fail() {
-  echo "  ERROR   jq failed (exit $1) while probing statusLine in $settings — aborting." >&2
+  echo "  ERROR   jq failed (exit $1) while probing statusLine in $settings; aborting." >&2
   echo "          statusLine was NOT wired; fix jq and re-run ./install.sh." >&2
   exit 1
 }

@@ -9,7 +9,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 echo "install.sh statusLine probe: jq failure vs foreign statusLine"
 
 if ! command -v jq >/dev/null 2>&1; then
-  skip "jq not installed — install.sh settings patching is a no-op without it"
+  skip "jq not installed, so install.sh settings patching is a no-op without it"
   finish
   exit
 fi
@@ -50,6 +50,7 @@ check "probe1 jq failure: statusLine not wired" null "$(sl)"
 
 # 2. probe 2 (ours?) fails on a foreign statusLine: same.
 FOREIGN='{"statusLine":{"type":"command","command":"echo mine"}}'
+# shellcheck disable=SC2016  # a literal jq filter the shim matches on, not a shell expansion
 run_install "$FOREIGN" '(.statusLine.command // "") | contains($m)'
 check "probe2 jq failure: exit nonzero"        yes "$([[ $RC -ne 0 ]] && echo yes || echo no)"
 check "probe2 jq failure: no 'skip statusLine'" no  "$(has "$OUT" 'skip    statusLine')"
