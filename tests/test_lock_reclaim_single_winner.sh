@@ -32,6 +32,10 @@
 #   9. (#170) The residual window of #168: A's release fails its first rmdir on
 #      B's capture, B hands the token back, A sweeps the capture. A's second
 #      pass must remove its own handed-back token and free the lock.
+#  10. (#170 review) Two reapers in turn: B hands back, then C captures the
+#      handed-back token while A sweeps. A fixed two-pass release returned
+#      with C's capture in the dir, and C's hand-back then left an ownerless
+#      token; the release must keep going until the lock is free.
 set -u
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 WH="$REPO_ROOT/bin/write_handoff.sh"
@@ -361,6 +365,51 @@ for site in wh ta; do
   check "$site hand-back window: the token handed back was A's" "$atok" \
     "$(cat "$d/oa" | awk 'NR==1{print $2}')"
   check "$site hand-back window: lock freed by A's release" no \
+    "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
+done
+
+# --- 10. two reapers in turn (the reviewer's sim) -----------------------------
+# A's release parks after its first failing rmdir (B holds a capture). B's
+# hand-back lands, A's sweep removes the capture and parks right after that
+# rm; C then captures the handed-back token. The release must still free the
+# lock; C's hand-back afterwards must find nothing to hand back.
+cat > "$shim/rm" <<SHIM
+#!/usr/bin/env bash
+"$(command -v rm)" "\$@"; rc=\$?
+case "\$*" in
+  *owner.reap.*)
+    if [[ -n "\${RACE_RM_HOLD:-}" && ! -e "\${RACE_RM_HOLD}.passed" ]]; then
+      : > "\${RACE_RM_HOLD}.parked"
+      n=0
+      while [[ ! -e "\$RACE_RM_HOLD" ]] && (( n < 1000 )); do
+        sleep 0.01 2>/dev/null || sleep 1; n=\$((n + 1))
+      done
+      : > "\${RACE_RM_HOLD}.passed"
+    fi ;;
+esac
+exit \$rc
+SHIM
+chmod +x "$shim/rm"
+for site in wh ta; do
+  d="$work/two.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  PATH="$shim:$PATH" RACE_RMDIR_HOLD="$d/r_go" RACE_RM_HOLD="$d/m_go" HOLD_WON="$d/a_won" HOLD_REL="$d/a_rel" \
+    bash "$drv" "$funcs" "$site-hold" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null & pa=$!
+  wait_for "$d/a_won"
+  mv "$lock/owner" "$lock/owner.reap.B"             # B captures A's token
+  : > "$d/a_rel"
+  parked=no; wait_for "$d/r_go.parked" && parked=yes
+  check "$site two reapers: release parked after its first rmdir" yes "$parked"
+  ln "$lock/owner.reap.B" "$lock/owner"              # B hands back
+  : > "$d/r_go"
+  parked=no; wait_for "$d/m_go.parked" && parked=yes
+  check "$site two reapers: release parked after sweeping B's capture" yes "$parked"
+  [[ -e "$lock/owner" ]] && mv "$lock/owner" "$lock/owner.reap.C"   # C captures it
+  : > "$d/m_go"; wait "$pa"
+  # C's hand-back: only possible if its capture survived the release.
+  if [[ -e "$lock/owner.reap.C" ]]; then
+    ln "$lock/owner.reap.C" "$lock/owner" 2>/dev/null && rm -f "$lock/owner.reap.C"
+  fi
+  check "$site two reapers: lock freed, no ownerless token left" no \
     "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
 done
 
