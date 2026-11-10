@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 8bf0dffeaa42387942cc3a2da3bb744bf9b59880176f2b1ab9348c9cfb3ad6b4
+# SOURCE-SHA256: 12baee5afeb0568ca364375f658b9a3ba3e834ab69a77d428be9c640e31b06c0
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -2144,7 +2144,7 @@ doctor() {
   if (( sh_jq_failed )); then
     # Exits non-zero (owner decision, see the PR for #187): a jq failure means
     # some state above is unknown, which a clean exit would hide from CI.
-    echo "doctor: jq failed while reading settings (see WARN above); fix jq and re-run ./install.sh --doctor." >&2
+    echo "doctor: ${sh_jq_failed_why:-jq failed} while reading settings (see WARN above); fix it and re-run ./install.sh --doctor." >&2
     return 1
   fi
   echo "doctor: all hooks resolve."

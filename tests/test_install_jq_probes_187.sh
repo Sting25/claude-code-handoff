@@ -533,6 +533,16 @@ else
   check "two unreadable project files, doctor: exit nonzero"   yes "$(nz $RC)"
   check "two unreadable project files, doctor: two WARNs"      2   "$(printf '%s\n' "$ERR" | grep -c 'cannot be read (check its permissions)')"
   check "two unreadable project files, doctor: neither stale"  no  "$(has "$OUT" 'stale project registry entries')"
+  check "two unreadable project files, doctor: closing line names the cause" yes "$(has "$ERR" 'doctor: permission denied while reading settings')"
+  # Run from inside one unreadable project: the doctor's own cwd probe flags
+  # it before the registry scan, which must still leave it out of the list.
+  chmod 000 "$HOME_DIR/proj/.claude/settings.json" "$HOME_DIR/proj2/.claude/settings.json"
+  pushd "$HOME_DIR/proj" >/dev/null
+  run_sh "" --doctor
+  popd >/dev/null
+  chmod 600 "$HOME_DIR/proj/.claude/settings.json" "$HOME_DIR/proj2/.claude/settings.json"
+  check "doctor inside an unreadable project: exit nonzero"    yes "$(nz $RC)"
+  check "doctor inside an unreadable project: neither stale"   no  "$(has "$OUT" 'stale project registry entries')"
 fi
 # 19g. Project-scope --uninstall on a project file this process cannot read:
 #      the same ERROR and exit 1, registry line and file kept. It used to die

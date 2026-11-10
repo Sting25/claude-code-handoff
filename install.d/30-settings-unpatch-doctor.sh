@@ -1014,7 +1014,7 @@ doctor() {
   if (( sh_jq_failed )); then
     # Exits non-zero (owner decision, see the PR for #187): a jq failure means
     # some state above is unknown, which a clean exit would hide from CI.
-    echo "doctor: jq failed while reading settings (see WARN above); fix jq and re-run ./install.sh --doctor." >&2
+    echo "doctor: ${sh_jq_failed_why:-jq failed} while reading settings (see WARN above); fix it and re-run ./install.sh --doctor." >&2
     return 1
   fi
   echo "doctor: all hooks resolve."
