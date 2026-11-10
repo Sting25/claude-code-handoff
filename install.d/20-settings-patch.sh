@@ -190,11 +190,14 @@ maybe_uninstall_model() {
 #     "padding") survive.
 #   - present and NOT ours   -> untouched; print the documented manual step.
 #
-# Each probe is a `jq -e`: exit 0 = true, 1 = false/null (a real answer), and
-# anything else (2 usage, 3 compile, 4 no output, 5 runtime, 127 missing, a
-# signal) = jq itself failed. Treating "not 0" as "a foreign statusLine exists"
+# Each probe is a `jq -e`: exit 0 = true, 1 = false/null (a real answer). The
+# filters are written to be TOTAL (the `?` and the type guard make a statusLine
+# that is a string, an array, or has a non-string .command evaluate to a plain
+# answer instead of a runtime error), so for valid settings JSON an exit of 2 or
+# more can only mean jq itself failed (usage, compile, no output, runtime,
+# missing binary, a signal). Treating "not 0" as "a foreign statusLine exists"
 # printed `skip` and exited 0 with nothing wired (#174), so a jq failure is
-# fatal here, like commit_settings_tmp.
+# fatal here, like commit_settings_tmp. Keep the filters total if you edit them.
 sl_probe_fail() {
   echo "  ERROR   jq failed (exit $1) while probing statusLine in $settings; aborting." >&2
   echo "          statusLine was NOT wired; fix jq and re-run ./install.sh." >&2
@@ -202,7 +205,7 @@ sl_probe_fail() {
 }
 maybe_install_statusline() {
   local rc=0
-  jq -e '(.statusLine // null) == null' "$settings" >/dev/null 2>&1 || rc=$?
+  jq -e '(.statusLine? // null) == null' "$settings" >/dev/null 2>&1 || rc=$?
   if [[ $rc -gt 1 ]]; then sl_probe_fail "$rc"; fi
   if [[ $rc -eq 0 ]]; then
     jq --arg c "$sl_cmd" '.statusLine = {"type": "command", "command": $c}' \
@@ -212,7 +215,8 @@ maybe_install_statusline() {
     return
   fi
   rc=0
-  jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
+  jq -e --arg m "$sl_marker" \
+    '(.statusLine.command? // "") | (type == "string" and contains($m))' \
     "$settings" >/dev/null 2>&1 || rc=$?
   if [[ $rc -gt 1 ]]; then sl_probe_fail "$rc"; fi
   if [[ $rc -eq 0 ]]; then

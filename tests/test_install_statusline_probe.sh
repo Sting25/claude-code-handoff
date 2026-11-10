@@ -26,12 +26,13 @@ chmod +x "$SHIM/jq"
 SRC="$(mktemp -d)"
 cp "$REPO_ROOT/install.sh" "$SRC/"
 cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$SRC/"
-trap 'rm -rf "$SHIM" "$SRC" "${HOME_DIR:-}"' EXIT
+HOMES=()
+trap 'rm -rf "$SHIM" "$SRC" ${HOMES[@]+"${HOMES[@]}"}' EXIT
 
 HOME_DIR=""
 # run_install <init-settings-json> <fail-match|""> ; sets RC, OUT, ERR, HOME_DIR.
 run_install() {
-  HOME_DIR="$(mktemp -d)"
+  HOME_DIR="$(mktemp -d)"; HOMES+=("$HOME_DIR")
   printf '%s' "$1" > "$HOME_DIR/settings.json"
   OUT="$(FAIL_JQ_MATCH="$2" PATH="$SHIM:$PATH" CLAUDE_HOME="$HOME_DIR" \
     bash "$SRC/install.sh" 2>"$HOME_DIR/err" </dev/null)"
@@ -42,7 +43,7 @@ sl() { jq -c '.statusLine // null' "$HOME_DIR/settings.json"; }
 has() { [[ "$1" == *"$2"* ]] && echo yes || echo no; }
 
 # 1. probe 1 (absent/null?) fails: install must fail loudly, not skip.
-run_install '{}' '(.statusLine // null) == null'
+run_install '{}' '(.statusLine? // null) == null'
 check "probe1 jq failure: exit nonzero"        yes "$([[ $RC -ne 0 ]] && echo yes || echo no)"
 check "probe1 jq failure: no 'skip statusLine'" no  "$(has "$OUT" 'skip    statusLine')"
 check "probe1 jq failure: ERROR on stderr"      yes "$(has "$ERR" 'jq failed (exit 5) while probing statusLine')"
@@ -50,18 +51,28 @@ check "probe1 jq failure: statusLine not wired" null "$(sl)"
 
 # 2. probe 2 (ours?) fails on a foreign statusLine: same.
 FOREIGN='{"statusLine":{"type":"command","command":"echo mine"}}'
-# shellcheck disable=SC2016  # a literal jq filter the shim matches on, not a shell expansion
-run_install "$FOREIGN" '(.statusLine.command // "") | contains($m)'
+run_install "$FOREIGN" "contains(\$m)"
 check "probe2 jq failure: exit nonzero"        yes "$([[ $RC -ne 0 ]] && echo yes || echo no)"
 check "probe2 jq failure: no 'skip statusLine'" no  "$(has "$OUT" 'skip    statusLine')"
 check "probe2 jq failure: ERROR on stderr"      yes "$(has "$ERR" 'jq failed (exit 5) while probing statusLine')"
 check "probe2 jq failure: foreign untouched"   '{"type":"command","command":"echo mine"}' "$(sl)"
+check "probe2 jq failure: hooks rolled back"   null "$(jq -c '.hooks // null' "$HOME_DIR/settings.json")"
+check "probe2 jq failure: backup left behind"  yes "$([[ -n "$(ls "$HOME_DIR"/settings.json.bak* "$HOME_DIR"/*backup* 2>/dev/null)" ]] && echo yes || echo no)"
 
 # 3. genuine foreign statusLine, healthy jq: still a skip, exit 0, untouched.
 run_install "$FOREIGN" ""
 check "foreign statusLine: exit 0"             0   "$RC"
 check "foreign statusLine: prints skip"        yes "$(has "$OUT" 'skip    statusLine')"
 check "foreign statusLine: untouched"          '{"type":"command","command":"echo mine"}' "$(sl)"
+
+# 3b. non-string statusLine shapes are foreign too (probe must not error).
+for shape in '"x"' '{"command":42}' '[]'; do
+  run_install "{\"statusLine\":$shape}" ""
+  check "shape $shape: exit 0"        0   "$RC"
+  check "shape $shape: prints skip"   yes "$(has "$OUT" 'skip    statusLine')"
+  check "shape $shape: untouched"     "$shape" "$(sl)"
+  check "shape $shape: hooks wired"   7   "$(jq '[.hooks[]] | length' "$HOME_DIR/settings.json")"
+done
 
 # 4. healthy jq, no statusLine: wired.
 run_install '{}' ""
