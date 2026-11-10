@@ -616,14 +616,35 @@ claim_mkdir_lock() {  # <lock_dir>; 0 = this process owns the lock
 # repo meanwhile. Never through a symlink (the lock dir is ours, but stay
 # consistent with the acquisition guard).
 release_mkdir_lock() {  # <lock_dir>
-  [[ -L "$1" ]] && return 0
-  rm -f "$1/owner" 2>/dev/null || true
-  rmdir "$1" 2>/dev/null && return 0
-  # Still there: a stale reclaimer may hold a capture of our token
-  # (owner.reap.*, see the reclaim below). Remove captures and retry, so the
-  # lock is freed now and the reclaimer finds nothing to hand back.
-  rm -f "$1"/owner.reap.* 2>/dev/null || true
-  rmdir "$1" 2>/dev/null || true
+  local lock_dir="$1" tok f pass
+  [[ -L "$lock_dir" ]] && return 0
+  # Only ever remove OUR OWN token (#170). The token holds the owner's pid and
+  # this process's $$ is the proof of ownership; a token with any other
+  # content belongs to a later owner and is left alone, so a release that
+  # runs after the lock changed hands cannot free it from under them. Two
+  # passes: pass 1 is the ordinary release; pass 2 runs after our token's
+  # captures are swept and catches the window where a stale reclaimer
+  # captured our token, we swept the capture, and it then handed the token
+  # back (hard link) into the dir, which would otherwise leave an ownerless
+  # token holding the lock for a whole staleness window.
+  for pass in 1 2; do
+    if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then
+      tok=""; read -r tok < "$lock_dir/owner" 2>/dev/null || true
+      if [[ "$tok" == "$$" ]]; then rm -f "$lock_dir/owner" 2>/dev/null || true; fi
+    fi
+    rmdir "$lock_dir" 2>/dev/null && return 0
+    # Still there: a stale reclaimer may hold a capture of our token
+    # (owner.reap.*, see the reclaim below). Remove OUR captures (a capture
+    # of someone else's token is theirs) so the lock is freed now and the
+    # reclaimer finds nothing to hand back.
+    if (( pass == 1 )); then
+      for f in "$lock_dir"/owner.reap.*; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        tok=""; read -r tok < "$f" 2>/dev/null || true
+        if [[ "$tok" == "$$" ]]; then rm -f "$f" 2>/dev/null || true; fi
+      done
+    fi
+  done
 }
 # Stale reclaim, single winner (#155). Shared idiom with handoff_turn_append.sh's
 # ta_reclaim_stale_lock (keep the two bodies in sync). Returns 0 with the lock

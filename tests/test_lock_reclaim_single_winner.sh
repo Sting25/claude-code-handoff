@@ -27,6 +27,11 @@
 #      still remove the lock, and B must not leave A's token behind.
 #   7. A hand-back blocked by a token that appeared meanwhile is reported on
 #      stderr and never replaces that token.
+#   8. (#170) A release by a process that does not own the token leaves the
+#      owner's lock, and captures of other owners' tokens, untouched.
+#   9. (#170) The residual window of #168: A's release fails its first rmdir on
+#      B's capture, B hands the token back, A sweeps the capture. A's second
+#      pass must remove its own handed-back token and free the lock.
 set -u
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 WH="$REPO_ROOT/bin/write_handoff.sh"
@@ -66,6 +71,17 @@ fi
 case "$site" in
   wh) try_mkdir_lock "$lock"; rc=$? ;;
   ta) { mkdir "$lock" 2>/dev/null && ta_claim_lock "$lock"; } || ta_reclaim_stale_lock "$lock"; rc=$? ;;
+  wh-hold|ta-hold)
+    # Acquire (by reclaim if stale), announce, wait, then release, all in
+    # THIS process: the token is the pid, so only the process that took the
+    # lock can prove it owns it (#170).
+    if [[ "$site" == wh-hold ]]; then try_mkdir_lock "$lock"
+    else { mkdir "$lock" 2>/dev/null && ta_claim_lock "$lock"; } || ta_reclaim_stale_lock "$lock"; fi
+    rc=$?
+    : > "$HOLD_WON"
+    n=0; until [[ -e "$HOLD_REL" ]] || (( n > 1000 )); do sleep 0.01 2>/dev/null || sleep 1; n=$((n + 1)); done
+    if [[ "$site" == wh-hold ]]; then release_mkdir_lock "$lock"; else ta_release_lock "$lock"; fi
+    ;;
   wh-release) release_mkdir_lock "$lock"; rc=$? ;;
   ta-release) ta_release_lock "$lock"; rc=$? ;;
   *)  rc=99 ;;
@@ -263,11 +279,13 @@ for site in wh ta; do
   PATH="$shim:$PATH" RACE_HOLD_UNTIL="$d/b_go" RACE_MV_HOLD="$d/b_mv" \
     bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/ob" 2>"$d/eb" </dev/null & pb=$!
   wait_for "$d/b_go.parked"
-  bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null
+  HOLD_WON="$d/a_won" HOLD_REL="$d/a_rel" \
+    bash "$drv" "$funcs" "$site-hold" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null & pa=$!
+  wait_for "$d/a_won"
   : > "$d/b_go"
   parked=no; wait_for "$d/b_mv.parked" && parked=yes
   check "$site release: B parked holding A's token" yes "$parked"
-  bash "$drv" "$funcs" "$site-release" "$lock" "" "" "" >/dev/null 2>&1 </dev/null
+  : > "$d/a_rel"; wait "$pa"
   : > "$d/b_mv"; wait "$pb"
   read -r rca _ < "$d/oa"; read -r rcb _ < "$d/ob"
   check "$site release: A won, B missed" "0 1" "$rca $rcb"
@@ -292,6 +310,58 @@ for site in wh ta; do
   check "$site blocked hand-back: the newer token is not replaced" 777 "$(cat "$lock/owner")"
   check "$site blocked hand-back: one stderr line" 1 \
     "$(grep -c 'could not hand a live holder' "$d/eb")"
+done
+
+# --- 8. a release by a non-owner leaves the owner's lock alone (#170) ----------
+for site in wh ta; do
+  d="$work/nonowner.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  mkdir "$lock" && echo 777 > "$lock/owner" && echo 555 > "$lock/owner.reap.other"
+  bash "$drv" "$funcs" "$site-release" "$lock" "" "" "" > "$d/o" 2>"$d/e" </dev/null
+  check "$site non-owner release: owner's token intact" 777 "$(cat "$lock/owner" 2>/dev/null)"
+  check "$site non-owner release: other owner's capture intact" 555 "$(cat "$lock/owner.reap.other" 2>/dev/null)"
+  check "$site non-owner release: lock dir still there" yes \
+    "$([[ -d "$lock" ]] && echo yes || echo no)"
+  check "$site non-owner release: silent" "" "$(cat "$d/e")"
+done
+
+# --- 9. residual window of #168: hand-back after the release's first rmdir ---
+# A holds the lock; B has captured A's token (owner.reap.*) and is about to
+# hand it back. A's release runs its first rmdir (fails on the capture) and
+# parks; the hand-back lands (hard link, as the reclaim does); A then sweeps
+# the capture and its rmdir fails on the handed-back token. The lock must
+# still be freed, which needs a second pass that removes A's OWN token.
+# An rmdir shim parks the release right after its first failing rmdir.
+cat > "$shim/rmdir" <<SHIM
+#!/usr/bin/env bash
+"$(command -v rmdir)" "\$@"; rc=\$?
+if [[ -n "\${RACE_RMDIR_HOLD:-}" && \$rc -ne 0 && ! -e "\${RACE_RMDIR_HOLD}.passed" ]]; then
+  : > "\${RACE_RMDIR_HOLD}.parked"
+  n=0
+  while [[ ! -e "\$RACE_RMDIR_HOLD" ]] && (( n < 1000 )); do
+    sleep 0.01 2>/dev/null || sleep 1; n=\$((n + 1))
+  done
+  : > "\${RACE_RMDIR_HOLD}.passed"
+fi
+exit \$rc
+SHIM
+chmod +x "$shim/rmdir"
+for site in wh ta; do
+  d="$work/handback.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  PATH="$shim:$PATH" RACE_RMDIR_HOLD="$d/r_go" HOLD_WON="$d/a_won" HOLD_REL="$d/a_rel" \
+    bash "$drv" "$funcs" "$site-hold" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null & pa=$!
+  wait_for "$d/a_won"
+  atok="$(cat "$lock/owner")"
+  # B's capture of A's token, as the reclaim leaves it mid-flight.
+  mv "$lock/owner" "$lock/owner.reap.B.1"
+  : > "$d/a_rel"
+  parked=no; wait_for "$d/r_go.parked" && parked=yes
+  check "$site hand-back window: release parked after its first rmdir" yes "$parked"
+  ln "$lock/owner.reap.B.1" "$lock/owner"          # B's hand-back lands
+  : > "$d/r_go"; wait "$pa"
+  check "$site hand-back window: the token handed back was A's" "$atok" \
+    "$(cat "$d/oa" | awk 'NR==1{print $2}')"
+  check "$site hand-back window: lock freed by A's release" no \
+    "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
 done
 
 finish
