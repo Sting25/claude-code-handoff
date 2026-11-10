@@ -143,7 +143,7 @@ check "D2: gone uninstall exit 0" 0 "$RC"
 check "D2: registry line cleared" "" "$(cat "$H/.claude/handoff_projects" 2>/dev/null)"
 check "D2: no marker left behind" 0 "$(nmarkers)"
 
-# --- E. symlinked settings, stale marker, both files -------------------------------------------
+# --- E. symlinked settings, recreated directory, both files -------------------------------------------
 # E1: settings.json is a symlink into a dotfiles directory.
 fresh_sandbox
 DOT="$(mktemp -d)"; cleanup_on_exit "$DOT"; DOT="$(cd "$DOT" && pwd -P)"
@@ -159,7 +159,7 @@ check "E1: no 'installer created it' for the dotfiles dir" no "$(has "$OUT" "rem
 check "E1: no 'this installer created it; it is empty' line" no "$(has "$OUT" "it is empty")"
 check "E1: no marker left behind" 0 "$(nmarkers)"
 
-# E2: the marker must not outlive the directory.
+# E2: a directory the user recreated survives.
 fresh_sandbox
 inst --scope project --project "$P"
 printf 'mine\n' > "$P/.claude/notes.txt"
@@ -171,7 +171,7 @@ inst --uninstall --scope project --project "$P"
 check "E2: the user's recreated .claude survives" yes "$(exists "$P/.claude")"
 check "E2: no 'installer created it; it is empty'" no "$(has "$OUT" "it is empty")"
 
-# E3: both files wired, uninstalled in order; the marker waits for the last one.
+# E3: both files wired, uninstalled in order; the directory stays.
 fresh_sandbox
 inst --scope project --project "$P"
 inst --scope project --project "$P" --local
@@ -312,9 +312,13 @@ check "J legacy: created settings file still removed" no "$(exists "$P/.claude/s
 check "J legacy: .claude kept" yes "$(exists "$P/.claude")"
 
 # --- K. a recreated .claude is never removed -------------------------------------------------------------
-# K: the directory is EMPTY, the case an identity check could get wrong on a
-# coarse filesystem (an rmdir would succeed here, so this is the case that
-# guards the drop); K2: the same with a file of the user's inside.
+# K pins the owner's scenario with the directory EMPTY (the case an identity
+# check could get wrong on a coarse filesystem); K2 the same with a file of
+# the user's inside. On the filesystems this suite runs on the old identity
+# check would also have refused, so these two stay green either way: the
+# checks that go red if the uninstall rmdir returns are A1, A2, E3, J, L1 and
+# L2 (an empty .claude/ exists right after the uninstall), and H for the
+# abort-trap rmdir.
 fresh_sandbox
 inst --scope project --project "$P"
 rm -rf "$P/.claude"; mkdir "$P/.claude"   # the user's own, empty, directory now

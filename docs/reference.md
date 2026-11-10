@@ -1103,8 +1103,10 @@ the install warns and the uninstall leaves the skeleton. The
 `<project>/.claude/` directory itself is never removed, even when the
 install created it and it is empty: on some filesystems (FAT32) a
 directory's identity cannot tell it from one you removed and recreated.
-The record is trusted only when the backup directory's `path` file names
-the project, since two paths can share a cksum key. An install refuses a
+The record is trusted when the backup directory's `path` file names the
+project, or when that file is absent (an install from before it existed);
+a `path` file naming another project is left alone, since two paths can
+share a cksum key. An install refuses a
 dangling `.claude` link, or a settings file linked into a directory that
 does not exist, before copying anything. An uninstall that cannot finish
 (invalid JSON in the settings file, no jq) keeps the records and the
