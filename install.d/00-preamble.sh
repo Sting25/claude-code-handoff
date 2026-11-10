@@ -82,15 +82,20 @@ USAGE
 # unaffected, and hooks run via `bash <path>` so the copies need no exec bit.
 umask 077
 
-# `2>/dev/null` + `|| repo_root=""` fallback: same guard bin/*.sh already uses
-# around every other BASH_SOURCE[0] resolution in this repo. Needed here too —
-# under `curl ... | bash -s -- --help`, BASH_SOURCE[0] has no element to read,
-# which trips `set -u` as "unbound variable" and prints it to stderr before
-# this line's own fallback is reached. `--help`/`-h` (parsed further below)
-# exits via usage() before repo_root is ever used, so an empty fallback here
-# is safe for that path; every other invocation shape still resolves a real
-# BASH_SOURCE[0] and this fallback never engages.
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || repo_root=""
+# Under `curl ... | bash -s -- --help`, BASH_SOURCE[0] has no element to read,
+# which trips `set -u` as "unbound variable". The error is raised while the
+# command substitution's own words expand, so a `2>/dev/null` on the `cd`
+# inside it cannot hide it (issue #178). Read the element with a `:-` default
+# first, and only resolve a path when there is one. `--help`/`-h` (parsed
+# further below) exits via usage() before repo_root is ever used, so an empty
+# value is safe for that path; every other invocation shape still resolves a
+# real BASH_SOURCE[0]. (An empty value must stay empty: `dirname ""` is "."
+# and would silently turn the caller's cwd into the repo root.)
+_self_src="${BASH_SOURCE[0]:-}"
+repo_root=""
+if [[ -n "$_self_src" ]]; then
+  repo_root="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || repo_root=""
+fi
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
 # The user-scope file, kept separately because project scope (issue #171)
@@ -201,8 +206,8 @@ resolve_symlink() {  # <path> -> physical path on stdout
 # armed only between the backup and the successful end of the sequence.
 settings_backup=""
 patch_in_progress=0
-# Project scope only (issue #171): a settings file this run seeded as {}
-# gets no backup (there was nothing to keep), so an abort puts back what
+# A settings file this run seeded as {} (issue #171; both scopes since
+# issue #178) gets no backup (there was nothing to keep), so an abort puts back what
 # was there before instead: "absent" removes the file, "empty" truncates it.
 settings_seed_state=""
 cleanup() {
@@ -375,7 +380,8 @@ if [[ "$scope" == project ]] && (( ! project_gone )); then
      || { [[ -d "$_proj_claude" && -d "$claude_home" ]] \
           && [[ "$(cd "$_proj_claude" && pwd -P)" == "$(cd "$claude_home" && pwd -P)" ]]; }; then
     echo "ERROR: project '$project_dir' has $claude_home as its .claude directory, which is the user-scope config; refusing." >&2
-    echo "       Use --scope user to patch $user_settings." >&2
+    echo "       Use --scope user to patch $user_settings, or pass --project <dir> to wire one project" >&2
+    echo "       (for example: ./install.sh --scope project --project ~/code/myapp)." >&2
     exit 2
   fi
 fi
@@ -390,7 +396,14 @@ if [[ "$scope" == project ]]; then
   # Project-scope backups live OUTSIDE the project (a .bak next to a tracked
   # settings.json is one `git add .` from being committed), one directory
   # per project keyed by a cksum of its physical path.
-  project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$project_dir" | cksum | awk '{print $1}')"
+  # A vanished project (--uninstall of a removed worktree) cannot be
+  # resolved with pwd -P, so its parent is: the key must match the one the
+  # install used (issue #178), or the created-file marker would be orphaned.
+  _key_dir="$project_dir"
+  if (( project_gone )) && [[ -d "$(dirname "$project_dir")" ]]; then
+    _key_dir="$(cd "$(dirname "$project_dir")" && pwd -P)/$(basename "$project_dir")"
+  fi
+  project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$_key_dir" | cksum | awk '{print $1}')"
   # A project-scope --uninstall never touches the secret (see 40-main.sh),
   # so --keep-secret is a no-op there too; say so, same as issue #82.
   if (( keep_secret || remove_secret )) && [[ "$mode" == uninstall ]]; then
@@ -447,7 +460,7 @@ fi
   pc_cmd="$se_cmd"
   # PostCompact: clear the per-session ctx sidecars so the freed window is
   # treated as session-start fresh (stale-high numbers can't nudge, and the
-  # once-per-session nudge cap re-arms). Only fires on CC >= 2.1.76.
+  # nudge cadence starts over). Only fires on CC >= 2.1.76.
   post_cmd='bash $HOME/.claude/bin/handoff_compact_reset.sh 2>/dev/null || true'
   # WorktreeRemove (#142): salvage a removed worktree's handoff and raw dumps
   # into the main checkout. Fires on CC >= 2.1.300, only for worktrees Claude

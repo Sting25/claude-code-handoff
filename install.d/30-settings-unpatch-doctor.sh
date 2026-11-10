@@ -121,6 +121,109 @@ take_settings_backup() {
   echo "  backup  $settings -> $settings_backup"
 }
 
+# Project scope (issue #178): remember that THIS installer created the
+# project settings file, so a later --uninstall can remove it again once
+# nothing but our own empty residue is left in it. The marker holds a
+# fingerprint (cksum) of the file as the install left it, so it is bound to
+# that file: a file the user deleted and rewrote, or a new project at the
+# same path, never matches. Only a file that did not exist is recorded; a
+# reinstall over an existing file keeps the marker only while the file is
+# still byte-identical to what the marker was written for, and otherwise
+# drops it. Writing the marker is best effort: failing to write it must not
+# fail an install whose wiring is already in place.
+created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
+settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
+  [[ -f "$1" && ! -L "$1" ]] || return 0
+  cksum < "$1" 2>/dev/null | awk '{print $1 " " $2}'
+}
+# Fingerprint of the settings file before this run's patch touches it.
+pre_patch_fp=""
+record_created_settings() {
+  [[ "$scope" == project ]] || return 0
+  local m stored
+  m="$(created_marker)"
+  if [[ "$settings_seed_state" == absent ]]; then
+    if ! ( mkdir -p "$project_backup_dir" && settings_fp "$settings" > "$m" ) 2>/dev/null; then
+      echo "  WARN    cannot record the created-file marker in $project_backup_dir;"
+      echo "          --uninstall will leave $settings as an empty skeleton"
+    fi
+    return 0
+  fi
+  [[ -f "$m" && ! -L "$m" ]] || return 0
+  stored="$(cat "$m" 2>/dev/null || true)"
+  if [[ -n "$pre_patch_fp" && "$pre_patch_fp" == "$stored" ]]; then
+    settings_fp "$settings" > "$m" 2>/dev/null || true
+  else
+    rm -f "$m" 2>/dev/null || true
+  fi
+}
+
+# jq test: the file holds nothing but the empty hooks/permissions skeleton
+# (exact: $1 = exact) or that skeleton plus nothing (loose, after a strip).
+settings_is_skeleton() {  # <file> <exact|loose>
+  [[ -f "$1" && ! -L "$1" ]] && command -v jq >/dev/null 2>&1 || return 1
+  if [[ "$2" == exact ]]; then
+    jq -e '. == {"hooks":{},"permissions":{"allow":[]}}' "$1" >/dev/null 2>&1
+  else
+    jq -e '
+      (if (.hooks // {}) == {} then del(.hooks) else . end)
+      | (if (.permissions.allow // []) == [] then del(.permissions.allow) else . end)
+      | (if (.permissions // {}) == {} then del(.permissions) else . end)
+      | . == {}' "$1" >/dev/null 2>&1
+  fi
+}
+
+# Project-scope --uninstall, step 1 (before the strip): decide whether this
+# file is the one the marker was written for: byte-identical to what this
+# installer last wrote. Nothing else qualifies (a hand-written skeleton does
+# not). Sets created_pre_ok.
+created_pre_ok=0
+check_created_settings() {
+  local m stored cur
+  m="$(created_marker)"
+  [[ -f "$m" && ! -L "$m" ]] || return 0
+  stored="$(cat "$m" 2>/dev/null || true)"
+  cur="$(settings_fp "$settings")"
+  if [[ -n "$cur" && "$cur" == "$stored" ]]; then
+    created_pre_ok=1
+  fi
+}
+
+# True when git tracks <file> in whatever repository holds it. Asked from the
+# file's own directory (not the project's), so a .claude/ symlinked into a
+# dotfiles repo, or a monorepo above the project, is seen too. A symlinked
+# file is checked at its resolved target as well.
+git_tracks_file() {
+  local f="$1" t
+  command -v git >/dev/null 2>&1 || return 1
+  git -C "$(dirname "$f")" ls-files --error-unmatch -- "$(basename "$f")" >/dev/null 2>&1 && return 0
+  if [[ -L "$f" ]]; then
+    t="$(readlink "$f" 2>/dev/null || true)"
+    case "$t" in /*) ;; *) t="$(dirname "$f")/$t" ;; esac
+    [[ -n "$t" && -d "$(dirname "$t")" ]] \
+      && git -C "$(dirname "$t")" ls-files --error-unmatch -- "$(basename "$t")" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+# Step 2 (after the strip): delete the file only when the marker matched, the
+# strip left nothing but the empty skeleton, and no git repository tracks it
+# (a tracked file would show up as a deletion). The marker is consumed either way.
+remove_created_settings_if_empty() {
+  local m
+  m="$(created_marker)"
+  [[ -f "$m" && ! -L "$m" ]] || return 0
+  if (( created_pre_ok )) && settings_is_skeleton "$settings" loose; then
+    if git_tracks_file "$settings"; then
+      echo "  keep    $settings (tracked by git; left as the empty skeleton)"
+    else
+      rm -f "$settings"
+      echo "  remove  $settings (this installer created it; nothing else was ever written to it)"
+    fi
+  fi
+  rm -f "$m"
+}
+
 patch_settings() {
   if ! command -v jq >/dev/null 2>&1; then
     echo
@@ -128,10 +231,11 @@ patch_settings() {
     print_manual_snippet
     return
   fi
+  pre_patch_fp="$(settings_fp "$settings")"
   ensure_settings_json || return
-  if [[ "$scope" == project && -n "$settings_seed_state" ]]; then
-    # Project scope never backs up a file this run just seeded as {}: there
-    # is nothing to keep, and cleanup() undoes the seed itself on abort.
+  if [[ -n "$settings_seed_state" ]]; then
+    # Neither scope backs up a file this run just seeded as {}: there is
+    # nothing to keep, and cleanup() undoes the seed itself on abort.
     settings_backup=""
     echo "  ok      no backup needed ($settings was just created; an abort undoes that)"
   else
@@ -160,6 +264,7 @@ patch_settings() {
   maybe_install_perm "$perm_wr"
   maybe_install_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
+  record_created_settings
   # If no change vs backup, drop the redundant backup.
   if [[ -n "$settings_backup" ]] && cmp -s "$settings" "$settings_backup"; then
     rm "$settings_backup"
@@ -320,6 +425,41 @@ rerun_cmd() {
     fi
   fi
   printf '%s\n' "./install.sh"
+}
+
+# The doctor's closing remedy. When the user file is unwired and the only
+# wiring is in several registered projects, a single command would leave the
+# others broken, so it prints one command per wired project (issue #178).
+# Every other case keeps the one-line form.
+rerun_remedy() {
+  local list n rp rn flag proj tab nl line
+  list=""
+  if [[ "$scope" != project ]] && ! settings_has_our_hooks "$user_settings"; then
+    proj="$(wiring_project_root)"
+    list="$(registry_scan wired)"
+    # The project the doctor runs in counts even when it is not registered.
+    tab=$'\t'; nl=$'\n'
+    for rn in settings.json settings.local.json; do
+      line="$proj$tab$rn"
+      if settings_has_our_hooks "$proj/.claude/$rn"; then
+        if ! printf '%s\n' "$list" | grep -Fxq -- "$line"; then
+          if [[ -n "$list" ]]; then list="$line$nl$list"; else list="$line"; fi
+        fi
+      fi
+    done
+  fi
+  n=0
+  if [[ -n "$list" ]]; then n="$(printf '%s\n' "$list" | wc -l | tr -d ' ')"; fi
+  if (( n > 1 )); then
+    echo "        Re-run one command per wired project, from a persistent clone (not a /tmp checkout):"
+    while IFS=$'\t' read -r rp rn; do
+      [[ -n "$rp" ]] || continue
+      flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
+      echo "          ./install.sh --scope project --project $(shq "$rp")$flag"
+    done <<< "$list"
+  else
+    echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)."
+  fi
 }
 
 # Single-quote a path for a printed, copy-pasteable command (a project path
@@ -703,7 +843,7 @@ doctor() {
   report_plugin_leftover "  WARN"
   if (( broken )); then
     echo "doctor: $broken issue(s) found." >&2
-    echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)." >&2
+    rerun_remedy >&2
     return 1
   fi
   echo "doctor: all hooks resolve."

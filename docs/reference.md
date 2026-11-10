@@ -1074,7 +1074,9 @@ directory is gone (a removed worktree): it then clears the registry line
 and exits 0. Every printed command single-quotes its paths, so a project
 path with a space can be pasted as is. When the user file is unwired but
 the project (or a registered project) is, the doctor's "re-run" remedy
-names the project-scope command rather than a bare `./install.sh`.
+names the project-scope command rather than a bare `./install.sh`. When
+several registered projects are wired and the scripts are missing, the
+closing remedy prints one command per wired project.
 
 `--uninstall --scope project [--project <dir>] [--local]` strips only
 that project file (hooks, permissions, our `statusLine`, and a model pin
@@ -1084,6 +1086,18 @@ them, and it says so in its output; a user-scope `--uninstall` is the
 way to remove those. A `--model` pin in project scope is recorded in
 `~/.claude/handoff-model-pin.project.<cksum of the settings path>`, one
 record per project file, so it can never consume the user-scope record.
+When the installer itself created the project settings file (it did not
+exist before the install), the matching `--uninstall --scope project`
+deletes the file again once only the empty `hooks` and `permissions`
+skeleton is left. The install records a fingerprint of the file it
+created in `~/.claude/handoff_settings_backups/`. The uninstall deletes the
+file only when it is still byte-identical to what this installer last wrote
+(and nothing but the empty skeleton is left after the strip), and never when
+git tracks it, in the project's repository or in any other one (a dotfiles
+repo the `.claude/` directory or the file links into). A file that existed
+before the install, one you rewrote or added to since, and a tracked one
+are kept, the last as the empty skeleton. If the record cannot be written,
+the install warns and the uninstall leaves the skeleton.
 
 `--doctor --scope project` checks the project file. Claude Code runs an
 identical hook handler once even when several settings files define it,
@@ -1188,6 +1202,12 @@ still resolves (handy after moving or re-cloning the repo).
 
 Removes the symlinks and strips the patched hooks + permissions from
 settings.json (backup first). The repo itself is untouched.
+
+It leaves `~/.claude/handoff_projects` (the registry of project-scope
+installs) and `~/.claude/handoff_settings_backups/` (the project-scope
+backups and the records of files this installer created) in place on
+purpose: they hold the state of project-scope installs, which a user-scope
+uninstall does not remove. Delete them by hand once no project is wired.
 
 It also deletes the per-machine HMAC secret at `~/.claude/handoff_secret`,
 so no key material is left behind by a tool you just removed. Existing
