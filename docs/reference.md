@@ -800,8 +800,10 @@ def5678 add request validator
 Run this now, before anything else this session, and say what you found:
 
 ```bash
-git -C /path/to/myproject status && git -C /path/to/myproject log --oneline -5
+git -C '/path/to/myproject' status && git -C '/path/to/myproject' log --oneline -5
 ```
+
+Emitted paths are shell-quoted (single quotes), so a project path containing spaces still pastes and runs.
 <!-- HANDOFF_BIND_END -->
 
 <!-- HANDOFF_BIND_BEGIN -->
