@@ -1010,7 +1010,7 @@ by default (`--scope user`), `<project>/.claude/settings.json` with
 `--scope project`, or `<project>/.claude/settings.local.json` with
 `--scope project --local`. See [Install scope](#install-scope-user-vs-project).
 
-The settings file is backed up before any change and the patch is
+An existing settings file is backed up before any change and the patch is
 idempotent — existing hooks and permissions are detected by marker
 substring and skipped on re-runs. Unrelated entries in your
 settings.json (other hooks, theme, etc.) are left untouched.

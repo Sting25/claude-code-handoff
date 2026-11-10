@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 8dfc27493f19062620859d4f2bd3aeb767047906946847059c3e12e45cbb61be
+# SOURCE-SHA256: bf97f97c01749de9020db09466a5d0605ea17e636681741608ca868d62dd3dc2
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -39,12 +39,13 @@ What it does:
      manual step instead). Which file: ~/.claude/settings.json by default,
      or with --scope project the project's .claude/settings.json or
      .claude/settings.local.json (see "Scope" below).
-     Requires jq: without it the install refuses and exits 1. (--uninstall
-     and --doctor work without jq.)
+     Requires jq. Without it, install refuses (exit 1); --uninstall removes the
+     scripts but cannot unpatch the settings file and prints the entries to
+     remove by hand; --doctor reports jq as BROKEN.
 
 Idempotent. Existing files at symlink targets are backed up to
-<path>.bak.<timestamp> before being replaced. The settings file is backed up
-before any patch: <path>.bak.<timestamp> next to it in user scope, or
+<path>.bak.<timestamp> before being replaced. An existing settings file is
+backed up before any patch: <path>.bak.<timestamp> next to it in user scope, or
 ~/.claude/handoff_settings_backups/<cksum of project path>/<name>.bak.<timestamp>
 in project scope (never inside the project). Re-runs are safe and only
 touch what's actually missing.

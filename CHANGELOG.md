@@ -3,10 +3,10 @@
 Notable changes to claude-code-handoff. The intended use of this file
 is to flag any change to the shipped hook commands or permission
 entries — those are the parts that don't auto-update from a `git pull`,
-because they live in `~/.claude/settings.json` on the user's machine.
+because they live in a settings file on the user's machine (`~/.claude/settings.json` by default, or the project's `.claude/settings.json` or `.claude/settings.local.json` for a project-scope install).
 
 If a future release changes any of them, re-running `./install.sh`
-after `git pull` re-patches settings.json idempotently (existing
+after `git pull` re-patches the settings file idempotently (existing
 entries are detected by marker substring and left alone; new ones
 are appended).
 

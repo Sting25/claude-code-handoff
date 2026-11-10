@@ -68,7 +68,8 @@ Easiest: clone the [claude-code-handoff repo](https://github.com/Sting25/claude-
 and run `./install.sh` — it symlinks all the files into `~/.claude/`
 and patches a settings file to add the seven hooks plus seven
 permissions (`~/.claude/settings.json` by default; with `--scope project`
-(`--project <dir>`, or the current directory's git toplevel) the project's
+(`--project <dir>`, else the current directory's git toplevel, else the
+current directory itself outside a git repo) the project's
 `.claude/settings.json`, or `.claude/settings.local.json` with `--local`),
 and wires the statusLine **only if you don't already have one** (an existing statusLine is never overwritten; the
 installer prints the manual step instead). Edits in the repo flow
@@ -199,6 +200,10 @@ Manual install:
      model id checked against a built-in model table; when none
      applies the reminder says the window is unknown, gives no
      percentage, and fires at 100,000 tokens instead.
+   - **`SessionEnd`** runs `write_handoff.sh --if-curated`: a mechanical
+     git-state safety net that writes an auto handoff only when no curated
+     one exists, so a session that ends without `/handoff` still leaves
+     something to load.
    - **`PreCompact`** fires the same safety net as `SessionEnd`
      before auto or manual compaction — compaction destroys the
      conversation just like an ending, and `SessionEnd` doesn't
@@ -206,6 +211,11 @@ Manual install:
    - **`PostCompact`** runs `handoff_compact_reset.sh` to clear the
      session's ctx sidecars, so the freed window starts fresh and the
      nudge cadence starts over from 30%.
+   - **`WorktreeRemove`** runs `handoff_worktree_remove.sh` when Claude Code
+     removes a worktree it created (Claude Code 2.1.300 or later). It saves
+     the worktree's curated `handoff_current.md` and its raw dumps into the
+     main checkout's `.claude/handoff_history/worktrees/`, so they outlive
+     the worktree.
    - **`statusLine`** (not a hook — its own settings key) runs
      `handoff_statusline.sh`: renders
      `model | ctx N% (usedk/windowk) | handoff: <state>` where state
