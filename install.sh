@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 0dd030009fbaea7c380cdb6334d4ade022e8f1fc0c19a027c2bf3c1a5e3c53aa
+# SOURCE-SHA256: 171d7669e440df20606c80573f9a53fb418a6b451c74c0995b481c4c6f748ff1
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1430,8 +1430,21 @@ unpatch_settings() {
     echo "  ok      $settings is empty; nothing to strip"
     return
   fi
-  if ! settings_usable "$settings"; then
-    if jq empty "$settings" >/dev/null 2>&1; then
+  usable_rc=0
+  settings_usable "$settings" || usable_rc=$?
+  if [[ $usable_rc -eq 2 ]]; then
+    # jq failed before anything is known about the file (#187): not "nothing
+    # to strip", which would exit 0 with the hooks still wired. Nothing has
+    # been edited yet, so stop here; the bin/ links are still in place for
+    # the re-run (settings are unpatched before the links are removed).
+    echo "  ERROR   jq failed (exit $settings_usable_rc) while reading $settings; refusing to edit (left untouched)." >&2
+    echo "          Fix jq and re-run the same --uninstall command." >&2
+    exit 1
+  fi
+  if [[ $usable_rc -ne 0 ]]; then
+    if [[ ! -r "$settings" ]]; then
+      echo "  ERROR   $settings cannot be read (check its permissions); refusing to edit (left untouched)."
+    elif jq empty "$settings" >/dev/null 2>&1; then
       # Whitespace only, a non-object root, or several documents: there is
       # no hooks object for this installer to have written, so nothing to strip.
       echo "  ok      $settings is empty or not a JSON object; nothing to strip"
@@ -1604,15 +1617,30 @@ shq() {
 }
 
 # settings_usable <file>: 0 when <file> holds exactly one JSON document and
-# that document is an object; 1 for anything else (0 bytes, whitespace only,
+# that document is an object; 1 when it does not (0 bytes, whitespace only,
 # invalid JSON, a non-object root such as [] 42 "x" null, two documents, a
-# file jq cannot open). Total: every outcome is an answer, so callers never
-# read an unusable file as a jq failure. `jq -e .` alone is not enough: on a
-# 0-byte or whitespace file it exits 4 ("no valid result"), which looks like
-# a jq failure, and `jq empty` passes such a file. Shared by
+# file jq cannot open); 2 when jq itself failed, so nothing is known about
+# the file (settings_usable_rc then holds jq's exit code). Every outcome is
+# an answer, so callers never read an unusable file as a jq failure, and
+# never read a jq failure as an unusable file (#187). `jq -e .` alone is not
+# enough: on a 0-byte or whitespace file it exits 4 ("no valid result"),
+# which looks like a jq failure, and `jq empty` passes such a file. jq's
+# exit code alone cannot tell a file that is not JSON (exit 2) from a usage
+# or system error (also 2), so after any exit above 1 the same filter is run
+# again on a known-good document from stdin: if jq cannot evaluate that
+# either, jq is the problem; if it can, the file is. Shared by
 # settings_has_our_hooks, unpatch_settings and the doctor's settings gate.
+settings_usable_rc=0
 settings_usable() {
-  jq -es 'length == 1 and (.[0] | type) == "object"' "$1" >/dev/null 2>&1
+  local rc=0
+  settings_usable_rc=0
+  jq -es 'length == 1 and (.[0] | type) == "object"' "$1" >/dev/null 2>&1 || rc=$?
+  if [[ $rc -le 1 ]]; then return "$rc"; fi
+  if printf '{}' | jq -es 'length == 1 and (.[0] | type) == "object"' >/dev/null 2>&1; then
+    return 1
+  fi
+  settings_usable_rc=$rc
+  return 2
 }
 
 # settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
@@ -1631,9 +1659,19 @@ settings_has_our_hooks() {
   [[ -f "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   # An unusable file (empty, unparseable, not an object) is a real "no"
-  # (settings_usable), not a jq failure. Only the wiring read below, on a
-  # usable file, can report one.
-  settings_usable "$f" || return 1
+  # (settings_usable), not a jq failure. jq failing inside that check (2) is
+  # one, reported like a failure of the wiring read below: this is the read
+  # the user-scope --uninstall registry scan relies on before it deletes the
+  # shared secret, so "unknown" must never collapse into "not wired".
+  settings_usable "$f" || rc=$?
+  if [[ $rc -eq 2 ]]; then
+    echo "  WARN    jq failed (exit $settings_usable_rc) while checking whether $f is a JSON object;" >&2
+    echo "          treating its wiring as unknown. Fix jq and re-run." >&2
+    sh_jq_failed=1
+    sh_jq_failed_file="$f"
+    return 1
+  fi
+  [[ $rc -eq 0 ]] || return 1
   # shellcheck disable=SC2016  # jq variables, bound by --arg
   jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
         --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" '
@@ -1989,11 +2027,22 @@ doctor() {
   # A missing settings file still gets a line rather than silence: the
   # status line is the context nudge's most accurate signal, so its absence
   # is worth naming even when there is no file to inspect.
+  usable_rc=0
+  if command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
+    settings_usable "$settings" || usable_rc=$?
+  fi
   if command -v jq >/dev/null 2>&1 && [[ ! -f "$settings" ]]; then
     echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
     echo
-  elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
-       && ! settings_usable "$settings"; then
+  elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] && [[ $usable_rc -eq 2 ]]; then
+    # jq failed in the usability check itself (#187): nothing is known about
+    # the file, which is a jq failure (WARN, exit non-zero below), not a
+    # BROKEN file (re-running the installer cannot fix jq).
+    echo "  WARN    jq failed (exit $settings_usable_rc) while reading $settings;"
+    echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
+    sh_jq_failed=1
+    echo
+  elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] && [[ $usable_rc -ne 0 ]]; then
     # Unusable file: the reads below would only report jq failures, and
     # re-running doctor cannot fix the file, so name it once as broken,
     # saying which of the three it is (settings_usable).

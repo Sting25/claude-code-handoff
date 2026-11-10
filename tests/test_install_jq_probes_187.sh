@@ -392,4 +392,77 @@ else
   check "doctor unreadable: exit nonzero"          yes "$(nz $RC)"
 fi
 
+# 19. The usability check itself (settings_usable: the read that tells an
+#     empty, non-object or invalid file from a usable one) failing in jq. It
+#     used to collapse into "not usable": --uninstall printed `ok ... empty or
+#     not a JSON object; nothing to strip` and exited 0 with the hooks still
+#     wired, the registry scan read the project as stale (and a user-scope
+#     --uninstall deleted the shared secret), --doctor called the file BROKEN.
+#     The fragment is the predicate's own text, so the known-good re-run on
+#     stdin fails too and the failure is jq's, not the file's.
+USABLE='length == 1 and (.[0] | type)'
+# 19a. --uninstall stops before editing: settings byte-identical, links kept.
+fresh_home
+run_sh ""
+SNAP="$(snap)"; NB="$(nbin)"
+run_sh "$USABLE" --uninstall
+check "usable check fails, uninstall: exit nonzero"       yes "$(nz $RC)"
+check "usable check fails, uninstall: ERROR on stderr"    yes "$(has "$ERR" 'jq failed (exit 5) while reading')"
+check "usable check fails, uninstall: no 'nothing to strip'" no "$(has "$OUT" 'nothing to strip')"
+check "usable check fails, uninstall: no 'not valid JSON'" no  "$(has "$OUT$ERR" 'not valid JSON')"
+check "usable check fails, uninstall: settings untouched" "$SNAP" "$(snap)"
+check "usable check fails, uninstall: bin links kept"     "$NB" "$(nbin)"
+run_sh "" --uninstall
+check "usable check healthy re-run: exit 0"               0   "$RC"
+# 19b. --doctor: a WARN and a non-zero exit, never a BROKEN file.
+fresh_home
+run_sh ""
+run_sh "$USABLE" --doctor
+check "usable check fails, doctor: exit nonzero"          yes "$(nz $RC)"
+check "usable check fails, doctor: WARN names the exit"   yes "$(has "$OUT" 'WARN    jq failed (exit 5) while reading')"
+check "usable check fails, doctor: closing line"          yes "$(has "$ERR" 'doctor: jq failed while reading settings')"
+check "usable check fails, doctor: no BROKEN"             no  "$(has "$OUT" 'BROKEN')"
+check "usable check fails, doctor: no 'empty or not a JSON object'" no "$(has "$OUT" 'empty or not a JSON object')"
+# 19c. Project-scope install: the wiring check after the patch cannot tell,
+#      so the project is not registered and the run fails.
+fresh_home
+mkdir -p "$HOME_DIR/proj"
+run_sh "$USABLE" --scope project --project "$HOME_DIR/proj"
+check "usable check fails, project install: exit nonzero" yes "$(nz $RC)"
+check "usable check fails, project install: NOT registered" yes "$(has "$ERR" 'the project was NOT registered')"
+check "usable check fails, project install: no registry line" no "$(grep -q proj "$HOME_DIR/handoff_projects" 2>/dev/null && echo yes || echo no)"
+# 19d. User-scope --uninstall whose registry scan hits the failure on the
+#      registered project's file (the user file is empty, so its own unpatch
+#      never reaches the check): the project would read as stale and the
+#      shared secret would go. It must survive and the run must fail.
+fresh_home
+run_sh ""
+mkdir -p "$HOME_DIR/proj"
+run_sh "" --scope project --project "$HOME_DIR/proj"
+printf '%064d\n' 0 | tr 0 a > "$HOME_DIR/handoff_secret"; chmod 600 "$HOME_DIR/handoff_secret"
+SECRET_SUM="$(cksum < "$HOME_DIR/handoff_secret")"
+REG_SUM="$(cksum < "$HOME_DIR/handoff_projects")"
+: > "$HOME_DIR/settings.json"
+run_sh "$USABLE" --uninstall
+check "usable check fails in registry scan: exit nonzero" yes "$(nz $RC)"
+check "usable check fails in registry scan: secret kept"  "$SECRET_SUM" "$(cksum < "$HOME_DIR/handoff_secret" 2>/dev/null)"
+check "usable check fails in registry scan: registry intact" "$REG_SUM" "$(cksum < "$HOME_DIR/handoff_projects" 2>/dev/null)"
+check "usable check fails in registry scan: ERROR names file" yes "$(has "$ERR" 'proj/.claude/settings.json from the project registry')"
+check "usable check fails in registry scan: WARN names the check" yes "$(has "$ERR" 'while checking whether')"
+check "usable check fails in registry scan: no 'remove' secret" no "$(has "$OUT" 'per-machine HMAC secret')"
+# 19e. --uninstall on a settings file it cannot read: named as such, never
+#      as "not valid JSON", and left alone.
+fresh_home
+run_sh ""
+chmod 000 "$HOME_DIR/settings.json"
+if [[ -r "$HOME_DIR/settings.json" ]]; then
+  chmod 600 "$HOME_DIR/settings.json"
+  skip "mode 000 is readable here (running as root)"
+else
+  run_sh "" --uninstall
+  chmod 600 "$HOME_DIR/settings.json"
+  check "uninstall unreadable: ERROR cannot be read"       yes "$(has "$OUT" 'cannot be read (check its permissions)')"
+  check "uninstall unreadable: no 'not valid JSON'"        no  "$(has "$OUT$ERR" 'not valid JSON')"
+fi
+
 finish

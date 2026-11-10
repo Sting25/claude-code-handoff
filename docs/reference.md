@@ -1227,7 +1227,8 @@ it keeps the secret and the registry, prints an `ERROR` naming the file,
 and exits 1. The settings and `bin/` links are already removed at that
 point; fix jq or the named file and re-run the same `--uninstall` command.
 A registered file that is empty or not a JSON object is not a jq failure:
-it counts as a project that is no longer wired.
+it counts as a project that is no longer wired. jq failing while it makes
+that distinction is one, and keeps the secret.
 
 Pass `--keep-secret` to skip that deletion entirely:
 
