@@ -25,7 +25,7 @@ run_block() {
 # Build the expected quoted form by the contract: single quotes, ' -> '\''.
 sq() {
   local sqc="'" rep p="$1"
-  rep="$sqc"'\'"$sqc$sqc"
+  rep="$sqc\\$sqc$sqc"
   printf "'%s'" "${p//$sqc/$rep}"
 }
 

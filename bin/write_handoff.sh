@@ -1667,7 +1667,7 @@ write_epoch="$(date +%s)"
 # newline falls back to printf %q, which emits a one-line $'...' form.
 handoff_shquote() {  # <path>
   # Replacement held in variables: the inline form quotes differently in bash 3.2 and 5.
-  local sq="'" bs='\' rep
+  local sq="'" bs="\\" rep
   rep="$sq$bs$sq$sq"
   case "$1" in
     *$'\n'*) printf '%q' "$1" ;;
