@@ -312,14 +312,25 @@ check "J legacy: created settings file still removed" no "$(exists "$P/.claude/s
 check "J legacy: .claude kept" yes "$(exists "$P/.claude")"
 
 # --- K. a recreated .claude is never removed -------------------------------------------------------------
+# K: the directory is EMPTY, the case an identity check could get wrong on a
+# coarse filesystem (an rmdir would succeed here, so this is the case that
+# guards the drop); K2: the same with a file of the user's inside.
 fresh_sandbox
 inst --scope project --project "$P"
-rm -rf "$P/.claude"; mkdir "$P/.claude"; : > "$P/.claude/keep"   # the user's own directory now
+rm -rf "$P/.claude"; mkdir "$P/.claude"   # the user's own, empty, directory now
 inst --uninstall --scope project --project "$P"
 check "K: uninstall exit 0" 0 "$RC"
-check "K: the user's recreated .claude survives" yes "$(exists "$P/.claude/keep")"
+check "K: the user's recreated empty .claude survives" yes "$(exists "$P/.claude")"
 check "K: no 'installer created it; it is empty'" no "$(has "$OUT" "it is empty")"
 check "K: marker consumed" 0 "$(nmarkers)"
+fresh_sandbox
+inst --scope project --project "$P"
+rm -rf "$P/.claude"; mkdir "$P/.claude"; : > "$P/.claude/keep"   # the user's own directory, with a file
+inst --uninstall --scope project --project "$P"
+check "K2: uninstall exit 0" 0 "$RC"
+check "K2: the user's recreated .claude survives" yes "$(exists "$P/.claude/keep")"
+check "K2: no 'installer created it; it is empty'" no "$(has "$OUT" "it is empty")"
+check "K2: marker consumed" 0 "$(nmarkers)"
 
 # --- L. a refused or unfinished project uninstall --------------------------------------------------------
 fresh_sandbox
