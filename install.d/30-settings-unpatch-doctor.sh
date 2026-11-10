@@ -1,8 +1,6 @@
 maybe_uninstall_hook() {
   local event="$1" marker="$2"
-  if ! jq -e --arg e "$event" --arg m "$marker" \
-         '(.hooks[$e] // []) | any(.. | .command? // "" | contains($m))' \
-         "$settings" >/dev/null 2>&1; then
+  if ! jq_probe "hook $event" --arg e "$event" --arg m "$marker" "$probe_hook" "$settings"; then
     echo "  ok      hook $event (not present)"
     return
   fi
@@ -23,8 +21,7 @@ maybe_uninstall_hook() {
 
 maybe_uninstall_perm() {
   local perm="$1"
-  if ! jq -e --arg p "$perm" '(.permissions.allow // []) | index($p)' \
-         "$settings" >/dev/null 2>&1; then
+  if ! jq_probe "permission $perm" --arg p "$perm" "$probe_perm" "$settings"; then
     echo "  ok      permission not present: $perm"
     return
   fi
@@ -42,9 +39,7 @@ maybe_uninstall_perm() {
 # the hook.
 migrate_legacy_ss_hook() {
   local marker="$ss_legacy_marker"
-  if ! jq -e --arg m "$marker" \
-         '(.hooks.SessionStart // []) | any(.. | .command? // "" | contains($m))' \
-         "$settings" >/dev/null 2>&1; then
+  if ! jq_probe "hook SessionStart" --arg e SessionStart --arg m "$marker" "$probe_hook" "$settings"; then
     return
   fi
   jq --arg m "$marker" '
@@ -814,13 +809,27 @@ doctor() {
     echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
     echo
   elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
-    if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
-         "$settings" >/dev/null 2>&1; then
+    # Read-only, so a jq failure (exit 2 or more, #187) is a WARN naming the
+    # unknown state rather than an abort, and not counted toward `broken`
+    # (re-running the installer cannot fix jq). Never a quiet "user's own".
+    sl_rc=0
+    jq -e --arg m "$sl_marker" \
+      '(.statusLine.command? // "") | (type == "string" and contains($m))' \
+      "$settings" >/dev/null 2>&1 || sl_rc=$?
+    if [[ $sl_rc -eq 0 ]]; then
       echo "  ok      statusLine wired (ours)"
-    elif jq -e '(.statusLine // null) != null' "$settings" >/dev/null 2>&1; then
-      echo "  info    statusLine present (user's own — manual wiring documented in README)"
-    else
-      echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
+    elif [[ $sl_rc -eq 1 ]]; then
+      sl_rc=0
+      jq -e '(.statusLine? // null) != null' "$settings" >/dev/null 2>&1 || sl_rc=$?
+      if [[ $sl_rc -eq 1 ]]; then
+        echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
+      elif [[ $sl_rc -eq 0 ]]; then
+        echo "  info    statusLine present (user's own; manual wiring documented in README)"
+      fi
+    fi
+    if [[ $sl_rc -gt 1 ]]; then
+      echo "  WARN    jq failed (exit $sl_rc) while probing statusLine in $settings;"
+      echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
     fi
     # Model context-window check — advisory only, never counts toward broken:
     # a bare 'opus'/'claude-opus-4-8' pin silently runs at a 200k context
