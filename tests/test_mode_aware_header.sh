@@ -14,9 +14,9 @@
 #      the header sits inside the skeleton-HMAC-signed preamble (everything
 #      before the Notes/Rules bind regions), so the mode string MUST be
 #      decided at build time, before signing, and --restamp MUST NEVER
-#      regenerate it. Proven two ways below: (a) a doc carrying the
-#      bare-scripts wording -- byte-identical to what pre-#66 code always
-#      emitted, since that wording is intentionally left unchanged -- still
+#      regenerate it. Proven two ways below: (a) a doc carrying the legacy
+#      bare-scripts wording (the pre-#176 paragraph, swapped back into a
+#      copy of today's writer; see the fixture surgery below) still
 #      verifies as-is, and (b) restamping that same doc from a RELOCATED
 #      bin/ does not flip its header to the relocated wording, which it
 #      would if restamp ever re-ran the header-generation code path instead
@@ -41,14 +41,21 @@ command -v openssl >/dev/null 2>&1 || { echo "  SKIP  openssl not available"; fi
 
 has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 
-# The exact pre-#66 header paragraph (bin/write_handoff.sh:1096-1098 before
-# this fix) -- kept verbatim as the bare-scripts wording so an existing
-# signed handoff from that era is byte-identical to what this branch emits
-# for the same shape, and so a regression that reworded it is caught here.
+# The legacy bare-scripts header paragraph, as emitted from #66 until #176.
+# Used as the wording a previously signed handoff carries; the fixture below
+# recreates it by swapping this paragraph into a copy of today's writer.
 OLD_HEADER_TEXT="Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
 \`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).
 Auto-loaded into the next session by the \`SessionStart\` hook in the
 same settings file."
+
+# Issue #176: the bare-scripts arm used to claim the hooks live in
+# ~/.claude/settings.json, which is wrong for `install.sh --scope project`
+# (hooks in <project>/.claude/settings.json). The arm is now scope-neutral.
+# The OLD text above stays as the pinned legacy wording that already-signed
+# docs carry (they must keep verifying and keep their bytes through restamp).
+NEW_SCOPE_TEXT="for \`--scope project\`, the project's \`.claude/settings.json\`
+or \`.claude/settings.local.json\`)"
 
 # Marker text of the "anything else" arm (relocated bin/, clone run
 # directly).
@@ -130,6 +137,7 @@ doc1="$proj1/.claude/handoff_current.md"
 must test -f "$doc1"
 check "relocated shape -> names the resolved dir literally" yes "$(has "$(cat "$doc1")" "$reloc_bin/write_handoff.sh")"
 check "relocated shape -> 'not the ~/.claude/bin' text"     yes "$(has "$(cat "$doc1")" "$OTHER_TEXT")"
+check "relocated shape -> names settings.local.json too (#176)" yes "$(has "$(cat "$doc1")" "\`.claude/settings.local.json\`")"
 check "relocated shape -> names project settings to check"  yes "$(has "$(cat "$doc1")" "project's \`.claude/settings.json\`")"
 check "relocated shape -> no bare-scripts wording"          no  "$(has "$(cat "$doc1")" "$OLD_HEADER_TEXT")"
 # Requirement (a): a handoff written by the NEW (mode-aware) code signs and
@@ -158,7 +166,31 @@ sec2="$(mktemp -d)/secret"; cleanup_on_exit "$(dirname "$sec2")"
     bash "$bare_bin/write_handoff.sh" >/dev/null 2>&1 </dev/null )
 doc2="$proj2/.claude/handoff_current.md"
 must test -f "$doc2"
-check "bare-scripts shape -> exact pre-#66 wording" yes "$(has "$(cat "$doc2")" "$OLD_HEADER_TEXT")"
+check "bare-scripts shape -> scope-neutral wording (#176)" yes "$(has "$(cat "$doc2")" "$NEW_SCOPE_TEXT")"
+check "bare-scripts shape -> names user-scope file too (#176)" yes "$(has "$(cat "$doc2")" "\`~/.claude/settings.json\` for a user-scope")"
+check "bare-scripts shape -> no longer the pre-#176 wording" no "$(has "$(cat "$doc2")" "$OLD_HEADER_TEXT")"
+# Rebuild doc2 as a doc written by the PRE-#176 code: swap the paragraph back
+# in a scratch copy of the script, then regenerate. Stands in for an
+# already-signed handoff in the backward-compat section below.
+# The paragraph runs from the "hook wired in" line to the first following
+# line ending `same settings file."`; line-based surgery avoids
+# ${var/pat/rep}, whose backslash handling differs across bash 3.2 and 5.x.
+legacy_src="$bare_bin/write_handoff.sh"
+hw_line="$(grep -n 'SessionEnd.* hook wired in the Claude Code settings$' "$legacy_src" | cut -d: -f1)"
+must test -n "$hw_line"
+end_line="$(tail -n +"$hw_line" "$legacy_src" | grep -n 'same settings file\."$' | head -n 1 | cut -d: -f1)"
+must test -n "$end_line"
+end_line=$((hw_line + end_line - 1))
+# shellcheck disable=SC2016  # literal backticks, nothing to expand
+printf '%s\n' '\`/handoff\` skill + the \`SessionEnd\` hook in \`~/.claude/settings.json\`).' \
+  'Auto-loaded into the next session by the \`SessionStart\` hook in the' \
+  'same settings file."' > "$legacy_src.para"
+{ head -n $((hw_line - 1)) "$legacy_src"; cat "$legacy_src.para"; tail -n +$((end_line + 1)) "$legacy_src"; } > "$legacy_src.new"
+must mv "$legacy_src.new" "$legacy_src"
+( cd "$proj2" && HOME="$bare_home" CLAUDE_HOME="$bare_home/.claude" \
+    HANDOFF_SECRET_FILE="$sec2" CLAUDE_PROJECT_DIR="$proj2" \
+    bash "$bare_bin/write_handoff.sh" >/dev/null 2>&1 </dev/null )
+check "legacy fixture carries the pre-#176 wording" yes "$(has "$(cat "$doc2")" "$OLD_HEADER_TEXT")"
 check "bare-scripts shape -> no relocated wording"  no  "$(has "$(cat "$doc2")" "$OTHER_TEXT")"
 
 # --- Shape 3: neither (git clone run directly / relocated bin) --------------
@@ -188,11 +220,11 @@ echo "mode-aware header: backward compatibility (pre-#66 docs, --restamp)"
 # verifies, and --restamp never rewrites its preamble -- even when invoked
 # from a RELOCATED bin/, which would flip the wording if restamp
 # ever re-ran the header-generation code path instead of only re-signing.
-# doc2 above (built by THIS branch's bare-scripts path) is byte-identical to
-# what pre-#66 code produced for the same shape, since that wording is
-# deliberately left unchanged -- so it stands in for "a handoff written by
-# the OLD code" without depending on git history (this repo's CI checks out
-# a shallow clone, so pinning an old commit SHA here would not survive it).
+# doc2 above was regenerated by a copy of today's writer with the legacy
+# paragraph swapped back in. It is not a frozen fixture (it tracks the rest
+# of the writer), but it carries the legacy wording and needs no git history
+# (CI checks out a shallow clone, so pinning an old commit SHA would not
+# survive it).
 # inject_rule + one restamp (from the SAME bare-scripts location, i.e. the
 # "old code" resigning its own doc) mirrors the real /handoff flow and gives
 # the doc actual bound content, matching what a genuinely pre-existing signed
