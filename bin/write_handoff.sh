@@ -1739,10 +1739,20 @@ handoff_shquote() {  # <path>
 # The verify block uses handoff_shquote instead, because its lines must also
 # survive a paste into a shell.
 handoff_oneline() {  # <text>
-  # Patterns and replacements held in variables, as in handoff_shquote; the
-  # backslash pattern is quoted so it is not read as a glob escape.
-  local s="$1" bs="\\" esc_bs="\\\\" nl=$'\n' cr=$'\r' esc_n='\n' esc_r='\r'
-  s="${s//"$bs"/$esc_bs}"
+  # Backslash is doubled by splitting on it, not by ${s//...}: bash 5.2's
+  # patsub_replacement collapses a \\ replacement back to one backslash, and
+  # bash 3.2 keeps the quotes of a quoted replacement literally (measured on
+  # ubuntu CI and macOS /bin/bash). LF and CR use ${s//...}, whose \n and \r
+  # replacements come through unchanged on both.
+  local s="$1" rest bs="\\" esc_bs="\\\\" nl=$'\n' cr=$'\r' esc_n='\n' esc_r='\r'
+  if [[ "$s" == *"$bs"* ]]; then
+    rest="$s"; s=""
+    while [[ "$rest" == *"$bs"* ]]; do
+      s="$s${rest%%"$bs"*}$esc_bs"
+      rest="${rest#*"$bs"}"
+    done
+    s="$s$rest"
+  fi
   s="${s//$nl/$esc_n}"
   s="${s//$cr/$esc_r}"
   printf '%s' "$s"
