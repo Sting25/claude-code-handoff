@@ -70,7 +70,7 @@ and patches a settings file to add the seven hooks plus seven
 permissions (`~/.claude/settings.json` by default; with `--scope project`
 (`--project <dir>`, or the current directory's git toplevel) the project's
 `.claude/settings.json`, or `.claude/settings.local.json` with `--local`),
-and wires the statusLine **only if you don't already have one** (an existing statusLine is never overwritten — the
+and wires the statusLine **only if you don't already have one** (an existing statusLine is never overwritten; the
 installer prints the manual step instead). Edits in the repo flow
 live without re-installing.
 

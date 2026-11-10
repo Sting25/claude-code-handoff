@@ -1159,7 +1159,7 @@ symlinks.
 ```
 
 **Model pin (new machines).** Claude Code's model choice lives in the
-settings files on each machine, so a fresh install defaults wrong —
+settings files on each machine, so a fresh install defaults wrong:
 notably, a bare `opus` runs at a **200k** context window (the 1M variant
 is `opus[1m]`). `--model` pins the value during install, but **never
 overwrites** a model you already set — a differing request is reported
