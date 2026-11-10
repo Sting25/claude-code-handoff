@@ -104,8 +104,8 @@ rm -rf "$HOME_DIR"
 
 # --- G. doctor context-window warning ---
 # Only ids whose window depends on the picked variant warn (Opus 4.6, Sonnet
-# 4.6). Opus 4.7 and later, including the bare `opus` alias, default to 1M, so
-# they are quiet (#194; bin/handoff_ctx_check.sh's table says the same).
+# 4.6). Opus 4.7 and later default to 1M (bin/handoff_ctx_check.sh's table),
+# so they are quiet; a bare alias is not detected at all (#194).
 run_install '{"model":"claude-opus-4-6"}'
 run_again --doctor
 check "doctor: WARN bare claude-opus-4-6"   yes "$(saw 'may run at a 200k context window')"
@@ -115,7 +115,9 @@ run_install '{"model":"claude-sonnet-4-6"}'
 run_again --doctor
 check "doctor: WARN bare claude-sonnet-4-6" yes "$(saw 'may run at a 200k context window')"
 rm -rf "$HOME_DIR"
-for m in opus claude-opus-4-8 'opus[1m]'; do
+# claude-opus-4-6[1m] names its variant, so it is quiet too. Bare aliases are
+# simply not detected (they may resolve to 4.6 on some providers).
+for m in opus claude-opus-4-8 'opus[1m]' 'claude-opus-4-6[1m]'; do
   run_install "{\"model\":\"$m\"}"
   run_again --doctor
   check "doctor: quiet for $m"   no        "$(saw '200k context window')"

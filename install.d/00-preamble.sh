@@ -93,8 +93,12 @@ umask 077
 # and would silently turn the caller's cwd into the repo root.)
 _self_src="${BASH_SOURCE[0]:-}"
 repo_root=""
+repo_root_err=""   # why repo_root is empty: "" (no source path, piped) or "cannot cd to <dir>"
 if [[ -n "$_self_src" ]]; then
   repo_root="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || repo_root=""
+  if [[ -z "$repo_root" ]]; then
+    repo_root_err="cannot cd to $(dirname "$_self_src")"
+  fi
 fi
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
@@ -210,6 +214,11 @@ patch_in_progress=0
 # issue #178) gets no backup (there was nothing to keep), so an abort puts back what
 # was there before instead: "absent" removes the file, "empty" truncates it.
 settings_seed_state=""
+# Project scope: the project's .claude/ directory and its marker, when THIS run
+# made them (set in 40-main.sh). An aborted run takes both away again, so the
+# line "an abort undoes that" is true for the directory as well as the file.
+claude_dir_made_this_run=0
+claude_dir_marker_written=0
 cleanup() {
   local rc=$?
   rm -f "$settings.tmp" 2>/dev/null || true
@@ -224,6 +233,16 @@ cleanup() {
     else
       : > "$settings" 2>/dev/null || true
       echo "  restore $settings emptied again, as it was before this run (aborted mid-patch, rc=$rc)" >&2
+    fi
+  fi
+  if (( rc != 0 )) && (( claude_dir_made_this_run )) && [[ -n "$project_dir" ]]; then
+    # rmdir only (never recursive): a directory that gained anything else stays.
+    if [[ -d "$project_dir/.claude" && ! -L "$project_dir/.claude" ]] \
+       && rmdir "$project_dir/.claude" 2>/dev/null; then
+      echo "  restore $project_dir/.claude/ removed again; this run created it (aborted, rc=$rc)" >&2
+      if (( claude_dir_marker_written )) && [[ -n "$project_backup_dir" ]]; then
+        rm -f "$project_backup_dir/claude_dir.mkdir" 2>/dev/null || true
+      fi
     fi
   fi
 }
@@ -353,9 +372,19 @@ if [[ "$scope" == project ]]; then
     # or a link above it) must be made physical the same way a missing path
     # allows: follow a dangling final link, then resolve the parent (#194).
     project_dir="$(resolve_symlink "$project_dir")"
-    if [[ -d "$(dirname "$project_dir")" ]]; then
-      project_dir="$(cd "$(dirname "$project_dir")" && pwd -P)/$(basename "$project_dir")"
-    fi
+    # Walk up to the nearest existing ancestor, make THAT physical, and put the
+    # missing tail back: a removed worktree whose parent is gone too (under a
+    # symlinked ancestor such as macOS /tmp -> /private/tmp) must still match
+    # the physical path the install registered.
+    _gone_tail=""
+    _gone_head="$project_dir"
+    while [[ ! -d "$_gone_head" && "$_gone_head" != / && -n "$_gone_head" ]]; do
+      _gone_tail="/$(basename "$_gone_head")$_gone_tail"
+      _gone_head="$(dirname "$_gone_head")"
+    done
+    _gone_head="$(cd "$_gone_head" && pwd -P)"
+    [[ "$_gone_head" == / ]] && _gone_head=""
+    project_dir="$_gone_head$_gone_tail"
     project_gone=1
   elif [[ ! -d "$project_dir" ]]; then
     echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
@@ -407,10 +436,7 @@ if [[ "$scope" == project ]]; then
   # A vanished project (--uninstall of a removed worktree) cannot be
   # resolved with pwd -P, so its parent is: the key must match the one the
   # install used (issue #178), or the created-file marker would be orphaned.
-  _key_dir="$project_dir"
-  if (( project_gone )) && [[ -d "$(dirname "$project_dir")" ]]; then
-    _key_dir="$(cd "$(dirname "$project_dir")" && pwd -P)/$(basename "$project_dir")"
-  fi
+  _key_dir="$project_dir"   # already physical on both paths (a gone one was resolved above)
   project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$_key_dir" | cksum | awk '{print $1}')"
   # A project-scope --uninstall never touches the secret (see 40-main.sh),
   # so --keep-secret is a no-op there too; say so, same as issue #82.

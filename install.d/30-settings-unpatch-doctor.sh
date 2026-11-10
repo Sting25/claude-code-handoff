@@ -232,21 +232,33 @@ remove_created_settings_if_empty() {
 claude_dir_marker() { printf '%s\n' "$project_backup_dir/claude_dir.mkdir"; }
 record_created_claude_dir() {
   [[ "$scope" == project ]] || return 0
-  ( mkdir -p "$project_backup_dir" && : > "$(claude_dir_marker)" ) 2>/dev/null || true
+  if ( mkdir -p "$project_backup_dir" && : > "$(claude_dir_marker)" ) 2>/dev/null; then
+    claude_dir_marker_written=1
+  else
+    echo "  WARN    cannot record the created-directory marker in $project_backup_dir;"
+    echo "          --uninstall will leave the empty $project_dir/.claude/ in place"
+  fi
 }
+# The directory is always <project>/.claude, the path the install made, never
+# the parent of the (possibly symlink-resolved) settings target: a settings
+# file linked into a dotfiles directory must not get that directory removed.
+# The marker is consumed on every uninstall, so it can never outlive the
+# directory it described (a user who recreates .claude/ later is not ours).
+# The one exception is the other settings file of this project still being
+# wired: the uninstall that strips the last one then cleans up.
 remove_created_claude_dir_if_empty() {
-  local m d
+  local m d other
   m="$(claude_dir_marker)"
   [[ -f "$m" && ! -L "$m" ]] || return 0
-  d="$(dirname "$settings")"
-  if [[ ! -d "$d" ]]; then
-    rm -f "$m"
-  elif [[ ! -L "$d" ]] && rmdir "$d" 2>/dev/null; then
-    echo "  remove  $d/ (this installer created it; it is empty)"
-    rm -f "$m"
+  d="$project_dir/.claude"
+  other="settings.json"; [[ "$settings_name" == settings.json ]] && other="settings.local.json"
+  if settings_has_our_hooks "$d/$other"; then
+    return 0
   fi
-  # Not empty (another settings file is still there): keep the marker so the
-  # uninstall that removes the last one cleans up.
+  if [[ -d "$d" && ! -L "$d" ]] && rmdir "$d" 2>/dev/null; then
+    echo "  remove  $d/ (this installer created it; it is empty)"
+  fi
+  rm -f "$m"
 }
 
 patch_settings() {
@@ -461,7 +473,7 @@ rerun_cmd() {
 # restores the shared scripts) and lists the projects it repairs (#178, #194).
 # Every other case keeps the one-line form.
 rerun_remedy() {
-  local list n rp rn flag proj tab nl line
+  local list plist n rp rn flag proj tab nl line
   list=""
   if [[ "$scope" != project ]] && ! settings_has_our_hooks "$user_settings"; then
     proj="$(wiring_project_root)"
@@ -477,19 +489,26 @@ rerun_remedy() {
       fi
     done
   fi
+  # One entry per project path: a project wired in both settings.json and
+  # settings.local.json is still one project to repair.
+  plist=""
+  if [[ -n "$list" ]]; then
+    plist="$(printf '%s\n' "$list" | awk -F'\t' '!seen[$1]++')"
+  fi
   n=0
-  if [[ -n "$list" ]]; then n="$(printf '%s\n' "$list" | wc -l | tr -d ' ')"; fi
+  if [[ -n "$plist" ]]; then n="$(printf '%s\n' "$plist" | wc -l | tr -d ' ')"; fi
   if (( n > 1 )); then
     # The scripts are shared under $claude_home/bin, so one re-run restores
-    # them for every wired project: print one command, list the others (#194).
-    IFS=$'\t' read -r rp rn <<< "$(printf '%s\n' "$list" | head -n 1)"
+    # them for every wired project: print one command, then list all n
+    # projects (the first one is the one in the command) (#194).
+    IFS=$'\t' read -r rp rn <<< "$(printf '%s\n' "$plist" | head -n 1)"
     flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
     echo "        Re-run ./install.sh --scope project --project $(shq "$rp")$flag from a persistent clone (not a /tmp checkout)."
     echo "        The scripts are shared by every wired project, so that one run repairs all $n:"
     while IFS=$'\t' read -r rp rn; do
       [[ -n "$rp" ]] || continue
       echo "          $rp"
-    done <<< "$list"
+    done <<< "$plist"
   else
     echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)."
   fi
@@ -622,6 +641,11 @@ registry_add() {  # <project dir> <settings file name>
   mkdir -p "$claude_home"
   printf '%s\n' "$line" >> "$project_registry"
   echo "  add     registry: $1 ($2) in $project_registry"
+}
+
+registry_has() {  # <project dir> <settings file name>: 0 when that line is registered
+  [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 1
+  grep -Fxq -- "$1"$'\t'"$2" "$project_registry"
 }
 
 registry_remove() {  # <project dir> <settings file name>
@@ -858,10 +882,13 @@ doctor() {
     # Model context-window check: advisory only, never counts toward broken.
     # Only an id whose window depends on the variant picked is worth a WARN:
     # Opus 4.6 and Sonnet 4.6 run at 200k unless the [1m] variant is chosen,
-    # which the bare id does not record. Opus 4.7 and later (including the
-    # bare `opus` alias) default to 1M, as bin/handoff_ctx_check.sh's model
-    # table says, so they stay quiet. Any other value (including absent) is a
-    # legitimate choice we stay quiet about.
+    # which the bare id does not record. Only these two ids are detected.
+    # Opus 4.7 and later default to 1M (bin/handoff_ctx_check.sh's model
+    # table), so those ids stay quiet. A bare alias (`opus`, `sonnet`) is not
+    # detected: on some providers it resolves to a 4.6 model (Microsoft
+    # Foundry for `opus`, the Claude Platform on AWS for `sonnet`), which this
+    # check cannot see. Any other value (including absent) is a legitimate
+    # choice we stay quiet about.
     mdl="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
     case "$mdl" in
       claude-opus-4-6|claude-sonnet-4-6)

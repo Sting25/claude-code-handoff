@@ -99,6 +99,20 @@ RUN_DIR="$NEUTRAL" inst --doctor
 RUN_DIR=""
 check "4: single project keeps the one-line remedy" yes "$(has "$OUT" "Re-run ./install.sh --scope project --project '$(cd "$P" && pwd -P)' from")"
 
+# #194 review: a project wired in BOTH files counts once. Three registry lines,
+# two projects: the remedy says "all 2" and lists each path exactly once.
+fresh_sandbox
+P2="$(mktemp -d)"; cleanup_on_exit "$P2"
+inst --project "$P"
+inst --project "$P" --local
+inst --project "$P2"
+rm -rf "$H/.claude/bin"
+RUN_DIR="$NEUTRAL" inst --doctor
+RUN_DIR=""
+check "4 dedupe: says all 2 (not 3)" yes "$(has "$OUT" "that one run repairs all 2:")"
+check "4 dedupe: the doubly wired project is listed once" 1 "$(printf '%s\n' "$OUT" | grep -c -x "          $(cd "$P" && pwd -P)")"
+check "4 dedupe: the other project is listed once" 1 "$(printf '%s\n' "$OUT" | grep -c -x "          $(cd "$P2" && pwd -P)")"
+
 # S11: run from INSIDE a wired project while a second wired project is registered.
 fresh_sandbox
 P2="$(mktemp -d)"; cleanup_on_exit "$P2"

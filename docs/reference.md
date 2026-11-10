@@ -1076,8 +1076,9 @@ path with a space can be pasted as is. When the user file is unwired but
 the project (or a registered project) is, the doctor's "re-run" remedy
 names the project-scope command rather than a bare `./install.sh`. When
 several registered projects are wired and the scripts are missing, the
-closing remedy prints one command and lists the other wired projects it
-also repairs, since the scripts are shared.
+closing remedy prints one command and then lists every wired project (once
+each, even when both of its settings files are wired) that the run also
+repairs, since the scripts are shared.
 
 `--uninstall --scope project [--project <dir>] [--local]` strips only
 that project file (hooks, permissions, our `statusLine`, and a model pin
@@ -1156,9 +1157,12 @@ symlinks.
 **Model pin (new machines).** Claude Code's model choice lives in each
 machine's `~/.claude/settings.json`, so a fresh install may default to a
 model you did not pick. The window matters because the context nudge
-measures against it: Opus 4.7 and later (including the bare `opus` alias)
-run at 1M, while Opus 4.6 and Sonnet 4.6 run at 200k unless you pick the
-`[1m]` variant, which the bare id does not record. `--model` pins the value
+measures against it: Opus 4.7 and later run at 1M, while Opus 4.6 and
+Sonnet 4.6 run at 200k unless you pick the `[1m]` variant, which the bare
+id does not record. The `--doctor` warning below names only the two ids it
+can detect; a bare alias such as `opus` or `sonnet` may resolve to a 4.6
+model on some providers (for example Microsoft Foundry for `opus`, the
+Claude Platform on AWS for `sonnet`) and is not detected. `--model` pins the value
 during install, but **never overwrites** a model you already set: a
 differing request is reported and skipped. A plain install with no model
 configured prints a one-line NOTE instead of leaving the gap silent, and

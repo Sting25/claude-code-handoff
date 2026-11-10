@@ -29,10 +29,30 @@ elif [[ "$mode" == install ]]; then
     echo "  and re-run ./install.sh." >&2
     exit 1
   fi
+  # No usable clone: piped (`curl ... | bash`, no source path), a source path
+  # that cannot be entered, or a path that is not a checkout (`bash <(cat
+  # install.sh)` gives /dev/fd, which used to install dangling links). An empty
+  # root used to surface as `cp: /bin/write_handoff.sh` (#194).
   if [[ -z "$repo_root" ]]; then
-    # Piped (`curl ... | bash`): there is no clone to install from, and an
-    # empty root used to surface as `cp: /bin/write_handoff.sh` (#194).
-    echo "ERROR: install.sh was read from a pipe, so there is no clone to install from." >&2
+    if [[ -n "$repo_root_err" ]]; then
+      echo "ERROR: install.sh $repo_root_err, so there is no clone to install from." >&2
+    else
+      echo "ERROR: install.sh was read from a pipe, so there is no clone to install from." >&2
+    fi
+    echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
+    exit 2
+  fi
+  _rr_phys="$(cd "$repo_root" && pwd -P)"
+  case "$_rr_phys/" in
+    /dev/*|/proc/*)
+      echo "ERROR: install.sh was read from $repo_root (a process-substitution or device path), so there is no clone to install from." >&2
+      echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
+      exit 2 ;;
+  esac
+  # install.sh itself is self-contained (install.d/ is only its build input),
+  # so the checkout test is the file the install links first, bin/write_handoff.sh.
+  if [[ ! -f "$repo_root/bin/write_handoff.sh" ]]; then
+    echo "ERROR: $repo_root is not a handoff checkout (no bin/write_handoff.sh), so there is no clone to install from." >&2
     echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
     exit 2
   fi
@@ -49,6 +69,7 @@ elif [[ "$mode" == install ]]; then
     echo "project settings ($project_dir):"
     if [[ ! -d "$(dirname "$settings")" ]]; then
       mkdir -p "$(dirname "$settings")"
+      claude_dir_made_this_run=1
       echo "  new     $(dirname "$settings")/"
       record_created_claude_dir
     fi
@@ -113,6 +134,10 @@ elif [[ "$scope" == project ]]; then
     # unpatch, so clear its registry line and stop cleanly.
     echo "project settings ($project_dir):"
     echo "  ok      $project_dir no longer exists; nothing to unpatch"
+    if ! registry_has "$project_dir" "$settings_name"; then
+      echo "  WARN    no registry line '$project_dir<TAB>$settings_name' in $project_registry;"
+      echo "          nothing was cleared there (was the project installed under another path?)"
+    fi
     registry_remove "$project_dir" "$settings_name"
     rm -f "$(created_marker)" "$(claude_dir_marker)" 2>/dev/null || true   # no file or dir left for them to describe
     echo

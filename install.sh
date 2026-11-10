@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: ebc5883ee55f532f2e041ea2bb964038c7d6e3661976cee26c9330ff8f366b32
+# SOURCE-SHA256: adf27e262a1c662d9b00252091a1bbaf9b5ebd20fc69286779f26d99b34cc149
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -105,8 +105,12 @@ umask 077
 # and would silently turn the caller's cwd into the repo root.)
 _self_src="${BASH_SOURCE[0]:-}"
 repo_root=""
+repo_root_err=""   # why repo_root is empty: "" (no source path, piped) or "cannot cd to <dir>"
 if [[ -n "$_self_src" ]]; then
   repo_root="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || repo_root=""
+  if [[ -z "$repo_root" ]]; then
+    repo_root_err="cannot cd to $(dirname "$_self_src")"
+  fi
 fi
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
@@ -222,6 +226,11 @@ patch_in_progress=0
 # issue #178) gets no backup (there was nothing to keep), so an abort puts back what
 # was there before instead: "absent" removes the file, "empty" truncates it.
 settings_seed_state=""
+# Project scope: the project's .claude/ directory and its marker, when THIS run
+# made them (set in 40-main.sh). An aborted run takes both away again, so the
+# line "an abort undoes that" is true for the directory as well as the file.
+claude_dir_made_this_run=0
+claude_dir_marker_written=0
 cleanup() {
   local rc=$?
   rm -f "$settings.tmp" 2>/dev/null || true
@@ -236,6 +245,16 @@ cleanup() {
     else
       : > "$settings" 2>/dev/null || true
       echo "  restore $settings emptied again, as it was before this run (aborted mid-patch, rc=$rc)" >&2
+    fi
+  fi
+  if (( rc != 0 )) && (( claude_dir_made_this_run )) && [[ -n "$project_dir" ]]; then
+    # rmdir only (never recursive): a directory that gained anything else stays.
+    if [[ -d "$project_dir/.claude" && ! -L "$project_dir/.claude" ]] \
+       && rmdir "$project_dir/.claude" 2>/dev/null; then
+      echo "  restore $project_dir/.claude/ removed again; this run created it (aborted, rc=$rc)" >&2
+      if (( claude_dir_marker_written )) && [[ -n "$project_backup_dir" ]]; then
+        rm -f "$project_backup_dir/claude_dir.mkdir" 2>/dev/null || true
+      fi
     fi
   fi
 }
@@ -365,9 +384,19 @@ if [[ "$scope" == project ]]; then
     # or a link above it) must be made physical the same way a missing path
     # allows: follow a dangling final link, then resolve the parent (#194).
     project_dir="$(resolve_symlink "$project_dir")"
-    if [[ -d "$(dirname "$project_dir")" ]]; then
-      project_dir="$(cd "$(dirname "$project_dir")" && pwd -P)/$(basename "$project_dir")"
-    fi
+    # Walk up to the nearest existing ancestor, make THAT physical, and put the
+    # missing tail back: a removed worktree whose parent is gone too (under a
+    # symlinked ancestor such as macOS /tmp -> /private/tmp) must still match
+    # the physical path the install registered.
+    _gone_tail=""
+    _gone_head="$project_dir"
+    while [[ ! -d "$_gone_head" && "$_gone_head" != / && -n "$_gone_head" ]]; do
+      _gone_tail="/$(basename "$_gone_head")$_gone_tail"
+      _gone_head="$(dirname "$_gone_head")"
+    done
+    _gone_head="$(cd "$_gone_head" && pwd -P)"
+    [[ "$_gone_head" == / ]] && _gone_head=""
+    project_dir="$_gone_head$_gone_tail"
     project_gone=1
   elif [[ ! -d "$project_dir" ]]; then
     echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
@@ -419,10 +448,7 @@ if [[ "$scope" == project ]]; then
   # A vanished project (--uninstall of a removed worktree) cannot be
   # resolved with pwd -P, so its parent is: the key must match the one the
   # install used (issue #178), or the created-file marker would be orphaned.
-  _key_dir="$project_dir"
-  if (( project_gone )) && [[ -d "$(dirname "$project_dir")" ]]; then
-    _key_dir="$(cd "$(dirname "$project_dir")" && pwd -P)/$(basename "$project_dir")"
-  fi
+  _key_dir="$project_dir"   # already physical on both paths (a gone one was resolved above)
   project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$_key_dir" | cksum | awk '{print $1}')"
   # A project-scope --uninstall never touches the secret (see 40-main.sh),
   # so --keep-secret is a no-op there too; say so, same as issue #82.
@@ -1324,21 +1350,33 @@ remove_created_settings_if_empty() {
 claude_dir_marker() { printf '%s\n' "$project_backup_dir/claude_dir.mkdir"; }
 record_created_claude_dir() {
   [[ "$scope" == project ]] || return 0
-  ( mkdir -p "$project_backup_dir" && : > "$(claude_dir_marker)" ) 2>/dev/null || true
+  if ( mkdir -p "$project_backup_dir" && : > "$(claude_dir_marker)" ) 2>/dev/null; then
+    claude_dir_marker_written=1
+  else
+    echo "  WARN    cannot record the created-directory marker in $project_backup_dir;"
+    echo "          --uninstall will leave the empty $project_dir/.claude/ in place"
+  fi
 }
+# The directory is always <project>/.claude, the path the install made, never
+# the parent of the (possibly symlink-resolved) settings target: a settings
+# file linked into a dotfiles directory must not get that directory removed.
+# The marker is consumed on every uninstall, so it can never outlive the
+# directory it described (a user who recreates .claude/ later is not ours).
+# The one exception is the other settings file of this project still being
+# wired: the uninstall that strips the last one then cleans up.
 remove_created_claude_dir_if_empty() {
-  local m d
+  local m d other
   m="$(claude_dir_marker)"
   [[ -f "$m" && ! -L "$m" ]] || return 0
-  d="$(dirname "$settings")"
-  if [[ ! -d "$d" ]]; then
-    rm -f "$m"
-  elif [[ ! -L "$d" ]] && rmdir "$d" 2>/dev/null; then
-    echo "  remove  $d/ (this installer created it; it is empty)"
-    rm -f "$m"
+  d="$project_dir/.claude"
+  other="settings.json"; [[ "$settings_name" == settings.json ]] && other="settings.local.json"
+  if settings_has_our_hooks "$d/$other"; then
+    return 0
   fi
-  # Not empty (another settings file is still there): keep the marker so the
-  # uninstall that removes the last one cleans up.
+  if [[ -d "$d" && ! -L "$d" ]] && rmdir "$d" 2>/dev/null; then
+    echo "  remove  $d/ (this installer created it; it is empty)"
+  fi
+  rm -f "$m"
 }
 
 patch_settings() {
@@ -1553,7 +1591,7 @@ rerun_cmd() {
 # restores the shared scripts) and lists the projects it repairs (#178, #194).
 # Every other case keeps the one-line form.
 rerun_remedy() {
-  local list n rp rn flag proj tab nl line
+  local list plist n rp rn flag proj tab nl line
   list=""
   if [[ "$scope" != project ]] && ! settings_has_our_hooks "$user_settings"; then
     proj="$(wiring_project_root)"
@@ -1569,19 +1607,26 @@ rerun_remedy() {
       fi
     done
   fi
+  # One entry per project path: a project wired in both settings.json and
+  # settings.local.json is still one project to repair.
+  plist=""
+  if [[ -n "$list" ]]; then
+    plist="$(printf '%s\n' "$list" | awk -F'\t' '!seen[$1]++')"
+  fi
   n=0
-  if [[ -n "$list" ]]; then n="$(printf '%s\n' "$list" | wc -l | tr -d ' ')"; fi
+  if [[ -n "$plist" ]]; then n="$(printf '%s\n' "$plist" | wc -l | tr -d ' ')"; fi
   if (( n > 1 )); then
     # The scripts are shared under $claude_home/bin, so one re-run restores
-    # them for every wired project: print one command, list the others (#194).
-    IFS=$'\t' read -r rp rn <<< "$(printf '%s\n' "$list" | head -n 1)"
+    # them for every wired project: print one command, then list all n
+    # projects (the first one is the one in the command) (#194).
+    IFS=$'\t' read -r rp rn <<< "$(printf '%s\n' "$plist" | head -n 1)"
     flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
     echo "        Re-run ./install.sh --scope project --project $(shq "$rp")$flag from a persistent clone (not a /tmp checkout)."
     echo "        The scripts are shared by every wired project, so that one run repairs all $n:"
     while IFS=$'\t' read -r rp rn; do
       [[ -n "$rp" ]] || continue
       echo "          $rp"
-    done <<< "$list"
+    done <<< "$plist"
   else
     echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)."
   fi
@@ -1714,6 +1759,11 @@ registry_add() {  # <project dir> <settings file name>
   mkdir -p "$claude_home"
   printf '%s\n' "$line" >> "$project_registry"
   echo "  add     registry: $1 ($2) in $project_registry"
+}
+
+registry_has() {  # <project dir> <settings file name>: 0 when that line is registered
+  [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 1
+  grep -Fxq -- "$1"$'\t'"$2" "$project_registry"
 }
 
 registry_remove() {  # <project dir> <settings file name>
@@ -1950,10 +2000,13 @@ doctor() {
     # Model context-window check: advisory only, never counts toward broken.
     # Only an id whose window depends on the variant picked is worth a WARN:
     # Opus 4.6 and Sonnet 4.6 run at 200k unless the [1m] variant is chosen,
-    # which the bare id does not record. Opus 4.7 and later (including the
-    # bare `opus` alias) default to 1M, as bin/handoff_ctx_check.sh's model
-    # table says, so they stay quiet. Any other value (including absent) is a
-    # legitimate choice we stay quiet about.
+    # which the bare id does not record. Only these two ids are detected.
+    # Opus 4.7 and later default to 1M (bin/handoff_ctx_check.sh's model
+    # table), so those ids stay quiet. A bare alias (`opus`, `sonnet`) is not
+    # detected: on some providers it resolves to a 4.6 model (Microsoft
+    # Foundry for `opus`, the Claude Platform on AWS for `sonnet`), which this
+    # check cannot see. Any other value (including absent) is a legitimate
+    # choice we stay quiet about.
     mdl="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
     case "$mdl" in
       claude-opus-4-6|claude-sonnet-4-6)
@@ -2009,10 +2062,30 @@ elif [[ "$mode" == install ]]; then
     echo "  and re-run ./install.sh." >&2
     exit 1
   fi
+  # No usable clone: piped (`curl ... | bash`, no source path), a source path
+  # that cannot be entered, or a path that is not a checkout (`bash <(cat
+  # install.sh)` gives /dev/fd, which used to install dangling links). An empty
+  # root used to surface as `cp: /bin/write_handoff.sh` (#194).
   if [[ -z "$repo_root" ]]; then
-    # Piped (`curl ... | bash`): there is no clone to install from, and an
-    # empty root used to surface as `cp: /bin/write_handoff.sh` (#194).
-    echo "ERROR: install.sh was read from a pipe, so there is no clone to install from." >&2
+    if [[ -n "$repo_root_err" ]]; then
+      echo "ERROR: install.sh $repo_root_err, so there is no clone to install from." >&2
+    else
+      echo "ERROR: install.sh was read from a pipe, so there is no clone to install from." >&2
+    fi
+    echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
+    exit 2
+  fi
+  _rr_phys="$(cd "$repo_root" && pwd -P)"
+  case "$_rr_phys/" in
+    /dev/*|/proc/*)
+      echo "ERROR: install.sh was read from $repo_root (a process-substitution or device path), so there is no clone to install from." >&2
+      echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
+      exit 2 ;;
+  esac
+  # install.sh itself is self-contained (install.d/ is only its build input),
+  # so the checkout test is the file the install links first, bin/write_handoff.sh.
+  if [[ ! -f "$repo_root/bin/write_handoff.sh" ]]; then
+    echo "ERROR: $repo_root is not a handoff checkout (no bin/write_handoff.sh), so there is no clone to install from." >&2
     echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
     exit 2
   fi
@@ -2029,6 +2102,7 @@ elif [[ "$mode" == install ]]; then
     echo "project settings ($project_dir):"
     if [[ ! -d "$(dirname "$settings")" ]]; then
       mkdir -p "$(dirname "$settings")"
+      claude_dir_made_this_run=1
       echo "  new     $(dirname "$settings")/"
       record_created_claude_dir
     fi
@@ -2093,6 +2167,10 @@ elif [[ "$scope" == project ]]; then
     # unpatch, so clear its registry line and stop cleanly.
     echo "project settings ($project_dir):"
     echo "  ok      $project_dir no longer exists; nothing to unpatch"
+    if ! registry_has "$project_dir" "$settings_name"; then
+      echo "  WARN    no registry line '$project_dir<TAB>$settings_name' in $project_registry;"
+      echo "          nothing was cleared there (was the project installed under another path?)"
+    fi
     registry_remove "$project_dir" "$settings_name"
     rm -f "$(created_marker)" "$(claude_dir_marker)" 2>/dev/null || true   # no file or dir left for them to describe
     echo
