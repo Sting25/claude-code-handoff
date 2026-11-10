@@ -42,6 +42,28 @@
 #  12. (#183 review) A hand-back that lands between the release's owner check
 #      and its capture sweep (the capture is removed by the reclaimer) is
 #      caught by the re-check of owner.
+#  13. (#188) No hard links: every racer (A, B and a third acquirer) runs
+#      with an `ln` that fails with "Operation not supported", as macOS ln
+#      does on exFAT and FAT32. B captures the token A just won; the
+#      hand-back must still put A's token back (no lost token), a third
+#      acquirer must miss (one winner), and A's release must free the lock.
+#  14. (#188) No hard links and a token that appeared meanwhile: B's
+#      fallback hand-back never replaces it and says so on stderr. Only B
+#      runs with the ln stub; the test asserts the stub was called.
+#  15. (#199 review) The fallback's own windows, driven by a DEBUG-trap park
+#      inside B: (a) the holder releases and a new acquirer makes the dir
+#      after B's read, before its re-check: no stray token in the new dir;
+#      (b) an owner appears after B's read, before its create: it is not
+#      replaced and B warns once (an mv shim modelling BSD `mv -n`'s
+#      check-then-rename parks at the same point, so the rejected rename-back
+#      goes red here); (c) the holder releases before B's create: the lock
+#      is gone, B says nothing; (d) an empty capture that stays empty is not
+#      handed back (owner stays absent, a third acquirer still misses, the
+#      holder's release frees the lock), and one filled during the pause is.
+#  16. (#188) Group 1's barrier race with the ln stub on every racer and a
+#      `date` that sleeps a random 0 to 190 ms, so unordered racers go through
+#      the fallback (HANDOFF_RACE_N / 4, at least 10 iterations per site; the
+#      number of stub calls is printed).
 set -u
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 WH="$REPO_ROOT/bin/write_handoff.sh"
@@ -71,6 +93,21 @@ drv="$work/racer.sh"
 cat > "$drv" <<'DRV'
 set -u
 source "$1"; site="$2"; lock="$3"; go="$4"; ready="$5"; fin="$6"
+# RACE_DBG_HOLD parks this racer once, right before the first command whose
+# text contains RACE_DBG_MATCH, until that file exists (a DEBUG trap; -T
+# carries it into functions and subshells). `>|` because the park can fire
+# inside a noclobber subshell.
+race_dbg() {
+  [[ -e "$RACE_DBG_HOLD.passed" ]] && return 0
+  [[ "$BASH_COMMAND" == *"$RACE_DBG_MATCH"* ]] || return 0
+  : >| "$RACE_DBG_HOLD.parked"
+  local n=0
+  while [[ ! -e "$RACE_DBG_HOLD" ]] && (( n < 1000 )); do
+    sleep 0.01 2>/dev/null || sleep 1; n=$((n + 1))
+  done
+  : >| "$RACE_DBG_HOLD.passed"
+}
+if [[ -n "${RACE_DBG_HOLD:-}" ]]; then set -T; trap race_dbg DEBUG; fi
 if [[ -n "$ready" ]]; then : > "$ready"; fi
 if [[ -n "$go" ]]; then
   spins=0
@@ -456,6 +493,238 @@ for site in wh ta; do
   : > "$d/r_go"; wait "$pa"
   check "$site re-check: lock freed, no token of ours left behind" no \
     "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
+done
+
+
+# --- 13. no hard links: the hand-back keeps the token (#188) -----------------
+# An `ln` on PATH that always fails the way link(2) does on a filesystem
+# without hard links. It logs each call so the test can show it was used.
+nolink="$work/nolink"; mkdir -p "$nolink"
+cat > "$nolink/ln" <<SHIM
+#!/usr/bin/env bash
+echo x >> "$nolink/calls"
+echo "ln: \${2:-?}: Operation not supported" >&2
+exit 1
+SHIM
+chmod +x "$nolink/ln"
+for site in wh ta; do
+  d="$work/nolink.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  must age_lock "$lock"
+  rm -f "$nolink/calls"
+  PATH="$nolink:$shim:$PATH" RACE_HOLD_UNTIL="$d/b_go" \
+    bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/ob" 2>"$d/eb" </dev/null & pb=$!
+  parked=no; wait_for "$d/b_go.parked" && parked=yes
+  check "$site no hard links: B parked after its age check" yes "$parked"
+  PATH="$nolink:$PATH" HOLD_WON="$d/a_won" HOLD_REL="$d/a_rel" \
+    bash "$drv" "$funcs" "$site-hold" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null & pa=$!
+  wait_for "$d/a_won"
+  toka="$(cat "$lock/owner" 2>/dev/null)"
+  : > "$d/b_go"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site no hard links: the ln stub was called" yes \
+    "$([[ -s "$nolink/calls" ]] && echo yes || echo no)"
+  check "$site no hard links: B misses" 1 "$rcb"
+  check "$site no hard links: A's token is back at owner" "$toka" \
+    "$([[ -n "$toka" && -f "$lock/owner" ]] && cat "$lock/owner")"
+  check "$site no hard links: no captured token left behind" 0 \
+    "$(find "$lock" -name 'owner.reap.*' 2>/dev/null | wc -l | tr -d ' ')"
+  check "$site no hard links: B printed nothing" "" "$(cat "$d/eb")"
+  read -r rcc _ < <(PATH="$nolink:$PATH" bash "$drv" "$funcs" "$site" "$lock" "" "" "" 2>/dev/null </dev/null)
+  check "$site no hard links: a third acquirer misses" 1 "$rcc"
+  check "$site no hard links: A's token survives the third acquirer" "$toka" \
+    "$(cat "$lock/owner" 2>/dev/null)"
+  : > "$d/a_rel"; wait "$pa"
+  read -r rca _ < "$d/oa"
+  check "$site no hard links: A won" 0 "$rca"
+  check "$site no hard links: A's release frees the lock" no \
+    "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
+done
+
+# --- 14. no hard links, a token appeared meanwhile: never replaced ----------
+for site in wh ta; do
+  d="$work/nolinkblocked.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  must age_lock "$lock"
+  rm -f "$nolink/calls"
+  PATH="$nolink:$shim:$PATH" RACE_HOLD_UNTIL="$d/b_go" RACE_MV_HOLD="$d/b_mv" \
+    bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/ob" 2>"$d/eb" </dev/null & pb=$!
+  wait_for "$d/b_go.parked"
+  bash "$drv" "$funcs" "$site" "$lock" "" "" "" > /dev/null 2>&1 </dev/null
+  : > "$d/b_go"
+  parked=no; wait_for "$d/b_mv.parked" && parked=yes
+  check "$site no hard links, blocked: B parked holding its capture" yes "$parked"
+  echo 777 > "$lock/owner"            # someone else's token, in the gap
+  : > "$d/b_mv"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site no hard links, blocked: the ln stub was called" yes \
+    "$([[ -s "$nolink/calls" ]] && echo yes || echo no)"
+  check "$site no hard links, blocked: B misses" 1 "$rcb"
+  check "$site no hard links, blocked: the newer token is not replaced" 777 "$(cat "$lock/owner")"
+  check "$site no hard links, blocked: one stderr line" 1 \
+    "$(grep -c 'could not hand a live holder' "$d/eb")"
+done
+
+# --- 15. the fallback's own windows, parked inside B (#199 review) ----------
+# B parks after its age check (date shim), A reclaims and holds, B captures
+# A's token, its ln fails, and a DEBUG trap parks it at the named command.
+# mvn/mv models BSD `mv -n` (check, then rename(2), which replaces): it parks
+# between the check and the rename at the same hold file, so the rename-back
+# the PR rejects meets the same interleaving. The reclaim itself never runs
+# `mv -n`, so for this code that branch is inert.
+mvn="$work/mvn"; mkdir -p "$mvn"
+cat > "$mvn/mv" <<SHIM
+#!/usr/bin/env bash
+if [[ "\${1:-}" == -n && -n "\${RACE_DBG_HOLD:-}" ]]; then
+  shift
+  [[ -e "\$2" ]] && exit 0
+  : > "\${RACE_DBG_HOLD}.parked"
+  n=0
+  while [[ ! -e "\$RACE_DBG_HOLD" ]] && (( n < 1000 )); do
+    sleep 0.01 2>/dev/null || sleep 1; n=\$((n + 1))
+  done
+  : > "\${RACE_DBG_HOLD}.passed"
+fi
+exec "$real_mv" "\$@"
+SHIM
+chmod +x "$mvn/mv"
+# fb_start <dir> <lock> <match>: age the lock, start B (parks at date) and
+# A (reclaims and holds). The caller then touches $d/b_go to send B on to its
+# capture and the park at <match>. Sets pa pb.
+fb_start() {
+  local d="$1" lock="$2" match="$3"
+  must age_lock "$lock"
+  PATH="$mvn:$nolink:$shim:$PATH" RACE_HOLD_UNTIL="$d/b_go" \
+    RACE_DBG_HOLD="$d/b_dbg" RACE_DBG_MATCH="$match" \
+    bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/ob" 2>"$d/eb" </dev/null & pb=$!
+  wait_for "$d/b_go.parked"
+  HOLD_WON="$d/a_won" HOLD_REL="$d/a_rel" HOLD_AFTER="$d/a_after" \
+    bash "$drv" "$funcs" "$site-hold" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null & pa=$!
+  wait_for "$d/a_won"
+}
+for site in wh ta; do
+  # (a) release + new dir between B's read and its re-check.
+  d="$work/fb_recheck.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  fb_start "$d" "$lock" "[[ -z \"\$tok\" ]]"; : > "$d/b_go"
+  parked=no; wait_for "$d/b_dbg.parked" && parked=yes
+  check "$site fallback re-check: B parked after its read" yes "$parked"
+  : > "$d/a_rel"; wait "$pa"
+  gone=no; [[ -e "$lock" ]] || gone=yes
+  check "$site fallback re-check: A's release removed B's capture and the dir" yes "$gone"
+  mkdir "$lock"                                  # a new acquirer, not yet claimed
+  : > "$d/b_dbg"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site fallback re-check: B misses" 1 "$rcb"
+  check "$site fallback re-check: no stray token in the new dir" "" "$(entries "$lock")"
+  check "$site fallback re-check: B printed nothing" "" "$(cat "$d/eb")"
+
+  # (b) an owner appears between B's read and its create.
+  d="$work/fb_excl.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  fb_start "$d" "$lock" "printf '%s\n' \"\$tok\""; : > "$d/b_go"
+  parked=no; wait_for "$d/b_dbg.parked" && parked=yes
+  check "$site fallback O_EXCL: B parked before its create" yes "$parked"
+  echo 777 > "$lock/owner"                       # someone else's token, in the gap
+  : > "$d/b_dbg"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site fallback O_EXCL: B misses" 1 "$rcb"
+  check "$site fallback O_EXCL: the newer token is not replaced" 777 "$(cat "$lock/owner" 2>/dev/null)"
+  check "$site fallback O_EXCL: one stderr line" 1 \
+    "$(grep -c 'could not hand a live holder' "$d/eb")"
+  : > "$d/a_rel"; wait "$pa"
+
+  # (c) the holder releases between B's re-check and its create.
+  d="$work/fb_gone.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  fb_start "$d" "$lock" "printf '%s\n' \"\$tok\""; : > "$d/b_go"
+  wait_for "$d/b_dbg.parked"
+  : > "$d/a_rel"; wait "$pa"
+  : > "$d/b_dbg"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site fallback lock gone: B misses" 1 "$rcb"
+  check "$site fallback lock gone: lock dir not re-created" no \
+    "$([[ -e "$lock" ]] && echo yes || echo no)"
+  check "$site fallback lock gone: B printed nothing" "" "$(cat "$d/eb")"
+
+  # (d) an empty capture (a claim captured between its create and its
+  # write) that stays empty: not handed back, owner stays absent.
+  d="$work/fb_empty.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  fb_start "$d" "$lock" "no park"
+  : > "$lock/owner"                              # fresh and empty
+  : > "$d/b_go"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site fallback empty token: B misses" 1 "$rcb"
+  check "$site fallback empty token: no empty owner, no capture left" "" "$(entries "$lock")"
+  check "$site fallback empty token: one stderr line" 1 \
+    "$(grep -c 'captured an empty token' "$d/eb")"
+  read -r rcc _ < <(PATH="$nolink:$PATH" bash "$drv" "$funcs" "$site" "$lock" "" "" "" 2>/dev/null </dev/null)
+  check "$site fallback empty token: a third acquirer misses" 1 "$rcc"
+  : > "$d/a_rel"; wait "$pa"
+  check "$site fallback empty token: A's release frees the lock" no \
+    "$([[ -e "$lock" ]] && echo yes || echo no)"
+
+  # (d') an empty capture filled during the pause (the claim's write lands
+  # in the capture): the re-read hands it back.
+  d="$work/fb_fill.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  fb_start "$d" "$lock" "sleep 0.1"
+  toka="$(cat "$lock/owner")"
+  : > "$lock/owner"
+  : > "$d/b_go"
+  parked=no; wait_for "$d/b_dbg.parked" && parked=yes
+  check "$site fallback re-read: B parked in its pause" yes "$parked"
+  for g in "$lock"/owner.reap.*; do echo "$toka" > "$g"; done
+  : > "$d/b_dbg"; wait "$pb"
+  check "$site fallback re-read: A's token is back at owner" "$toka" "$(cat "$lock/owner" 2>/dev/null)"
+  check "$site fallback re-read: B printed nothing" "" "$(cat "$d/eb")"
+  : > "$d/a_rel"; wait "$pa"
+  check "$site fallback re-read: A's release frees the lock" no \
+    "$([[ -e "$lock" ]] && echo yes || echo no)"
+done
+
+# --- 16. the barrier race of group 1, with no hard links (#188) -------------
+# Without help two free-running racers essentially never reach the hand-back
+# (measured: 0 ln calls in 40 iterations, and 0 across a sweep of fixed start
+# offsets): the loser captures a live token only if its stretch from age
+# check to capture (one `date`, then `mv`) outlasts the winner's from capture
+# to claim (`mv`, two `stat`s, `rm -rf`, the claim), so it needs to be
+# descheduled there. A `date` that sleeps 0 to 190 ms at random, called by
+# every racer between its age check and its capture, supplies that without
+# ordering anyone (measured: 15 hand-backs in 20 iterations).
+jitter="$work/jitter"; mkdir -p "$jitter"
+cat > "$jitter/date" <<SHIM
+#!/usr/bin/env bash
+sleep "\$(printf '0.%02d' \$(( RANDOM % 20 )))" 2>/dev/null || true
+exec "$real_date" "\$@"
+SHIM
+chmod +x "$jitter/date"
+NL_N=$(( N / 4 )); (( NL_N < 10 )) && NL_N=10
+for site in wh ta; do
+  bad=0; tokbad=0; first_bad=""
+  rm -f "$nolink/calls"
+  for i in $(seq 1 "$NL_N"); do
+    d="$work/nlrace.$site.$i"; mkdir -p "$d"; lock="$d/the.lock"
+    age_lock "$lock" || { bad=$((bad + 1)); continue; }
+    PATH="$jitter:$nolink:$PATH" \
+      bash "$drv" "$funcs" "$site" "$lock" "$d/go" "$d/r1" "" > "$d/o1" 2>/dev/null </dev/null & p1=$!
+    PATH="$jitter:$nolink:$PATH" \
+      bash "$drv" "$funcs" "$site" "$lock" "$d/go" "$d/r2" "" > "$d/o2" 2>/dev/null </dev/null & p2=$!
+    wait_for "$d/r1" "$d/r2"
+    : > "$d/go"
+    wait "$p1"; wait "$p2"
+    read -r rc1 pid1 < "$d/o1"; read -r rc2 pid2 < "$d/o2"
+    wins=0; winner=""
+    if [[ "$rc1" == 0 ]]; then wins=$((wins + 1)); winner="$pid1"; fi
+    if [[ "$rc2" == 0 ]]; then wins=$((wins + 1)); winner="$pid2"; fi
+    if (( wins != 1 )); then
+      bad=$((bad + 1)); [[ -n "$first_bad" ]] || first_bad="$i"
+    elif [[ "$(cat "$lock/owner" 2>/dev/null)" != "$winner" ]]; then
+      tokbad=$((tokbad + 1)); [[ -n "$first_bad" ]] || first_bad="$i"
+    fi
+    rm -rf "$d"
+  done
+  [[ -n "$first_bad" ]] && echo "  (site $site, no hard links: first bad iteration $first_bad of $NL_N)"
+  echo "  (site $site, no hard links: the ln stub ran $( [[ -f "$nolink/calls" ]] && wc -l < "$nolink/calls" | tr -d ' ' || echo 0) times in $NL_N iterations)"
+  calls=0; [[ -f "$nolink/calls" ]] && calls="$(wc -l < "$nolink/calls" | tr -d ' ')"
+  check "$site no-link barrier race x$NL_N: the fallback ran at least once" yes \
+    "$( (( calls >= 1 )) && echo yes || echo no)"
+  check "$site no-link barrier race x$NL_N: iterations without exactly one winner" 0 "$bad"
+  check "$site no-link barrier race x$NL_N: iterations where the token is not the winner's" 0 "$tokbad"
 done
 
 finish
