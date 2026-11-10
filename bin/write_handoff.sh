@@ -1660,6 +1660,21 @@ fi
 ts_utc="$(date -u +'%Y-%m-%d %H:%M UTC')"
 write_epoch="$(date +%s)"
 
+# #167: shell-quote a path for the verify commands printed into the handoff.
+# Always wraps in single quotes (each ' becomes '\''), so spaces and shell
+# metacharacters survive a paste and non-ASCII bytes pass through unchanged
+# (bash 3.2's printf %q would turn them into octal escapes). A path holding a
+# newline falls back to printf %q, which emits a one-line $'...' form.
+handoff_shquote() {  # <path>
+  # Replacement held in variables: the inline form quotes differently in bash 3.2 and 5.
+  local sq="'" bs='\' rep
+  rep="$sq$bs$sq$sq"
+  case "$1" in
+    *$'\n'*) printf '%q' "$1" ;;
+    *) printf "'%s'" "${1//$sq/$rep}" ;;
+  esac
+}
+
 git_short() { git -C "$1" rev-parse --short HEAD 2>/dev/null || echo "?"; }
 git_subj()  { git -C "$1" log -1 --pretty=%s 2>/dev/null || echo "?"; }
 git_branch() { git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?"; }
@@ -1912,19 +1927,21 @@ EOF
     # the repo_root line only when it is a different path.
     verify_wt="$(git -C "${HANDOFF_ROOT_ANCHOR:-$repo_root}" rev-parse --show-toplevel 2>/dev/null || true)"
     [[ -n "$verify_wt" ]] || verify_wt="$repo_root"
-    # #167: %q shell-quotes each path (identity for plain paths) so the emitted
-    # command survives spaces and metacharacters when pasted into a shell.
-    printf 'git -C %q status && git -C %q log --oneline -5\n' "$verify_wt" "$verify_wt"
+    # #167: each path goes through handoff_shquote so the emitted command
+    # survives spaces and metacharacters when pasted into a shell.
+    q_wt="$(handoff_shquote "$verify_wt")"
+    printf 'git -C %s status && git -C %s log --oneline -5\n' "$q_wt" "$q_wt"
     if [[ "$verify_wt" != "$repo_root" ]]; then
-      printf 'git -C %q status && git -C %q log --oneline -5\n' "$repo_root" "$repo_root"
+      q_root="$(handoff_shquote "$repo_root")"
+      printf 'git -C %s status && git -C %s log --oneline -5\n' "$q_root" "$q_root"
     fi
     if [[ -n "$substrate_root" ]]; then
-      printf 'git -C %q log --oneline -5\n' "$substrate_root"
+      printf 'git -C %s log --oneline -5\n' "$(handoff_shquote "$substrate_root")"
     fi
   else
     # Non-git project: no commit/branch state to verify against. Point at the
     # handoff artifacts instead so the next session can confirm they exist.
-    printf 'ls -la %q\n' "$repo_root/.claude/"
+    printf 'ls -la %s\n' "$(handoff_shquote "$repo_root/.claude/")"
   fi
   printf '```\n'
   printf '%s\n\n' "$HANDOFF_BIND_END"

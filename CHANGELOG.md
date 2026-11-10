@@ -67,6 +67,7 @@ are appended).
   drops that sentence.
 
 ### Fixed
+- The emitted "Verify state matches reality" commands shell-quote their paths (#167). `write_handoff.sh` printed the project path bare in `git -C <path> status && ...`, the second worktree line, the substrate line, and the non-git `ls -la <path>/.claude/` line, so a path with spaces or quotes gave a command that broke when pasted. Each path is now wrapped in single quotes (an embedded `'` becomes `'\''`), which keeps non-ASCII names readable on bash 3.2; a path containing a newline falls back to the one-line `$'...'` form. Plain paths gain quotes but are otherwise unchanged. New `tests/test_verify_cmd_quoting.sh`.
 - `write_handoff.sh` no longer blocks forever on an open, silent stdin
   (#158). The `/handoff` skill runs `--restamp` through the Claude Code
   Bash tool, whose stdin is a unix socket that is not a tty and never
