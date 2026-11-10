@@ -214,7 +214,9 @@ check "G: model pinned in project file" 'opus[1m]' "$(pj '.model')"
 check "G: no user-scope pin record" no "$([[ -e "$H/.claude/handoff-model-pin" ]] && echo yes || echo no)"
 check "G: one project pin record" 1 "$(find "$H/.claude" -maxdepth 1 -name 'handoff-model-pin.project.*' | wc -l | tr -d ' ')"
 inst --uninstall --project "$P"
-check "G: uninstall removes the project pin" null "$(pj '.model // "null"')"
+# The file was created by this install, so after the strip only the empty
+# skeleton is left and the uninstall removes it (issue #178).
+check "G: uninstall removes the project pin (and the file it created)" no "$([[ -e "$P/.claude/settings.json" ]] && echo yes || echo no)"
 check "G: project pin record consumed" 0 "$(find "$H/.claude" -maxdepth 1 -name 'handoff-model-pin.project.*' | wc -l | tr -d ' ')"
 
 # --- H. doctor: user-scope wiring next to a project layout ------------------------
@@ -407,6 +409,6 @@ check "M5: registry warning quotes the path" yes "$(has "$OUT" "./install.sh --u
 cmd_line="$(printf '%s\n' "$OUT" | grep -m1 "\./install.sh --uninstall --scope project --project '" | sed 's/^ *//')"
 OUT="$(cd "$P" && eval "HOME=\"\$H\" CLAUDE_HOME=\"\$H/.claude\" bash \"\$SRC/install.sh\" ${cmd_line#./install.sh }" 2>&1)"; RC=$?
 check "M5: the printed command pastes and runs" 0 "$RC"
-check "M5: and unwires that project" 0 "$(jq -r '.hooks.Stop // [] | length' "$Q/.claude/settings.json" 2>/dev/null)"
+check "M5: and unwires that project" no "$([[ -e "$Q/.claude/settings.json" ]] && echo yes || echo no)"
 
 finish

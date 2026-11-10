@@ -121,6 +121,39 @@ take_settings_backup() {
   echo "  backup  $settings -> $settings_backup"
 }
 
+# Project scope (issue #178): remember that THIS installer created the
+# project settings file, so a later --uninstall can remove it again once
+# nothing but our own empty residue is left in it. Written only after the
+# patch sequence completed (an abort already removes the file itself), and
+# only for a file that did not exist; a pre-existing file, even an empty
+# one, is never recorded and so is never removed.
+created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
+record_created_settings() {
+  [[ "$scope" == project && "$settings_seed_state" == absent ]] || return 0
+  mkdir -p "$project_backup_dir"
+  : > "$(created_marker)"
+}
+
+# Project-scope --uninstall: delete the settings file when this installer
+# created it and what is left is only the empty hooks/permissions skeleton
+# the strip leaves behind. Anything else in the file (a key the user added,
+# a hook that is not ours) keeps it. The marker is consumed either way.
+remove_created_settings_if_empty() {
+  local m
+  m="$(created_marker)"
+  [[ -f "$m" && ! -L "$m" ]] || return 0
+  if [[ -f "$settings" && ! -L "$settings" ]] && command -v jq >/dev/null 2>&1 \
+     && jq -e '
+          (if (.hooks // {}) == {} then del(.hooks) else . end)
+          | (if (.permissions.allow // []) == [] then del(.permissions.allow) else . end)
+          | (if (.permissions // {}) == {} then del(.permissions) else . end)
+          | . == {}' "$settings" >/dev/null 2>&1; then
+    rm -f "$settings"
+    echo "  remove  $settings (this installer created it; nothing else was ever written to it)"
+  fi
+  rm -f "$m"
+}
+
 patch_settings() {
   if ! command -v jq >/dev/null 2>&1; then
     echo
@@ -129,9 +162,9 @@ patch_settings() {
     return
   fi
   ensure_settings_json || return
-  if [[ "$scope" == project && -n "$settings_seed_state" ]]; then
-    # Project scope never backs up a file this run just seeded as {}: there
-    # is nothing to keep, and cleanup() undoes the seed itself on abort.
+  if [[ -n "$settings_seed_state" ]]; then
+    # Neither scope backs up a file this run just seeded as {}: there is
+    # nothing to keep, and cleanup() undoes the seed itself on abort.
     settings_backup=""
     echo "  ok      no backup needed ($settings was just created; an abort undoes that)"
   else
@@ -160,6 +193,7 @@ patch_settings() {
   maybe_install_perm "$perm_wr"
   maybe_install_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
+  record_created_settings
   # If no change vs backup, drop the redundant backup.
   if [[ -n "$settings_backup" ]] && cmp -s "$settings" "$settings_backup"; then
     rm "$settings_backup"
@@ -320,6 +354,34 @@ rerun_cmd() {
     fi
   fi
   printf '%s\n' "./install.sh"
+}
+
+# The doctor's closing remedy. When the user file is unwired and the only
+# wiring is in several registered projects, a single command would leave the
+# others broken, so it prints one command per wired project (issue #178).
+# Every other case keeps the one-line form.
+rerun_remedy() {
+  local list n rp rn flag proj
+  list=""
+  if [[ "$scope" != project ]] && ! settings_has_our_hooks "$user_settings"; then
+    proj="$(wiring_project_root)"
+    if ! settings_has_our_hooks "$proj/.claude/settings.json" \
+       && ! settings_has_our_hooks "$proj/.claude/settings.local.json"; then
+      list="$(registry_scan wired)"
+    fi
+  fi
+  n=0
+  if [[ -n "$list" ]]; then n="$(printf '%s\n' "$list" | wc -l | tr -d ' ')"; fi
+  if (( n > 1 )); then
+    echo "        Re-run one command per wired project, from a persistent clone (not a /tmp checkout):"
+    while IFS=$'\t' read -r rp rn; do
+      [[ -n "$rp" ]] || continue
+      flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
+      echo "          ./install.sh --scope project --project $(shq "$rp")$flag"
+    done <<< "$list"
+  else
+    echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)."
+  fi
 }
 
 # Single-quote a path for a printed, copy-pasteable command (a project path
@@ -703,7 +765,7 @@ doctor() {
   report_plugin_leftover "  WARN"
   if (( broken )); then
     echo "doctor: $broken issue(s) found." >&2
-    echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)." >&2
+    rerun_remedy >&2
     return 1
   fi
   echo "doctor: all hooks resolve."

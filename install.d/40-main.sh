@@ -56,8 +56,8 @@ elif [[ "$mode" == install ]]; then
   echo
   if [[ -z "$model_pin" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
      && jq -e 'type == "object" and ((.model // null) == null)' "$settings" >/dev/null 2>&1; then
-    echo "NOTE: no model pinned in settings.json — a bare 'opus' selection runs at a"
-    echo "      200k context window. Re-run  ./install.sh --model 'opus[1m]'  to pin one."
+    echo "NOTE: no model pinned in $settings."
+    echo "      To pin one there, re-run  $(rerun_cmd) --model '<model>'  (for example 'opus[1m]')."
     echo
   fi
   if [[ "$scope" == project ]]; then
@@ -112,6 +112,7 @@ elif [[ "$scope" == project ]]; then
   fi
   echo "project settings ($project_dir):"
   unpatch_settings
+  remove_created_settings_if_empty
   registry_remove "$project_dir" "$settings_name"
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
