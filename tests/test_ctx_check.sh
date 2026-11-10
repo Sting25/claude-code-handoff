@@ -300,6 +300,12 @@ repo="$(mk_repo)"; seed "$repo" NO1M 4000 100000; seed_model "$repo" NO1M claude
 out="$(run_cc_auto "$repo" NO1M CLAUDE_CODE_DISABLE_1M_CONTEXT=1)"
 check "DISABLE_1M_CONTEXT -> 200000-token window" yes "$(has "$out" "200000-token window")"
 rm -rf "$repo"
+for m in claude-fable-5-2 claude-mythos-5-2; do
+  repo="$(mk_repo)"; seed "$repo" NO1MF 4000 100000; seed_model "$repo" NO1MF "$m"
+  out="$(run_cc_auto "$repo" NO1MF CLAUDE_CODE_DISABLE_1M_CONTEXT=1)"
+  check "DISABLE_1M_CONTEXT, $m -> 200000-token window" yes "$(has "$out" "200000-token window")"
+  rm -rf "$repo"
+done
 
 # A MEASURED 250k count cannot fit the 200k window the table lists: the table
 # is wrong for this session, so the window is unknown (the old code
