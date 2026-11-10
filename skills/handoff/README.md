@@ -46,6 +46,7 @@ scripts from there at runtime.
 │   ├── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
 │   ├── handoff_statusline.sh      # statusLine command: renders the line + caches CC's ctx numbers
 │   ├── handoff_compact_reset.sh   # PostCompact hook: resets ctx sidecars after compaction
+│   ├── handoff_worktree_remove.sh # WorktreeRemove hook: salvages a removed worktree's handoff + dumps
 │   └── handoff_provenance.sh      # sourced LIBRARY (not executable): root resolution + HMAC signing/verification
 ├── skills/
 │   ├── handoff/
@@ -55,7 +56,9 @@ scripts from there at runtime.
 │   │   └── SKILL.md               # /handoff-more: load older handoffs from history/ into context
 │   └── handoff-recover/
 │       └── SKILL.md               # /handoff-recover: reconstruct a handoff when the prior session didn't run one
-├── settings.json                  # user scope (default): the seven hooks + statusLine. Project scope: <project>/.claude/settings.json, or .claude/settings.local.json with --local
+├── settings.json                  # user scope (default): the seven hooks + statusLine
+│                                  # (project scope: <project>/.claude/settings.json,
+│                                  # or settings.local.json with --local; not under ~/.claude/)
 └── RULES.md                       # self-policing rule (optional)
 ```
 
@@ -64,10 +67,10 @@ scripts from there at runtime.
 Easiest: clone the [claude-code-handoff repo](https://github.com/Sting25/claude-code-handoff)
 and run `./install.sh` — it symlinks all the files into `~/.claude/`
 and patches a settings file to add the seven hooks plus seven
-permissions (`~/.claude/settings.json` by default; with
-`--scope project --project <dir>` the project's `.claude/settings.json`,
-or `.claude/settings.local.json` with `--local`), and wires the statusLine **only if you don't already
-have one** (an existing statusLine is never overwritten — the
+permissions (`~/.claude/settings.json` by default; with `--scope project`
+(`--project <dir>`, or the current directory's git toplevel) the project's
+`.claude/settings.json`, or `.claude/settings.local.json` with `--local`),
+and wires the statusLine **only if you don't already have one** (an existing statusLine is never overwritten — the
 installer prints the manual step instead). Edits in the repo flow
 live without re-installing.
 
@@ -75,15 +78,15 @@ Manual install:
 
 1. Drop `bin/write_handoff.sh`, `bin/handoff_turn_append.sh`,
    `bin/handoff_ctx_check.sh`, `bin/handoff_session_start.sh`,
-   `bin/handoff_recover_tail.sh`, `bin/handoff_statusline.sh`, and
-   `bin/handoff_compact_reset.sh` into `~/.claude/bin/` and `chmod +x`
-   all seven. (Without `handoff_recover_tail.sh`, `/handoff-recover`
+   `bin/handoff_recover_tail.sh`, `bin/handoff_statusline.sh`,
+   `bin/handoff_compact_reset.sh`, and `bin/handoff_worktree_remove.sh`
+   into `~/.claude/bin/` and `chmod +x` all eight. (Without `handoff_recover_tail.sh`, `/handoff-recover`
    still runs but silently loses the crash-truncated final turn — the
    content the helper exists to rescue.)
 2. Drop `bin/handoff_provenance.sh` into `~/.claude/bin/` as well —
    **do not skip this one.** It is a sourced library, not a hook, so it
    needs no `+x` bit and nothing ever invokes it directly; that is
-   exactly why it is easy to miss. Every one of the seven scripts above
+   exactly why it is easy to miss. Every one of the eight scripts above
    sources it, and both signing (`write_handoff.sh`) and loading
    (`handoff_session_start.sh`) are gated on its presence. Omit it and
    you get an install that looks fine and works for snapshots, but
@@ -125,6 +128,12 @@ Manual install:
            "command": "bash $HOME/.claude/bin/handoff_compact_reset.sh 2>/dev/null || true"
          }]
        }],
+       "WorktreeRemove": [{
+         "hooks": [{
+           "type": "command",
+           "command": "bash $HOME/.claude/bin/handoff_worktree_remove.sh 2>/dev/null || true"
+         }]
+       }],
        "Stop": [{
          "hooks": [{
            "type": "command",
@@ -145,7 +154,8 @@ Manual install:
          "Bash(bash /home/<you>/.claude/bin/handoff_ctx_check.sh)",
          "Bash(bash /home/<you>/.claude/bin/handoff_session_start.sh)",
          "Bash(bash /home/<you>/.claude/bin/handoff_statusline.sh)",
-         "Bash(bash /home/<you>/.claude/bin/handoff_compact_reset.sh)"
+         "Bash(bash /home/<you>/.claude/bin/handoff_compact_reset.sh)",
+         "Bash(bash /home/<you>/.claude/bin/handoff_worktree_remove.sh)"
        ]
      },
      "statusLine": {

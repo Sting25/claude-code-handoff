@@ -313,8 +313,9 @@ Code versions that don't send `context_window` in the statusLine
 payload, the line degrades to model + handoff state.
 
 **Wiring.** `statusLine` is a single slot in the settings file the
-installer patches (the project's `.claude/settings.json` with `--scope
-project`, `~/.claude/settings.json` otherwise), and only one command
+installer patches (`~/.claude/settings.json` by default, the project's
+`.claude/settings.json` with `--scope project`, or its
+`.claude/settings.local.json` with `--scope project --local`), and only one command
 can occupy it. `./install.sh` wires it for you, but only if that file
 doesn't already have a statusLine (an existing one is never
 overwritten; the installer prints the manual step instead).
@@ -1157,15 +1158,18 @@ symlinks.
 ./install.sh --doctor     # report any dangling/missing installed hooks (exit ≠0 if broken)
 ```
 
-**Model pin (new machines).** Claude Code's model choice lives in each
-machine's `~/.claude/settings.json`, so a fresh install defaults wrong —
+**Model pin (new machines).** Claude Code's model choice lives in the
+settings files on each machine, so a fresh install defaults wrong —
 notably, a bare `opus` runs at a **200k** context window (the 1M variant
 is `opus[1m]`). `--model` pins the value during install, but **never
 overwrites** a model you already set — a differing request is reported
 and skipped. A plain install with no model configured prints a one-line
 NOTE instead of leaving the gap silent, and `--doctor` warns whenever the
 pinned model is a bare 200k variant. The one-liner for a new machine:
-`./install.sh --model 'opus[1m]'`. `--uninstall` removes the key only if
+`./install.sh --model 'opus[1m]'`. `--model` writes the `model` key into
+whichever settings file the scope selects (`~/.claude/settings.json`, or the
+project's `.claude/settings.json` or `.claude/settings.local.json`).
+`--uninstall` removes the key only if
 this installer set it and you never changed it since.
 
 If a path the installer manages already holds a symlink of **yours**

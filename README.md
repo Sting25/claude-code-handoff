@@ -181,8 +181,8 @@ installer's, so both sets would run on every event.
 ## How it works
 
 Seven hooks drive it, written by the installer into the project's
-`.claude/settings.json` (or `~/.claude/settings.json` for a user-scope
-install):
+`.claude/settings.json` (or `.claude/settings.local.json` with `--local`,
+or `~/.claude/settings.json` for a user-scope install):
 `SessionStart` loads the latest handoff into a new session,
 `SessionEnd` and `PreCompact` write a mechanical git-state safety net
 before an ending or a compaction, `Stop` appends each turn to a
