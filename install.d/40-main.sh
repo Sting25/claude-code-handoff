@@ -88,14 +88,13 @@ elif [[ "$mode" == install ]]; then
     # --uninstall never create anything).
     echo "project settings ($project_dir):"
     # Only <project>/.claude itself is ever created (the refusals above rule
-    # out a dangling link), so the marker always describes the directory
-    # this run made.
+    # out a dangling link). It is never removed again, not even by
+    # --uninstall: a directory identity check (inode, birth time) cannot be
+    # trusted on every filesystem (FAT32), so a recreated .claude/ could be
+    # mistaken for ours.
     if [[ ! -e "$project_dir/.claude" && ! -L "$project_dir/.claude" ]]; then
       mkdir "$project_dir/.claude"
-      claude_dir_made_this_run=1
-      claude_dir_made_id="$(claude_dir_id "$project_dir/.claude")"
       echo "  new     $project_dir/.claude/"
-      record_created_claude_dir "$project_dir/.claude"
     fi
   else
     echo "settings.json:"
@@ -163,13 +162,11 @@ elif [[ "$scope" == project ]]; then
       echo "          nothing was cleared there (was the project installed under another path?)"
     fi
     registry_remove "$project_dir" "$settings_name"
-    # No file or dir left for the markers to describe. Only this project's:
-    # a key directory naming another project is left alone, and one without
-    # a path file (an older install) never had a directory marker.
+    # No file left for the markers to describe. Only this project's: a key
+    # directory naming another project is left alone.
     project_key_check
     case "$project_key_state" in
-      own) rm -f "$(created_marker)" "$(claude_dir_marker)" 2>/dev/null || true ;;
-      legacy) rm -f "$(created_marker)" 2>/dev/null || true ;;
+      own|legacy) rm -f "$(created_marker)" 2>/dev/null || true ;;
       foreign) project_key_warn_foreign ;;
     esac
     echo
@@ -189,7 +186,6 @@ elif [[ "$scope" == project ]]; then
     echo "      line and markers were kept; fix it and re-run $(rerun_cmd) --uninstall."
     exit 1
   fi
-  remove_created_claude_dir_if_empty
   registry_remove "$project_dir" "$settings_name"
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"

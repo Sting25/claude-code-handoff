@@ -214,14 +214,6 @@ patch_in_progress=0
 # issue #178) gets no backup (there was nothing to keep), so an abort puts back what
 # was there before instead: "absent" removes the file, "empty" truncates it.
 settings_seed_state=""
-# Project scope: the project's .claude/ directory and its marker, when THIS run
-# made them (set in 40-main.sh). An aborted run drops the marker it wrote, and
-# rmdirs the directory only while it is still empty and still the directory
-# this run made (same identity, see claude_dir_id): a directory that gained a
-# file, or was replaced, stays.
-claude_dir_made_this_run=0
-claude_dir_made_id=""
-claude_dir_marker_written=0
 cleanup() {
   local rc=$?
   rm -f "$settings.tmp" 2>/dev/null || true
@@ -236,19 +228,6 @@ cleanup() {
     else
       : > "$settings" 2>/dev/null || true
       echo "  restore $settings emptied again, as it was before this run (aborted mid-patch, rc=$rc)" >&2
-    fi
-  fi
-  if (( rc != 0 )) && (( claude_dir_made_this_run )) && [[ -n "$project_dir" ]]; then
-    # rmdir only (never recursive): a directory that gained anything else stays.
-    if [[ -d "$project_dir/.claude" && ! -L "$project_dir/.claude" && -n "$claude_dir_made_id" ]] \
-       && [[ "$(claude_dir_id "$project_dir/.claude")" == "$claude_dir_made_id" ]] \
-       && rmdir "$project_dir/.claude" 2>/dev/null; then
-      echo "  restore $project_dir/.claude/ removed again; this run created it (aborted, rc=$rc)" >&2
-    fi
-    # The marker goes whether or not the rmdir did: a run that did not finish
-    # leaves nothing for a later --uninstall to act on.
-    if (( claude_dir_marker_written )) && [[ -n "$project_backup_dir" ]]; then
-      rm -f "$project_backup_dir/claude_dir.mkdir" 2>/dev/null || true
     fi
   fi
 }

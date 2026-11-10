@@ -138,8 +138,7 @@ take_settings_backup() {
 # trusted only when that file names THIS project (#194). project_key_check
 # sets project_key_state: own (path matches), foreign (another project's),
 # legacy (directory exists without a path file: an install from before this
-# check; trusted for the created-file marker it could have written, never for
-# the directory marker), or none.
+# check; trusted for the created-file marker it could have written), or none.
 project_key_state=""
 project_key_warned=0
 project_key_check() {
@@ -294,71 +293,6 @@ remove_created_settings_if_empty() {
         echo "  remove  $settings (this installer created it; nothing else was ever written to it)"
       fi
     fi
-  fi
-  rm -f "$m"
-}
-
-# Project scope (#194): the project's .claude/ directory, when THIS installer
-# made it, is recorded in a marker beside the file markers. --uninstall then
-# removes it again, with rmdir only (never recursive), once the strip has
-# left it empty. A pre-existing directory has no marker and is never touched.
-# The marker holds the directory's identity (claude_dir_id) at creation, so a
-# directory the user removed and recreated at the same path is not ours.
-# Best effort, like the file marker.
-claude_dir_marker() { printf '%s\n' "$project_backup_dir/claude_dir.mkdir"; }
-# Identity of a directory: inode plus birth time with nanoseconds (GNU %w,
-# BSD %FB). ext4 reuses a freed inode number at once, and a seconds-only
-# birth time is the same for an `rm -rf; mkdir` in the same second (measured
-# on the ubuntu CI runner), so the fractional part is what tells them apart.
-# A filesystem without birth times prints "-" (GNU) and falls back to the
-# inode alone. GNU first, BSD fallback (the repo idiom, #92). Empty when stat
-# cannot read it.
-claude_dir_id() {
-  [[ -d "$1" && ! -L "$1" ]] || return 0
-  stat -c '%i %w' "$1" 2>/dev/null || stat -f '%i %FB' "$1" 2>/dev/null || true
-}
-record_created_claude_dir() {  # <the directory this run created>
-  [[ "$scope" == project ]] || return 0
-  # Only <project>/.claude itself, literally: never a symlink target's parent.
-  [[ "$1" == "$project_dir/.claude" ]] || return 0
-  local id krc=0
-  id="$(claude_dir_id "$1")"
-  project_key_claim || krc=$?
-  (( krc == 1 )) && return 0
-  if [[ -n "$id" ]] && ( mkdir -p "$project_backup_dir" && printf '%s\n' "$id" > "$(claude_dir_marker)" ) 2>/dev/null; then
-    claude_dir_marker_written=1
-  else
-    echo "  WARN    cannot record the created-directory marker in $project_backup_dir;"
-    echo "          --uninstall will leave the empty $project_dir/.claude/ in place"
-  fi
-}
-# The directory is always <project>/.claude, the path the install made, never
-# the parent of the (possibly symlink-resolved) settings target: a settings
-# file linked into a dotfiles directory must not get that directory removed.
-# The rmdir runs only when the key directory names this project and the
-# directory still has the identity the marker recorded; the marker is
-# consumed either way. The one exception is the other settings file of this
-# project still being wired: the uninstall that strips the last one then
-# cleans up.
-remove_created_claude_dir_if_empty() {
-  local m d other stored cur
-  m="$(claude_dir_marker)"
-  [[ -f "$m" && ! -L "$m" ]] || return 0
-  project_key_check
-  case "$project_key_state" in
-    own) : ;;
-    foreign) project_key_warn_foreign; return 0 ;;
-    *) return 0 ;;   # no path file: never trusted for the directory marker
-  esac
-  d="$project_dir/.claude"
-  other="settings.json"; [[ "$settings_name" == settings.json ]] && other="settings.local.json"
-  if settings_has_our_hooks "$d/$other"; then
-    return 0
-  fi
-  stored="$(head -n 1 "$m" 2>/dev/null || true)"
-  cur="$(claude_dir_id "$d")"
-  if [[ -n "$stored" && "$cur" == "$stored" ]] && rmdir "$d" 2>/dev/null; then
-    echo "  remove  $d/ (this installer created it; it is empty)"
   fi
   rm -f "$m"
 }

@@ -1099,11 +1099,11 @@ git tracks it, in the project's repository or in any other one (a dotfiles
 repo the `.claude/` directory or the file links into). A file that existed
 before the install, one you rewrote or added to since, and a tracked one
 are kept, the last as the empty skeleton. If the record cannot be written,
-the install warns and the uninstall leaves the skeleton. The same applies
-to the `<project>/.claude/` directory: when the install created it, the
-uninstall removes it again (never recursively) once it is empty and is
-still the directory the install made (same inode and birth time, to the nanosecond where the filesystem records it). The
-records are trusted only when the backup directory's `path` file names
+the install warns and the uninstall leaves the skeleton. The
+`<project>/.claude/` directory itself is never removed, even when the
+install created it and it is empty: on some filesystems (FAT32) a
+directory's identity cannot tell it from one you removed and recreated.
+The record is trusted only when the backup directory's `path` file names
 the project, since two paths can share a cksum key. An install refuses a
 dangling `.claude` link, or a settings file linked into a directory that
 does not exist, before copying anything. An uninstall that cannot finish
