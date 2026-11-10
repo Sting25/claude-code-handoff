@@ -14,13 +14,9 @@
 #   F. a registered project whose directory is gone: project doctor refuses
 #      (rc 2), user doctor reports the stale registry entry
 #   G. user-scope doctor run outside any wired project names no wired file
-#   E. both project files present, hooks in only one (each direction): the
-#      doctor switches to the wired file for its statusLine check and remedy
-#   F. a registered project whose directory is gone: project doctor refuses
-#      (rc 2), user doctor reports the stale registry entry
-#   G. user-scope doctor run outside any wired project names no wired file
-#   R. the remedy carries --local exactly when the wired file is
-#      settings.local.json, and running it wires no second file
+#   H. a corrupt flag-named file beside a wired --local install is named,
+#      the doctor still switches, and exits non-zero
+#   M. the model WARN names the file the doctor switched to
 # Every run sandboxes HOME and CLAUDE_HOME, so nothing touches ~/.claude.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -75,7 +71,7 @@ check "B: does not name settings.json"         no  "$(has "$OUT" "$P/.claude/set
 inst --doctor --scope project --project "$P"
 check "B: doctor without --local exit 0"       0   "$RC"
 check "B: still lists settings.local.json"     yes "$(has "$OUT" "$P/.claude/settings.local.json (project, local)")"
-check "B: says the checked file has no hooks"  yes "$(has "$OUT" "$P/.claude/settings.json carries no handoff hooks; $P/.claude/settings.local.json does,")"
+check "B: says the checked file is absent"  yes "$(has "$OUT" "$P/.claude/settings.json does not exist; $P/.claude/settings.local.json carries the handoff hooks,")"
 check "B: says it checks settings.local.json"  yes "$(has "$OUT" "this doctor run checks settings.local.json instead")"
 check "B: statusLine read from the wired file" yes "$(has "$OUT" "statusLine wired (ours)")"
 check "B: no 'statusLine unset'"               no  "$(has "$OUT" "statusLine unset")"
@@ -199,5 +195,22 @@ P2="$(mktemp -d)"; cleanup_on_exit "$P2"
 OUT="$(cd "$P2" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --doctor 2>&1 </dev/null)"; RC=$?
 check "G: user doctor exit 0" 0 "$RC"
 check "G: names no wired file outside a wired project" no "$(has "$OUT" "$LIST")"
+
+# --- H. corrupt flag-named file ----------------------------------------------------------------
+fresh_sandbox
+inst --scope project --project "$P" --local
+printf '{"hooks":{' > "$P/.claude/settings.json"
+inst --doctor --scope project --project "$P"
+check "H: doctor exits non-zero" 1 "$RC"
+check "H: names the unparseable file" yes "$(has "$OUT" "$P/.claude/settings.json could not be parsed (jq exit ")"
+check "H: still switches to the wired file" yes "$(has "$OUT" "this doctor run checks settings.local.json instead")"
+check "H: not reported as merely unwired" no "$(has "$OUT" "carries no handoff hooks")"
+
+# --- M. model WARN names the checked file ------------------------------------------------------
+fresh_sandbox
+inst --scope project --project "$P" --local --model opus
+inst --doctor --scope project --project "$P"
+check "M: WARN names settings.local.json" yes "$(has "$OUT" "model 'opus' in settings.local.json")"
+check "M: WARN does not name settings.json" no "$(has "$OUT" "model 'opus' in settings.json")"
 
 finish
