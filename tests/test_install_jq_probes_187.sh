@@ -537,9 +537,9 @@ else
   # Run from inside one unreadable project: the doctor's own cwd probe flags
   # it before the registry scan, which must still leave it out of the list.
   chmod 000 "$HOME_DIR/proj/.claude/settings.json" "$HOME_DIR/proj2/.claude/settings.json"
-  pushd "$HOME_DIR/proj" >/dev/null
+  pushd "$HOME_DIR/proj" >/dev/null || exit 1
   run_sh "" --doctor
-  popd >/dev/null
+  popd >/dev/null || exit 1
   chmod 600 "$HOME_DIR/proj/.claude/settings.json" "$HOME_DIR/proj2/.claude/settings.json"
   check "doctor inside an unreadable project: exit nonzero"    yes "$(nz $RC)"
   check "doctor inside an unreadable project: neither stale"   no  "$(has "$OUT" 'stale project registry entries')"
