@@ -996,7 +996,7 @@ control.
 `./install.sh`:
 
 1. Symlinks the bin scripts and skills into `~/.claude/`.
-2. Patches `~/.claude/settings.json` to add seven hooks
+2. Patches a settings file to add seven hooks
    (`SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`,
    `Stop`, `UserPromptSubmit`, `WorktreeRemove`), seven permission
    entries, and (**only if you don't already have one**) the
@@ -1004,7 +1004,12 @@ control.
    existing statusLine is never overwritten; the installer prints
    the manual wiring step instead (see [Status line](#status-line)).
 
-Settings.json is backed up before any change and the patch is
+Which settings file is patched depends on the scope: `~/.claude/settings.json`
+by default (`--scope user`), `<project>/.claude/settings.json` with
+`--scope project`, or `<project>/.claude/settings.local.json` with
+`--scope project --local`. See [Install scope](#install-scope-user-vs-project).
+
+The settings file is backed up before any change and the patch is
 idempotent — existing hooks and permissions are detected by marker
 substring and skipped on re-runs. Unrelated entries in your
 settings.json (other hooks, theme, etc.) are left untouched.

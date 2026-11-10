@@ -268,8 +268,10 @@ nothing gets lost across the restart boundary.
             or resume this conversation — that reopens the saturated
             context the handoff exists to retire.
 
-   (Either way, the SessionStart hook in ~/.claude/settings.json
-   auto-loads the handoff into the fresh session.)
+   (Either way, the SessionStart hook in the settings file the installer
+   patched (~/.claude/settings.json, or the project's .claude/settings.json
+   or .claude/settings.local.json) auto-loads the handoff into the fresh
+   session.)
 
    -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-
    ```

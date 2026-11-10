@@ -55,7 +55,7 @@ scripts from there at runtime.
 │   │   └── SKILL.md               # /handoff-more: load older handoffs from history/ into context
 │   └── handoff-recover/
 │       └── SKILL.md               # /handoff-recover: reconstruct a handoff when the prior session didn't run one
-├── settings.json                  # SessionStart/SessionEnd/PreCompact/PostCompact/Stop/UserPromptSubmit hooks + statusLine
+├── settings.json                  # user scope (default): the seven hooks + statusLine. Project scope: <project>/.claude/settings.json, or .claude/settings.local.json with --local
 └── RULES.md                       # self-policing rule (optional)
 ```
 
@@ -63,8 +63,10 @@ scripts from there at runtime.
 
 Easiest: clone the [claude-code-handoff repo](https://github.com/Sting25/claude-code-handoff)
 and run `./install.sh` — it symlinks all the files into `~/.claude/`
-and patches `~/.claude/settings.json` to add the six hooks plus six
-permissions, and wires the statusLine **only if you don't already
+and patches a settings file to add the seven hooks plus seven
+permissions (`~/.claude/settings.json` by default; with
+`--scope project --project <dir>` the project's `.claude/settings.json`,
+or `.claude/settings.local.json` with `--local`), and wires the statusLine **only if you don't already
 have one** (an existing statusLine is never overwritten — the
 installer prints the manual step instead). Edits in the repo flow
 live without re-installing.
@@ -93,7 +95,8 @@ Manual install:
 3. Drop `skills/handoff/SKILL.md`, `skills/handoff-more/SKILL.md`, and
    `skills/handoff-recover/SKILL.md` into the matching
    `~/.claude/skills/<name>/` directories.
-4. Add hooks to `~/.claude/settings.json`:
+4. Add hooks to `~/.claude/settings.json` (or, to wire one project only, to
+   that project's `.claude/settings.json` or `.claude/settings.local.json`):
 
    ```json
    {

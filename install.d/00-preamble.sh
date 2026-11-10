@@ -20,7 +20,9 @@ install.sh — wire this repo's handoff skill into ~/.claude/.
 What it does:
   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
-  2. Patches ~/.claude/settings.json to add seven hooks
+  2. Patches a settings file to add seven hooks (~/.claude/settings.json by
+     default; see "Scope" below for the project's .claude/settings.json or
+     .claude/settings.local.json)
      (SessionStart / SessionEnd / PreCompact / PostCompact / WorktreeRemove / Stop /
      UserPromptSubmit), seven permission entries, and (only when you
      don't already have one) a statusLine command (never overwrites

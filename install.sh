@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 23725d8c3fbfdf4fce1e12ccb026efe751320bacd0de7bfd6a87225a570398c1
+# SOURCE-SHA256: 412cd0ecee9871bd818c7d4b8d77d71ad742f8f7922799e95584549c84f0f5e9
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -32,7 +32,9 @@ install.sh — wire this repo's handoff skill into ~/.claude/.
 What it does:
   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
-  2. Patches ~/.claude/settings.json to add seven hooks
+  2. Patches a settings file to add seven hooks (~/.claude/settings.json by
+     default; see "Scope" below for the project's .claude/settings.json or
+     .claude/settings.local.json)
      (SessionStart / SessionEnd / PreCompact / PostCompact / WorktreeRemove / Stop /
      UserPromptSubmit), seven permission entries, and (only when you
      don't already have one) a statusLine command (never overwrites
