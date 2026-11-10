@@ -1714,13 +1714,15 @@ write_epoch="$(date +%s)"
 # Always wraps in single quotes (each ' becomes '\''), so spaces and shell
 # metacharacters survive a paste and non-ASCII bytes pass through unchanged
 # (bash 3.2's printf %q would turn them into octal escapes). A path holding a
-# newline falls back to printf %q, which emits a one-line $'...' form.
+# newline or a carriage return falls back to printf %q, which emits a one-line
+# $'...' form (#186: a raw CR inside the bound Verify block is a control byte
+# in the rules tier, and on some terminals rewrites the line it is on).
 handoff_shquote() {  # <path>
   # Replacement held in variables: the inline form quotes differently in bash 3.2 and 5.
   local sq="'" bs="\\" rep
   rep="$sq$bs$sq$sq"
   case "$1" in
-    *$'\n'*) printf '%q' "$1" ;;
+    *$'\n'*|*$'\r'*) printf '%q' "$1" ;;
     *) printf "'%s'" "${1//$sq/$rep}" ;;
   esac
 }
@@ -1728,14 +1730,19 @@ handoff_shquote() {  # <path>
 # #186: a name printed in the document's title and header lines goes on ONE
 # line. A newline in the project path (or the substrate name) would start a
 # new document line there, and a line that is exactly a BIND marker opens or
-# closes a rules region: a stray END unbalances the markers and the whole doc
-# loads as plain data (fails safe, but a path should never do that). Newline
-# and carriage return become the two-character escapes \n and \r, so the
-# name stays recognizable. The verify block uses handoff_shquote instead,
-# because its lines must also survive a paste into a shell.
+# closes a rules region. A balanced BEGIN..END pair in the path therefore
+# planted its own region, which verified and loaded in the binding tier; only
+# an unbalanced payload failed the marker check and fell back to plain data.
+# Backslash becomes \\ first, then newline and carriage return become the
+# two-character escapes \n and \r, so the name stays recognizable and a
+# directory literally named `a\nb` does not read like an escaped newline.
+# The verify block uses handoff_shquote instead, because its lines must also
+# survive a paste into a shell.
 handoff_oneline() {  # <text>
-  # Patterns and replacements held in variables, as in handoff_shquote.
-  local s="$1" nl=$'\n' cr=$'\r' esc_n='\n' esc_r='\r'
+  # Patterns and replacements held in variables, as in handoff_shquote; the
+  # backslash pattern is quoted so it is not read as a glob escape.
+  local s="$1" bs="\\" esc_bs="\\\\" nl=$'\n' cr=$'\r' esc_n='\n' esc_r='\r'
+  s="${s//"$bs"/$esc_bs}"
   s="${s//$nl/$esc_n}"
   s="${s//$cr/$esc_r}"
   printf '%s' "$s"
@@ -1844,9 +1851,12 @@ handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
   # it would split this line (and could inject a marker line); escaped, the
   # loader would read back a path that does not exist and warn of a moved
   # project on every load. Absent is what the loader already treats as an
-  # older doc: no root check, no warning.
+  # older doc: no root check, no warning. Said once on stderr, since the
+  # loader's root checks are then off for this project.
   case "$repo_root" in
-    *$'\n'*|*$'\r'*) ;;
+    *$'\n'*|*$'\r'*)
+      echo "write_handoff.sh: the project path contains a newline or carriage return; HANDOFF_ROOT is not recorded, so the loader's moved-project, in_git-flip and inherited-copy checks are off for this root." >&2
+      ;;
     *) printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n' "$repo_root" "$in_git" ;;
   esac
   # Writer marker (issue #63), read by the guard above on the NEXT write.
