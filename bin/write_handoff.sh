@@ -211,17 +211,17 @@ else
       handoff_mode_intro="Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
 \`/handoff\` skill + the \`SessionEnd\` hook wired in the Claude Code settings
 file the installer patched: \`~/.claude/settings.json\` for a user-scope
-install, the project's \`.claude/settings.json\` (or \`settings.local.json\`)
-for \`--scope project\`; \`install.sh --doctor\` shows which). Auto-loaded into
-the next session by the \`SessionStart\` hook in the same settings file."
+install; for \`--scope project\`, the project's \`.claude/settings.json\`
+or \`.claude/settings.local.json\`). Auto-loaded into the next session by
+the \`SessionStart\` hook in the same settings file."
       ;;
     *)
       handoff_mode_intro="Auto-written by \`$handoff_self_dir_safe/write_handoff.sh\`, which is not the
 \`~/.claude/bin\` install location, so the hook wiring cannot be named
 generically here (a git clone run directly, and a relocated or
 \`--copy\`/\`--link\` install pointed somewhere unusual, both land here).
-Check the project's \`.claude/settings.json\` or \`~/.claude/settings.json\`
-(honoring any \`CLAUDE_HOME\` override). Auto-loaded into the next session
+Check the project's \`.claude/settings.json\`, \`.claude/settings.local.json\`,
+or \`~/.claude/settings.json\` (honoring any \`CLAUDE_HOME\` override). Auto-loaded into the next session
 by whichever \`SessionStart\` hook this install wired."
       ;;
   esac

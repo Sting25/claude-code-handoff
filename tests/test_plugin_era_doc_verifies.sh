@@ -38,9 +38,9 @@ binding_has() {  # <output> <needle> -> yes|no (after the Standing rules header)
 BARE_HEADER="Auto-written by \`~/.claude/bin/write_handoff.sh\` (called from the
 \`/handoff\` skill + the \`SessionEnd\` hook wired in the Claude Code settings
 file the installer patched: \`~/.claude/settings.json\` for a user-scope
-install, the project's \`.claude/settings.json\` (or \`settings.local.json\`)
-for \`--scope project\`; \`install.sh --doctor\` shows which). Auto-loaded into
-the next session by the \`SessionStart\` hook in the same settings file."
+install; for \`--scope project\`, the project's \`.claude/settings.json\`
+or \`.claude/settings.local.json\`). Auto-loaded into the next session by
+the \`SessionStart\` hook in the same settings file."
 PLUGIN_DIR="/Users/someone/.claude/plugins/cache/claude-code-handoff/claude-code-handoff/0.18.7/bin"
 PLUGIN_HEADER="Auto-written by the claude-code-handoff plugin's \`bin/write_handoff.sh\`
 (called from the \`/handoff\` skill + the \`SessionEnd\` hook wired in the
