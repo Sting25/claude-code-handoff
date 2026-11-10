@@ -1076,7 +1076,8 @@ path with a space can be pasted as is. When the user file is unwired but
 the project (or a registered project) is, the doctor's "re-run" remedy
 names the project-scope command rather than a bare `./install.sh`. When
 several registered projects are wired and the scripts are missing, the
-closing remedy prints one command per wired project.
+closing remedy prints one command and lists the other wired projects it
+also repairs, since the scripts are shared.
 
 `--uninstall --scope project [--project <dir>] [--local]` strips only
 that project file (hooks, permissions, our `statusLine`, and a model pin

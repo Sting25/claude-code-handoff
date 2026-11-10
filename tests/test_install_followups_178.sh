@@ -6,7 +6,7 @@
 #      pre-existing file still gets its backup)
 #   3. `bash -s -- --help < install.sh` prints nothing on stderr
 #   4. several wired projects + missing scripts: the doctor's closing remedy
-#      prints one command per wired project
+#      prints one command and lists the other wired projects (#194)
 #   5. a project rooted at $HOME is refused with a --project hint
 #   7. a project-scope --uninstall removes a settings file the installer
 #      created once only the empty skeleton is left; a pre-existing file, and
@@ -74,7 +74,7 @@ err="$(bash -s -- --help < "$REPO_ROOT/install.sh" 2>&1 >/dev/null)"
 check "3: piped --help writes nothing to stderr" "" "$err"
 check "3: piped --help still exits 0" 0 "$(bash -s -- --help < "$REPO_ROOT/install.sh" >/dev/null 2>&1; echo $?)"
 
-# --- 4. closing remedy: one command per wired project ------------------------------------
+# --- 4. closing remedy: one command, the other projects listed ------------------------------------
 fresh_sandbox
 P2="$(mktemp -d)"; NEUTRAL="$(mktemp -d)"
 cleanup_on_exit "$P2" "$NEUTRAL"
