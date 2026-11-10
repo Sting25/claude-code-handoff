@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 934c3e8dc6cdc3962bd42bd82e7cc5d04b721f52c871f7e578172e791733522d
+# SOURCE-SHA256: 587019dc6374dff2a9809fd2961c670503040ec0b62008ce43dabbdaf2cba5bd
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1258,8 +1258,11 @@ take_settings_backup() {
 # fail an install whose wiring is already in place.
 created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
 settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
-  [[ -f "$1" && ! -L "$1" ]] || return 0
-  cksum < "$1" 2>/dev/null | awk '{print $1 " " $2}'
+  # -r first: a failed `<` redirect is reported before 2>/dev/null applies
+  # and, under pipefail, used to abort the run with a bare "Permission
+  # denied" on a mode-000 file (#187).
+  [[ -f "$1" && ! -L "$1" && -r "$1" ]] || return 0
+  { cksum < "$1"; } 2>/dev/null | awk '{print $1 " " $2}'
 }
 # Fingerprint of the settings file before this run's patch touches it.
 pre_patch_fp=""
@@ -1659,6 +1662,7 @@ settings_usable() {
 # would read as a jq failure (tests/test_install_jq_probes_187.sh, matrix).
 sh_jq_failed=0
 sh_jq_failed_file=""
+sh_jq_failed_why=""   # "jq failed" or "permission denied": what the WARN said
 settings_has_our_hooks() {
   local f="$1" rc=0
   [[ -f "$f" ]] || return 1
@@ -1673,6 +1677,7 @@ settings_has_our_hooks() {
     echo "          treating its wiring as unknown. Fix the file and re-run." >&2
     sh_jq_failed=1
     sh_jq_failed_file="$f"
+    sh_jq_failed_why="permission denied"
     return 1
   fi
   # An unusable file (empty, unparseable, not an object) is a real "no"
@@ -1685,6 +1690,7 @@ settings_has_our_hooks() {
     echo "          treating its wiring as unknown. Fix jq and re-run." >&2
     sh_jq_failed=1
     sh_jq_failed_file="$f"
+    sh_jq_failed_why="jq failed"
     return 1
   fi
   [[ $rc -eq 0 ]] || return 1
@@ -1707,6 +1713,7 @@ settings_has_our_hooks() {
     echo "          treating it as unknown. Fix jq and re-run." >&2
     sh_jq_failed=1
     sh_jq_failed_file="$f"
+    sh_jq_failed_why="jq failed"
     return 1
   fi
   return "$rc"
@@ -1829,19 +1836,23 @@ registry_remove() {  # <project dir> <settings file name>
 # carry our hooks. Callers run it in their own shell, never in a command
 # substitution, so a jq failure it hits stays visible in sh_jq_failed (the
 # doctor then exits non-zero); a caller that acts on the result (user-scope
-# --uninstall deleting the shared secret) must check that, since a file whose
-# wiring read failed reads as stale. An empty or non-object file is a plain
-# stale entry (settings_usable), not a jq failure.
+# --uninstall deleting the shared secret) must check that. A file whose
+# wiring read failed (jq failed, or the file cannot be read) is neither
+# wired nor stale: it is left out of both lists, so the doctor never offers
+# a removal command for a project it just called unknown. An empty or
+# non-object file is a plain stale entry (settings_usable), not a failure.
 REGISTRY_OUT=""
 registry_collect() {
-  local want="$1" rp rn has nl=$'\n'
+  local want="$1" rp rn has nl=$'\n' before
   REGISTRY_OUT=""
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
   while IFS=$'\t' read -r rp rn || [[ -n "$rp" ]]; do
     [[ -n "$rp" ]] || continue
     case "$rn" in settings.json|settings.local.json) ;; *) continue ;; esac
     has=stale
+    before=$sh_jq_failed
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
+    if (( sh_jq_failed && ! before )); then continue; fi
     if [[ "$has" == "$want" ]]; then
       REGISTRY_OUT="${REGISTRY_OUT:+$REGISTRY_OUT$nl}$rp"$'\t'"$rn"
     fi
@@ -2295,7 +2306,7 @@ else
     rerun_flags=""
     if (( remove_secret )); then rerun_flags=" --remove-secret"; fi
     if (( keep_secret )); then rerun_flags=" --keep-secret"; fi
-    echo "  ERROR   jq failed while reading $sh_jq_failed_file from the project registry" >&2
+    echo "  ERROR   ${sh_jq_failed_why:-jq failed} while reading $sh_jq_failed_file from the project registry" >&2
     echo "          ($project_registry), so it is unknown which projects still sign" >&2
     echo "          with the HMAC secret; ${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}" >&2
     echo "          was kept and the registry left as it was. Settings and bin/ links" >&2

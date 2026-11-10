@@ -128,8 +128,11 @@ take_settings_backup() {
 # fail an install whose wiring is already in place.
 created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
 settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
-  [[ -f "$1" && ! -L "$1" ]] || return 0
-  cksum < "$1" 2>/dev/null | awk '{print $1 " " $2}'
+  # -r first: a failed `<` redirect is reported before 2>/dev/null applies
+  # and, under pipefail, used to abort the run with a bare "Permission
+  # denied" on a mode-000 file (#187).
+  [[ -f "$1" && ! -L "$1" && -r "$1" ]] || return 0
+  { cksum < "$1"; } 2>/dev/null | awk '{print $1 " " $2}'
 }
 # Fingerprint of the settings file before this run's patch touches it.
 pre_patch_fp=""
@@ -529,6 +532,7 @@ settings_usable() {
 # would read as a jq failure (tests/test_install_jq_probes_187.sh, matrix).
 sh_jq_failed=0
 sh_jq_failed_file=""
+sh_jq_failed_why=""   # "jq failed" or "permission denied": what the WARN said
 settings_has_our_hooks() {
   local f="$1" rc=0
   [[ -f "$f" ]] || return 1
@@ -543,6 +547,7 @@ settings_has_our_hooks() {
     echo "          treating its wiring as unknown. Fix the file and re-run." >&2
     sh_jq_failed=1
     sh_jq_failed_file="$f"
+    sh_jq_failed_why="permission denied"
     return 1
   fi
   # An unusable file (empty, unparseable, not an object) is a real "no"
@@ -555,6 +560,7 @@ settings_has_our_hooks() {
     echo "          treating its wiring as unknown. Fix jq and re-run." >&2
     sh_jq_failed=1
     sh_jq_failed_file="$f"
+    sh_jq_failed_why="jq failed"
     return 1
   fi
   [[ $rc -eq 0 ]] || return 1
@@ -577,6 +583,7 @@ settings_has_our_hooks() {
     echo "          treating it as unknown. Fix jq and re-run." >&2
     sh_jq_failed=1
     sh_jq_failed_file="$f"
+    sh_jq_failed_why="jq failed"
     return 1
   fi
   return "$rc"
@@ -699,19 +706,23 @@ registry_remove() {  # <project dir> <settings file name>
 # carry our hooks. Callers run it in their own shell, never in a command
 # substitution, so a jq failure it hits stays visible in sh_jq_failed (the
 # doctor then exits non-zero); a caller that acts on the result (user-scope
-# --uninstall deleting the shared secret) must check that, since a file whose
-# wiring read failed reads as stale. An empty or non-object file is a plain
-# stale entry (settings_usable), not a jq failure.
+# --uninstall deleting the shared secret) must check that. A file whose
+# wiring read failed (jq failed, or the file cannot be read) is neither
+# wired nor stale: it is left out of both lists, so the doctor never offers
+# a removal command for a project it just called unknown. An empty or
+# non-object file is a plain stale entry (settings_usable), not a failure.
 REGISTRY_OUT=""
 registry_collect() {
-  local want="$1" rp rn has nl=$'\n'
+  local want="$1" rp rn has nl=$'\n' before
   REGISTRY_OUT=""
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
   while IFS=$'\t' read -r rp rn || [[ -n "$rp" ]]; do
     [[ -n "$rp" ]] || continue
     case "$rn" in settings.json|settings.local.json) ;; *) continue ;; esac
     has=stale
+    before=$sh_jq_failed
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
+    if (( sh_jq_failed && ! before )); then continue; fi
     if [[ "$has" == "$want" ]]; then
       REGISTRY_OUT="${REGISTRY_OUT:+$REGISTRY_OUT$nl}$rp"$'\t'"$rn"
     fi

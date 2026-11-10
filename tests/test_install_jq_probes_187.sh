@@ -499,9 +499,15 @@ if [[ -r "$HOME_DIR/proj/.claude/settings.json" ]]; then
   chmod 600 "$HOME_DIR/proj/.claude/settings.json"
   skip "mode 000 is readable here (running as root)"
 else
+  run_sh "" --doctor
+  check "unreadable project file, doctor: exit nonzero"        yes "$(nz $RC)"
+  check "unreadable project file, doctor: WARN names the cause" yes "$(has "$ERR" 'cannot be read (check its permissions)')"
+  check "unreadable project file, doctor: not listed as stale" no  "$(has "$OUT" 'stale project registry entries')"
   run_sh_secret "" --uninstall
   chmod 600 "$HOME_DIR/proj/.claude/settings.json"
   check "unreadable project file, user uninstall: exit nonzero" yes "$(nz $RC)"
+  check "unreadable project file, user uninstall: ERROR says permission denied" yes "$(has "$ERR" 'ERROR   permission denied while reading ')"
+  check "unreadable project file, user uninstall: ERROR not 'jq failed'" no "$(has "$ERR" 'ERROR   jq failed while reading')"
   check "unreadable project file, user uninstall: secret kept"  "$SECRET_SUM" "$(cksum < "$HOME_DIR/handoff_secret" 2>/dev/null)"
   check "unreadable project file, user uninstall: registry intact" "$REG_SUM" "$(cksum < "$HOME_DIR/handoff_projects" 2>/dev/null)"
   check "unreadable project file, user uninstall: WARN names the cause" yes "$(has "$ERR" 'cannot be read (check its permissions)')"
@@ -509,6 +515,29 @@ else
   run_sh_secret "" --uninstall
   check "unreadable project file, fixed re-run: exit 0"        0   "$RC"
   check "unreadable project file, fixed re-run: secret kept for wired project" yes "$(has "$OUT" 'still sign with')"
+fi
+# 19g. Project-scope --uninstall on a project file this process cannot read:
+#      the same ERROR and exit 1, registry line and file kept. It used to die
+#      on a bare "Permission denied" from the fingerprint read (settings_fp)
+#      before any message.
+fresh_home
+mkdir -p "$HOME_DIR/proj"
+run_sh "" --scope project --project "$HOME_DIR/proj"
+REG_SUM="$(cksum < "$HOME_DIR/handoff_projects")"
+chmod 000 "$HOME_DIR/proj/.claude/settings.json"
+if [[ -r "$HOME_DIR/proj/.claude/settings.json" ]]; then
+  chmod 600 "$HOME_DIR/proj/.claude/settings.json"
+  skip "mode 000 is readable here (running as root)"
+else
+  run_sh "" --uninstall --scope project --project "$HOME_DIR/proj"
+  chmod 600 "$HOME_DIR/proj/.claude/settings.json"
+  check "unreadable project file, project uninstall: exit nonzero" yes "$(nz $RC)"
+  check "unreadable project file, project uninstall: ERROR cannot be read" yes "$(has "$ERR" 'cannot be read (check its permissions)')"
+  check "unreadable project file, project uninstall: no bare Permission denied" no "$(has "$ERR" 'line ')"
+  check "unreadable project file, project uninstall: registry intact" "$REG_SUM" "$(cksum < "$HOME_DIR/handoff_projects" 2>/dev/null)"
+  check "unreadable project file, project uninstall: hooks still wired" yes "$(grep -q handoff_session_start "$HOME_DIR/proj/.claude/settings.json" && echo yes || echo no)"
+  run_sh "" --uninstall --scope project --project "$HOME_DIR/proj"
+  check "unreadable project file, project uninstall fixed re-run: exit 0" 0 "$RC"
 fi
 
 finish
