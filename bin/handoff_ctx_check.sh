@@ -882,8 +882,8 @@ else
     #   https://code.claude.com/docs/en/model-config
     # 1M by default with no suffix (API docs; Claude Code: "Fable models,
     # Sonnet 5 and later, Haiku 5.5, and Opus 4.7 and later run with the 1M
-    # window by default"): Fable 5.2/5.1/5, Mythos 5.2/5.1/5/Preview, Opus 5.5/5/
-    # 4.8/4.7, Sonnet 5.5/5, Haiku 5.5. 200k: Opus 4.5, Sonnet 4.5, Haiku
+    # window by default"): Fable 5.2/5.1/5, Mythos 5.2/5.1/5/Preview, Opus
+    # 5.5/5/4.8/4.7, Sonnet 5.5/5, Haiku 5.5. 200k: Opus 4.5, Sonnet 4.5, Haiku
     # 4.5. Opus 4.6 and Sonnet 4.6 are deliberately NOT listed: in Claude
     # Code they run at 200k unless the "[1m]" variant was picked, and the
     # transcript's model id never carries that suffix (measured 2026-11-09:
