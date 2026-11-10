@@ -26,13 +26,12 @@ chmod +x "$SHIM/jq"
 SRC="$(mktemp -d)"
 cp "$REPO_ROOT/install.sh" "$SRC/"
 cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$SRC/"
-HOMES=()
-trap 'rm -rf "$SHIM" "$SRC" ${HOMES[@]+"${HOMES[@]}"}' EXIT
+cleanup_on_exit "$SHIM" "$SRC"
 
 HOME_DIR=""
 # run_install <init-settings-json> <fail-match|""> ; sets RC, OUT, ERR, HOME_DIR.
 run_install() {
-  HOME_DIR="$(mktemp -d)"; HOMES+=("$HOME_DIR")
+  HOME_DIR="$(mktemp -d)"; cleanup_on_exit "$HOME_DIR"
   printf '%s' "$1" > "$HOME_DIR/settings.json"
   OUT="$(FAIL_JQ_MATCH="$2" PATH="$SHIM:$PATH" CLAUDE_HOME="$HOME_DIR" \
     bash "$SRC/install.sh" 2>"$HOME_DIR/err" </dev/null)"
