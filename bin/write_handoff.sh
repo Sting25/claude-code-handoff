@@ -1725,6 +1725,25 @@ handoff_shquote() {  # <path>
   esac
 }
 
+# #186: a name printed in the document's title and header lines goes on ONE
+# line. A newline in the project path (or the substrate name) would start a
+# new document line there, and a line that is exactly a BIND marker opens or
+# closes a rules region: a stray END unbalances the markers and the whole doc
+# loads as plain data (fails safe, but a path should never do that). Newline
+# and carriage return become the two-character escapes \n and \r, so the
+# name stays recognizable. The verify block uses handoff_shquote instead,
+# because its lines must also survive a paste into a shell.
+handoff_oneline() {  # <text>
+  # Patterns and replacements held in variables, as in handoff_shquote.
+  local s="$1" nl=$'\n' cr=$'\r' esc_n='\n' esc_r='\r'
+  s="${s//$nl/$esc_n}"
+  s="${s//$cr/$esc_r}"
+  printf '%s' "$s"
+}
+# repo_name is printed only in the document (title and Repo heading), so it
+# is made one-line once here.
+repo_name="$(handoff_oneline "$repo_name")"
+
 git_short() { git -C "$1" rev-parse --short HEAD 2>/dev/null || echo "?"; }
 git_subj()  { git -C "$1" log -1 --pretty=%s 2>/dev/null || echo "?"; }
 git_branch() { git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?"; }
@@ -1821,7 +1840,15 @@ handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
   # `git init` / arrived with a clone), instead of silently loading a doc
   # that describes some other tree. An inert HTML comment, covered by the
   # HMAC like every other line.
-  printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n' "$repo_root" "$in_git"
+  # #186: a root holding a newline or carriage return is not recorded. Raw,
+  # it would split this line (and could inject a marker line); escaped, the
+  # loader would read back a path that does not exist and warn of a moved
+  # project on every load. Absent is what the loader already treats as an
+  # older doc: no root check, no warning.
+  case "$repo_root" in
+    *$'\n'*|*$'\r'*) ;;
+    *) printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n' "$repo_root" "$in_git" ;;
+  esac
   # Writer marker (issue #63), read by the guard above on the NEXT write.
   # Right after HANDOFF_ROOT so it sits in the verbatim preamble both HMACs
   # cover. --restamp never regenerates the preamble, but since #132 it does
@@ -1907,8 +1934,9 @@ EOF
 
   snapshot_repo "$repo_root" "Repo: $repo_name"
 
+  substrate_label="$(handoff_oneline "$SUBSTRATE_NAME")"
   if [[ -n "$substrate_root" ]]; then
-    snapshot_repo "$substrate_root" "Substrate: $SUBSTRATE_NAME"
+    snapshot_repo "$substrate_root" "Substrate: $substrate_label"
   fi
 
   # In-flight markdown across configured paths in the main repo.
@@ -1940,14 +1968,14 @@ EOF
     for d in $SUBSTRATE_INFLIGHT_DIRS; do
       [[ -d "$substrate_root/$d" ]] || continue
       # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
-      printf '## In-flight (untracked or modified .md under `%s/%s/`)\n\n' "$SUBSTRATE_NAME" "$d"
+      printf '## In-flight (untracked or modified .md under `%s/%s/`)\n\n' "$substrate_label" "$d"
       found="$(list_inflight_md "$substrate_root" "$d/")"
       if [[ -z "$found" ]]; then
         printf '_none_\n\n'
       else
         while IFS= read -r f; do
           [[ -z "$f" ]] && continue
-          echo "- \`$SUBSTRATE_NAME/$f\`"
+          echo "- \`$substrate_label/$f\`"
         done <<< "$found"
         printf '\n'
       fi
