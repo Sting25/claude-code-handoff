@@ -293,7 +293,7 @@ ta_release_lock() {  # <lock_dir>
 # the winner sweeps owner.reap.* orphans older than the window. The lock dir
 # is never removed or recreated here. 0 = reclaimed and held, 1 = a miss.
 ta_reclaim_stale_lock() {  # <lock_dir>
-  local lock_dir="$1" stale_secs lock_mtime now reap reap_mtime g g_mtime
+  local lock_dir="$1" stale_secs lock_mtime now reap reap_mtime g g_mtime tok
   [[ -L "$lock_dir" || ! -d "$lock_dir" ]] && return 1
   stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
   # Numeric guard before the (( )) below: bash arithmetic recursively
@@ -322,8 +322,27 @@ ta_reclaim_stale_lock() {  # <lock_dir>
       # a release by that holder in the meantime shows up (the release
       # removes captures, see release_mkdir_lock); then there is nothing
       # to hand back and the lock is already free.
+      # A filesystem without hard links (exFAT, FAT32, some SMB shares)
+      # fails every ln (#188). The capture is then still there, so the
+      # token goes back by content: the pid it holds is written to owner
+      # with the same noclobber O_EXCL create a claim uses, which, like
+      # ln, never replaces an owner someone else made meanwhile (that
+      # failure is the warning below). Not a rename back: mv checks for
+      # owner and then renames over it, so an owner created in between
+      # would be replaced and two processes would own the lock. Residual:
+      # if the holder releases (removing the capture and the dir) between
+      # the read and the create, and a new acquirer has made the dir but
+      # not yet claimed it, the copy lands in that dir and holds it until
+      # the staleness window. That is a lock held too long, never a lock
+      # with two owners. An empty read (a claim captured between its
+      # create and its write) is written back as is, for the same reason:
+      # an absent owner would let a third process claim beside the holder.
       if ! ln "$reap" "$lock_dir/owner" 2>/dev/null && [[ -e "$reap" ]]; then
-        echo "lock reclaim: could not hand a live holder's token back to $lock_dir (another process claimed it meanwhile)." >&2
+        tok=""; read -r tok < "$reap" 2>/dev/null || true
+        if [[ -e "$reap" ]] \
+           && ! ( set -o noclobber; printf '%s\n' "$tok" > "$lock_dir/owner" ) 2>/dev/null; then
+          echo "lock reclaim: could not hand a live holder's token back to $lock_dir (another process claimed it meanwhile)." >&2
+        fi
       fi
       rm -f "$reap" 2>/dev/null || true
       return 1

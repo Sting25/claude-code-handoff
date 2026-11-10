@@ -42,6 +42,13 @@
 #  12. (#183 review) A hand-back that lands between the release's owner check
 #      and its capture sweep (the capture is removed by the reclaimer) is
 #      caught by the re-check of owner.
+#  13. (#188) No hard links: every racer runs with an `ln` that fails with
+#      "Operation not permitted" (exFAT, FAT32, some SMB shares). B captures
+#      the token A just won; the hand-back must still put A's token back
+#      (no lost token), a third acquirer must miss (one winner), and A's
+#      release must free the lock.
+#  14. (#188) No hard links and a token that appeared meanwhile: the
+#      fallback hand-back never replaces it and says so on stderr.
 set -u
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 WH="$REPO_ROOT/bin/write_handoff.sh"
@@ -456,6 +463,71 @@ for site in wh ta; do
   : > "$d/r_go"; wait "$pa"
   check "$site re-check: lock freed, no token of ours left behind" no \
     "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
+done
+
+
+# --- 13. no hard links: the hand-back keeps the token (#188) -----------------
+# An `ln` on PATH that always fails the way link(2) does on a filesystem
+# without hard links. It logs each call so the test can show it was used.
+nolink="$work/nolink"; mkdir -p "$nolink"
+cat > "$nolink/ln" <<SHIM
+#!/usr/bin/env bash
+echo x >> "$nolink/calls"
+echo "ln: \${2:-?}: Operation not permitted" >&2
+exit 1
+SHIM
+chmod +x "$nolink/ln"
+for site in wh ta; do
+  d="$work/nolink.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  must age_lock "$lock"
+  rm -f "$nolink/calls"
+  PATH="$nolink:$shim:$PATH" RACE_HOLD_UNTIL="$d/b_go" \
+    bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/ob" 2>"$d/eb" </dev/null & pb=$!
+  parked=no; wait_for "$d/b_go.parked" && parked=yes
+  check "$site no hard links: B parked after its age check" yes "$parked"
+  PATH="$nolink:$PATH" HOLD_WON="$d/a_won" HOLD_REL="$d/a_rel" \
+    bash "$drv" "$funcs" "$site-hold" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null & pa=$!
+  wait_for "$d/a_won"
+  toka="$(cat "$lock/owner" 2>/dev/null)"
+  : > "$d/b_go"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site no hard links: the ln stub was called" yes \
+    "$([[ -s "$nolink/calls" ]] && echo yes || echo no)"
+  check "$site no hard links: B misses" 1 "$rcb"
+  check "$site no hard links: A's token is back at owner" "$toka" \
+    "$([[ -n "$toka" && -f "$lock/owner" ]] && cat "$lock/owner")"
+  check "$site no hard links: no captured token left behind" 0 \
+    "$(find "$lock" -name 'owner.reap.*' 2>/dev/null | wc -l | tr -d ' ')"
+  check "$site no hard links: B printed nothing" "" "$(cat "$d/eb")"
+  read -r rcc _ < <(PATH="$nolink:$PATH" bash "$drv" "$funcs" "$site" "$lock" "" "" "" 2>/dev/null </dev/null)
+  check "$site no hard links: a third acquirer misses" 1 "$rcc"
+  check "$site no hard links: A's token survives the third acquirer" "$toka" \
+    "$(cat "$lock/owner" 2>/dev/null)"
+  : > "$d/a_rel"; wait "$pa"
+  read -r rca _ < "$d/oa"
+  check "$site no hard links: A won" 0 "$rca"
+  check "$site no hard links: A's release frees the lock" no \
+    "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
+done
+
+# --- 14. no hard links, a token appeared meanwhile: never replaced ----------
+for site in wh ta; do
+  d="$work/nolinkblocked.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  must age_lock "$lock"
+  PATH="$nolink:$shim:$PATH" RACE_HOLD_UNTIL="$d/b_go" RACE_MV_HOLD="$d/b_mv" \
+    bash "$drv" "$funcs" "$site" "$lock" "" "" "" > "$d/ob" 2>"$d/eb" </dev/null & pb=$!
+  wait_for "$d/b_go.parked"
+  bash "$drv" "$funcs" "$site" "$lock" "" "" "" > /dev/null 2>&1 </dev/null
+  : > "$d/b_go"
+  parked=no; wait_for "$d/b_mv.parked" && parked=yes
+  check "$site no hard links, blocked: B parked holding its capture" yes "$parked"
+  echo 777 > "$lock/owner"            # someone else's token, in the gap
+  : > "$d/b_mv"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site no hard links, blocked: B misses" 1 "$rcb"
+  check "$site no hard links, blocked: the newer token is not replaced" 777 "$(cat "$lock/owner")"
+  check "$site no hard links, blocked: one stderr line" 1 \
+    "$(grep -c 'could not hand a live holder' "$d/eb")"
 done
 
 finish
