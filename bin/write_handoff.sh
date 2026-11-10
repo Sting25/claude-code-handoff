@@ -1912,17 +1912,19 @@ EOF
     # the repo_root line only when it is a different path.
     verify_wt="$(git -C "${HANDOFF_ROOT_ANCHOR:-$repo_root}" rev-parse --show-toplevel 2>/dev/null || true)"
     [[ -n "$verify_wt" ]] || verify_wt="$repo_root"
-    printf 'git -C %s status && git -C %s log --oneline -5\n' "$verify_wt" "$verify_wt"
+    # #167: %q shell-quotes each path (identity for plain paths) so the emitted
+    # command survives spaces and metacharacters when pasted into a shell.
+    printf 'git -C %q status && git -C %q log --oneline -5\n' "$verify_wt" "$verify_wt"
     if [[ "$verify_wt" != "$repo_root" ]]; then
-      printf 'git -C %s status && git -C %s log --oneline -5\n' "$repo_root" "$repo_root"
+      printf 'git -C %q status && git -C %q log --oneline -5\n' "$repo_root" "$repo_root"
     fi
     if [[ -n "$substrate_root" ]]; then
-      printf 'git -C %s log --oneline -5\n' "$substrate_root"
+      printf 'git -C %q log --oneline -5\n' "$substrate_root"
     fi
   else
     # Non-git project: no commit/branch state to verify against. Point at the
     # handoff artifacts instead so the next session can confirm they exist.
-    printf 'ls -la %s/.claude/\n' "$repo_root"
+    printf 'ls -la %q\n' "$repo_root/.claude/"
   fi
   printf '```\n'
   printf '%s\n\n' "$HANDOFF_BIND_END"
