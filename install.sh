@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 587019dc6374dff2a9809fd2961c670503040ec0b62008ce43dabbdaf2cba5bd
+# SOURCE-SHA256: 8bf0dffeaa42387942cc3a2da3bb744bf9b59880176f2b1ab9348c9cfb3ad6b4
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1843,20 +1843,25 @@ registry_remove() {  # <project dir> <settings file name>
 # non-object file is a plain stale entry (settings_usable), not a failure.
 REGISTRY_OUT=""
 registry_collect() {
-  local want="$1" rp rn has nl=$'\n' before
+  local want="$1" rp rn has nl=$'\n' before failed=0
   REGISTRY_OUT=""
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
+  # The flag is cleared per entry and folded back after the loop, so a
+  # second failing file after a first one is skipped too (a snapshot taken
+  # once would read as "already failed" for every later entry).
+  before=$sh_jq_failed
   while IFS=$'\t' read -r rp rn || [[ -n "$rp" ]]; do
     [[ -n "$rp" ]] || continue
     case "$rn" in settings.json|settings.local.json) ;; *) continue ;; esac
     has=stale
-    before=$sh_jq_failed
+    sh_jq_failed=0
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
-    if (( sh_jq_failed && ! before )); then continue; fi
+    if (( sh_jq_failed )); then failed=1; continue; fi
     if [[ "$has" == "$want" ]]; then
       REGISTRY_OUT="${REGISTRY_OUT:+$REGISTRY_OUT$nl}$rp"$'\t'"$rn"
     fi
   done < "$project_registry"
+  sh_jq_failed=$(( before || failed ))
   return 0
 }
 

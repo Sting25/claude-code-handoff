@@ -516,6 +516,24 @@ else
   check "unreadable project file, fixed re-run: exit 0"        0   "$RC"
   check "unreadable project file, fixed re-run: secret kept for wired project" yes "$(has "$OUT" 'still sign with')"
 fi
+# 19f2. Two registered projects both unreadable: neither is listed as stale
+#       (the per-entry flag; a snapshot taken once skipped only the first).
+fresh_home
+run_sh ""
+mkdir -p "$HOME_DIR/proj" "$HOME_DIR/proj2"
+run_sh "" --scope project --project "$HOME_DIR/proj"
+run_sh "" --scope project --project "$HOME_DIR/proj2"
+chmod 000 "$HOME_DIR/proj/.claude/settings.json" "$HOME_DIR/proj2/.claude/settings.json"
+if [[ -r "$HOME_DIR/proj/.claude/settings.json" ]]; then
+  chmod 600 "$HOME_DIR/proj/.claude/settings.json" "$HOME_DIR/proj2/.claude/settings.json"
+  skip "mode 000 is readable here (running as root)"
+else
+  run_sh "" --doctor
+  chmod 600 "$HOME_DIR/proj/.claude/settings.json" "$HOME_DIR/proj2/.claude/settings.json"
+  check "two unreadable project files, doctor: exit nonzero"   yes "$(nz $RC)"
+  check "two unreadable project files, doctor: two WARNs"      2   "$(printf '%s\n' "$ERR" | grep -c 'cannot be read (check its permissions)')"
+  check "two unreadable project files, doctor: neither stale"  no  "$(has "$OUT" 'stale project registry entries')"
+fi
 # 19g. Project-scope --uninstall on a project file this process cannot read:
 #      the same ERROR and exit 1, registry line and file kept. It used to die
 #      on a bare "Permission denied" from the fingerprint read (settings_fp)
