@@ -174,8 +174,9 @@ settings_is_skeleton() {  # <file> <exact|loose>
 }
 
 # Project-scope --uninstall, step 1 (before the strip): decide whether this
-# file is the one the marker was written for: byte-identical to the install,
-# or already exactly the empty skeleton. Sets created_pre_ok.
+# file is the one the marker was written for: byte-identical to what this
+# installer last wrote. Nothing else qualifies (a hand-written skeleton does
+# not). Sets created_pre_ok.
 created_pre_ok=0
 check_created_settings() {
   local m stored cur
@@ -183,21 +184,37 @@ check_created_settings() {
   [[ -f "$m" && ! -L "$m" ]] || return 0
   stored="$(cat "$m" 2>/dev/null || true)"
   cur="$(settings_fp "$settings")"
-  if [[ -n "$cur" && "$cur" == "$stored" ]] || settings_is_skeleton "$settings" exact; then
+  if [[ -n "$cur" && "$cur" == "$stored" ]]; then
     created_pre_ok=1
   fi
 }
 
+# True when git tracks <file> in whatever repository holds it. Asked from the
+# file's own directory (not the project's), so a .claude/ symlinked into a
+# dotfiles repo, or a monorepo above the project, is seen too. A symlinked
+# file is checked at its resolved target as well.
+git_tracks_file() {
+  local f="$1" t
+  command -v git >/dev/null 2>&1 || return 1
+  git -C "$(dirname "$f")" ls-files --error-unmatch -- "$(basename "$f")" >/dev/null 2>&1 && return 0
+  if [[ -L "$f" ]]; then
+    t="$(readlink "$f" 2>/dev/null || true)"
+    case "$t" in /*) ;; *) t="$(dirname "$f")/$t" ;; esac
+    [[ -n "$t" && -d "$(dirname "$t")" ]] \
+      && git -C "$(dirname "$t")" ls-files --error-unmatch -- "$(basename "$t")" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
 # Step 2 (after the strip): delete the file only when the marker matched, the
-# strip left nothing but the empty skeleton, and git does not track it (a
-# tracked file would show up as a deletion). The marker is consumed either way.
+# strip left nothing but the empty skeleton, and no git repository tracks it
+# (a tracked file would show up as a deletion). The marker is consumed either way.
 remove_created_settings_if_empty() {
   local m
   m="$(created_marker)"
   [[ -f "$m" && ! -L "$m" ]] || return 0
   if (( created_pre_ok )) && settings_is_skeleton "$settings" loose; then
-    if command -v git >/dev/null 2>&1 \
-       && git -C "$project_dir" ls-files --error-unmatch -- "$settings" >/dev/null 2>&1; then
+    if git_tracks_file "$settings"; then
       echo "  keep    $settings (tracked by git; left as the empty skeleton)"
     else
       rm -f "$settings"
@@ -415,14 +432,21 @@ rerun_cmd() {
 # others broken, so it prints one command per wired project (issue #178).
 # Every other case keeps the one-line form.
 rerun_remedy() {
-  local list n rp rn flag proj
+  local list n rp rn flag proj tab nl line
   list=""
   if [[ "$scope" != project ]] && ! settings_has_our_hooks "$user_settings"; then
     proj="$(wiring_project_root)"
-    if ! settings_has_our_hooks "$proj/.claude/settings.json" \
-       && ! settings_has_our_hooks "$proj/.claude/settings.local.json"; then
-      list="$(registry_scan wired)"
-    fi
+    list="$(registry_scan wired)"
+    # The project the doctor runs in counts even when it is not registered.
+    tab=$'\t'; nl=$'\n'
+    for rn in settings.json settings.local.json; do
+      line="$proj$tab$rn"
+      if settings_has_our_hooks "$proj/.claude/$rn"; then
+        if ! printf '%s\n' "$list" | grep -Fxq -- "$line"; then
+          if [[ -n "$list" ]]; then list="$line$nl$list"; else list="$line"; fi
+        fi
+      fi
+    done
   fi
   n=0
   if [[ -n "$list" ]]; then n="$(printf '%s\n' "$list" | wc -l | tr -d ' ')"; fi

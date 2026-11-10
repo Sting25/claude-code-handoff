@@ -1090,12 +1090,14 @@ When the installer itself created the project settings file (it did not
 exist before the install), the matching `--uninstall --scope project`
 deletes the file again once only the empty `hooks` and `permissions`
 skeleton is left. The install records a fingerprint of the file it
-created in `~/.claude/handoff_settings_backups/`, and the uninstall
-deletes the file only if it still matches that record. A file that
-existed before the install, one you rewrote or added to since, and one
-that git tracks (deleting it would show as a change) are kept, the last
-as the empty skeleton. If the record cannot be written, the install warns
-and the uninstall leaves the skeleton.
+created in `~/.claude/handoff_settings_backups/`. The uninstall deletes the
+file only when it is still byte-identical to what this installer last wrote
+(and nothing but the empty skeleton is left after the strip), and never when
+git tracks it, in the project's repository or in any other one (a dotfiles
+repo the `.claude/` directory or the file links into). A file that existed
+before the install, one you rewrote or added to since, and a tracked one
+are kept, the last as the empty skeleton. If the record cannot be written,
+the install warns and the uninstall leaves the skeleton.
 
 `--doctor --scope project` checks the project file. Claude Code runs an
 identical hook handler once even when several settings files define it,

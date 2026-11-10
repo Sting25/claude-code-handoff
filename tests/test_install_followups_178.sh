@@ -95,6 +95,18 @@ RUN_DIR="$NEUTRAL" inst --doctor
 RUN_DIR=""
 check "4: single project keeps the one-line remedy" yes "$(has "$OUT" "Re-run ./install.sh --scope project --project '$(cd "$P" && pwd -P)' from")"
 
+# S11: run from INSIDE a wired project while a second wired project is registered.
+fresh_sandbox
+P2="$(mktemp -d)"; cleanup_on_exit "$P2"
+inst --project "$P"
+inst --project "$P2"
+rm -rf "$H/.claude/bin"
+RUN_DIR="$P" inst --doctor
+RUN_DIR=""
+check "4 S11: lists the project it runs in" yes "$(has "$OUT" "./install.sh --scope project --project '$(cd "$P" && pwd -P)'")"
+check "4 S11: lists the other wired project" yes "$(has "$OUT" "./install.sh --scope project --project '$(cd "$P2" && pwd -P)'")"
+check "4 S11: says one per project" yes "$(has "$OUT" "Re-run one command per wired project")"
+
 # --- 5. a project rooted at $HOME gets a --project hint ----------------------------------
 fresh_sandbox
 must git -C "$H" init -q
@@ -176,6 +188,34 @@ check "7c: tracked file kept" yes "$(exists "$P/.claude/settings.json")"
 check "7c: says it is tracked" yes "$(has "$OUT" "tracked by git; left as the empty skeleton")"
 check "7c: no deletion in git status" "" "$(git -C "$P" status --porcelain | grep '^ D' || true)"
 check "7c: file stripped to the skeleton" 0 "$(jq -r '(.hooks | length) + (.permissions.allow | length)' "$P/.claude/settings.json")"
+
+# --- 7e. tracked in ANY repository: kept; hand-written skeleton: kept ---------------------------
+GITC=(git -c user.email=t@example.com -c user.name=t)
+# S5: .claude is a symlink into a dotfiles repo.
+fresh_sandbox
+DOT="$(mktemp -d)"; cleanup_on_exit "$DOT"
+must mkdir -p "$DOT/proj"; must git -C "$DOT" init -q; must ln -s "$DOT/proj" "$P/.claude"
+inst --project "$P"
+must git -C "$DOT" add -A; must "${GITC[@]}" -C "$DOT" commit -q -m s
+inst --uninstall --project "$P"
+check "7e S5: dotfiles-tracked file kept" yes "$(exists "$DOT/proj/settings.json")"
+check "7e S5: dotfiles repo shows no deletion" "" "$(git -C "$DOT" status --porcelain | grep '^ D' || true)"
+# S6: settings.json is a dangling symlink into a dotfiles repo; the installer creates the target.
+fresh_sandbox
+DOT="$(mktemp -d)"; cleanup_on_exit "$DOT"
+must git -C "$DOT" init -q; must mkdir -p "$P/.claude"; must ln -s "$DOT/proj-settings.json" "$P/.claude/settings.json"
+inst --project "$P"
+must git -C "$DOT" add -A; must "${GITC[@]}" -C "$DOT" commit -q -m s
+inst --uninstall --project "$P"
+check "7e S6: tracked symlink target kept" yes "$(exists "$DOT/proj-settings.json")"
+check "7e S6: dotfiles repo shows no deletion" "" "$(git -C "$DOT" status --porcelain | grep '^ D' || true)"
+# S2: the user deletes the created file and hand-writes a pretty-printed skeleton (no reinstall).
+fresh_sandbox
+inst --project "$P"
+rm "$P/.claude/settings.json"
+printf '{\n  "hooks": {},\n  "permissions": {\n    "allow": []\n  }\n}\n' > "$P/.claude/settings.json"
+inst --uninstall --project "$P"
+check "7e S2: hand-written skeleton kept (no fingerprint match)" yes "$(exists "$P/.claude/settings.json")"
 
 # --- 7d. an unwritable marker location does not fail the install -----------------------------
 fresh_sandbox
