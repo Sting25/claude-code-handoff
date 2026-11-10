@@ -23,6 +23,9 @@ are appended).
 
   **Migrating from the plugin:** remove it at the scope you installed it with, `claude plugin uninstall claude-code-handoff@claude-code-handoff --scope project` (or `--scope user`, or `--scope local`), then `claude plugin marketplace remove claude-code-handoff`, then run `./install.sh --scope project --project <dir>` from a clone. The HMAC secret is per machine (`~/.claude/handoff_secret`) and the plugin read the same file, so handoffs it signed keep verifying as binding rules.
 
+### Fixed
+- **`install.sh` no longer reports a jq failure in the statusLine probe as a skip (#174).** Any non-zero probe exit used to print `skip statusLine (you already have one ...)` and exit 0 with nothing wired. Exit 1 from `jq -e` (a real answer) still means a foreign statusLine and skips; any other exit now prints an ERROR naming the jq exit code to stderr and exits 1. New `tests/test_install_statusline_probe.sh`.
+
 ### Changed
 - **CI: plugin jobs removed (#171).** The `plugin-validate` job is gone. The `plugin-version-sync` job is now `version-sync`, keeps its tag checks (tag `vX.Y.Z` must equal `VERSION`, `CHANGELOG.md` must carry `## [X.Y.Z]`) but no longer parses the plugin manifests, and its display name is now `version sync (required)`; branch protection's required-check entry for the old display name must be replaced with the new one. The `version-freeze` job checks `VERSION` only.
 - **Skills: a follow-up block whose scripts are missing now prints the MISSING line and stops (#171)** instead of running `bash "/write_handoff.sh"` (rc 127, "No such file or directory"). The snippets resolve `${CLAUDE_HOME:-$HOME/.claude}/bin`.

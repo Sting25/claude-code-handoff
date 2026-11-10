@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 050b243402c09094aa467877f72c80e073ce7c6c4f73c6e966a363343b1497f7
+# SOURCE-SHA256: 0e60fa2512baae69300e7dac86485949565144d32d203de449028008e6c4bc25
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1006,16 +1006,33 @@ maybe_uninstall_model() {
 #     Only .command is replaced so any sibling keys the user added (e.g.
 #     "padding") survive.
 #   - present and NOT ours   -> untouched; print the documented manual step.
+#
+# Each probe is a `jq -e`: exit 0 = true, 1 = false/null (a real answer), and
+# anything else (2 usage, 3 compile, 4 no output, 5 runtime, 127 missing, a
+# signal) = jq itself failed. Treating "not 0" as "a foreign statusLine exists"
+# printed `skip` and exited 0 with nothing wired (#174), so a jq failure is
+# fatal here, like commit_settings_tmp.
+sl_probe_fail() {
+  echo "  ERROR   jq failed (exit $1) while probing statusLine in $settings — aborting." >&2
+  echo "          statusLine was NOT wired; fix jq and re-run ./install.sh." >&2
+  exit 1
+}
 maybe_install_statusline() {
-  if jq -e '(.statusLine // null) == null' "$settings" >/dev/null 2>&1; then
+  local rc=0
+  jq -e '(.statusLine // null) == null' "$settings" >/dev/null 2>&1 || rc=$?
+  if [[ $rc -gt 1 ]]; then sl_probe_fail "$rc"; fi
+  if [[ $rc -eq 0 ]]; then
     jq --arg c "$sl_cmd" '.statusLine = {"type": "command", "command": $c}' \
       "$settings" > "$settings.tmp"
     commit_settings_tmp
     echo "  add     statusLine"
     return
   fi
-  if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
-       "$settings" >/dev/null 2>&1; then
+  rc=0
+  jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
+    "$settings" >/dev/null 2>&1 || rc=$?
+  if [[ $rc -gt 1 ]]; then sl_probe_fail "$rc"; fi
+  if [[ $rc -eq 0 ]]; then
     local cur_sl
     cur_sl="$(jq -r '.statusLine.command // ""' "$settings" 2>/dev/null)"
     if [[ "$cur_sl" == "$sl_cmd" ]]; then
