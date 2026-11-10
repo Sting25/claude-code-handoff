@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: adf27e262a1c662d9b00252091a1bbaf9b5ebd20fc69286779f26d99b34cc149
+# SOURCE-SHA256: 428235f412e3cc92be8aff1b3a536faf7352491721e57f2ef173d3d27c641e35
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -227,9 +227,12 @@ patch_in_progress=0
 # was there before instead: "absent" removes the file, "empty" truncates it.
 settings_seed_state=""
 # Project scope: the project's .claude/ directory and its marker, when THIS run
-# made them (set in 40-main.sh). An aborted run takes both away again, so the
-# line "an abort undoes that" is true for the directory as well as the file.
+# made them (set in 40-main.sh). An aborted run drops the marker it wrote, and
+# rmdirs the directory only while it is still empty and still the directory
+# this run made (same identity, see claude_dir_id): a directory that gained a
+# file, or was replaced, stays.
 claude_dir_made_this_run=0
+claude_dir_made_id=""
 claude_dir_marker_written=0
 cleanup() {
   local rc=$?
@@ -249,12 +252,15 @@ cleanup() {
   fi
   if (( rc != 0 )) && (( claude_dir_made_this_run )) && [[ -n "$project_dir" ]]; then
     # rmdir only (never recursive): a directory that gained anything else stays.
-    if [[ -d "$project_dir/.claude" && ! -L "$project_dir/.claude" ]] \
+    if [[ -d "$project_dir/.claude" && ! -L "$project_dir/.claude" && -n "$claude_dir_made_id" ]] \
+       && [[ "$(claude_dir_id "$project_dir/.claude")" == "$claude_dir_made_id" ]] \
        && rmdir "$project_dir/.claude" 2>/dev/null; then
       echo "  restore $project_dir/.claude/ removed again; this run created it (aborted, rc=$rc)" >&2
-      if (( claude_dir_marker_written )) && [[ -n "$project_backup_dir" ]]; then
-        rm -f "$project_backup_dir/claude_dir.mkdir" 2>/dev/null || true
-      fi
+    fi
+    # The marker goes whether or not the rmdir did: a run that did not finish
+    # leaves nothing for a later --uninstall to act on.
+    if (( claude_dir_marker_written )) && [[ -n "$project_backup_dir" ]]; then
+      rm -f "$project_backup_dir/claude_dir.mkdir" 2>/dev/null || true
     fi
   fi
 }
@@ -394,7 +400,16 @@ if [[ "$scope" == project ]]; then
       _gone_tail="/$(basename "$_gone_head")$_gone_tail"
       _gone_head="$(dirname "$_gone_head")"
     done
-    _gone_head="$(cd "$_gone_head" && pwd -P)"
+    # An ancestor that cannot be entered (mode 000) has no knowable physical
+    # path: say so and leave the registry line, rather than dying on a raw
+    # `cd: Permission denied` under set -e or clearing a line that may not match.
+    if ! _gone_phys="$(cd "$_gone_head" 2>/dev/null && pwd -P)"; then
+      echo "  WARN    cannot enter $_gone_head (the nearest existing parent of $project_dir)," >&2
+      echo "          so its physical path is unknown; the registry line and markers were left in place." >&2
+      echo "          Make it enterable and re-run the --uninstall." >&2
+      exit 1
+    fi
+    _gone_head="$_gone_phys"
     [[ "$_gone_head" == / ]] && _gone_head=""
     project_dir="$_gone_head$_gone_tail"
     project_gone=1
@@ -480,7 +495,10 @@ fi
 # LINK with a plain file, silently disconnecting the user's source of truth.
 # Resolving to the real path keeps tmp+mv atomic AND leaves the symlink intact
 # (Claude Code follows it to read). Applies to a project file the same way.
+# settings_link keeps the path the user named, so a refusal can name the link.
+settings_link=""
 if [[ -L "$settings" ]]; then
+  settings_link="$settings"
   settings_resolved="$(resolve_symlink "$settings")"
   echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
   settings="$settings_resolved"
@@ -1231,6 +1249,7 @@ ensure_settings_json() {
 take_settings_backup() {
   if [[ "$scope" == project ]]; then
     mkdir -p "$project_backup_dir"
+    [[ "$mode" == install ]] && { project_key_claim || true; }
     settings_backup="$project_backup_dir/$settings_name.bak.$ts"
   else
     settings_backup="$settings.bak.$ts"
@@ -1249,6 +1268,54 @@ take_settings_backup() {
 # still byte-identical to what the marker was written for, and otherwise
 # drops it. Writing the marker is best effort: failing to write it must not
 # fail an install whose wiring is already in place.
+# The backup directory is keyed by a cksum of the project path, and CRC
+# collisions are constructible (two paths, one key). So the install writes the
+# project's physical path into a `path` file there, and every marker is
+# trusted only when that file names THIS project (#194). project_key_check
+# sets project_key_state: own (path matches), foreign (another project's),
+# legacy (directory exists without a path file: an install from before this
+# check; trusted for the created-file marker it could have written, never for
+# the directory marker), or none.
+project_key_state=""
+project_key_warned=0
+project_key_check() {
+  local f="$project_backup_dir/path"
+  if [[ -L "$f" ]]; then
+    project_key_state=foreign
+  elif [[ -f "$f" ]]; then
+    if printf '%s\n' "$project_dir" | cmp -s - "$f"; then
+      project_key_state=own
+    else
+      project_key_state=foreign
+    fi
+  elif [[ -d "$project_backup_dir" ]]; then
+    project_key_state=legacy
+  else
+    project_key_state=none
+  fi
+}
+project_key_warn_foreign() {
+  (( project_key_warned )) && return 0
+  project_key_warned=1
+  echo "  WARN    $project_backup_dir is keyed to another project"
+  echo "          ($(head -n 1 "$project_backup_dir/path" 2>/dev/null || true)); its markers are left alone and none are"
+  echo "          recorded for $project_dir, so --uninstall will leave what this install created."
+}
+# Install only: make the key directory this project's. 0 = ours, 1 = another
+# project's (WARN printed once), 2 = the path file could not be written (the
+# caller's own marker write fails the same way and says so).
+project_key_claim() {
+  project_key_check
+  case "$project_key_state" in
+    own) return 0 ;;
+    foreign) project_key_warn_foreign; return 1 ;;
+  esac
+  if ( mkdir -p "$project_backup_dir" && printf '%s\n' "$project_dir" > "$project_backup_dir/path" ) 2>/dev/null; then
+    project_key_state=own
+    return 0
+  fi
+  return 2
+}
 created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
 settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
   [[ -f "$1" && ! -L "$1" ]] || return 0
@@ -1258,8 +1325,10 @@ settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
 pre_patch_fp=""
 record_created_settings() {
   [[ "$scope" == project ]] || return 0
-  local m stored
+  local m stored krc=0
   m="$(created_marker)"
+  project_key_claim || krc=$?
+  (( krc == 1 )) && return 0
   if [[ "$settings_seed_state" == absent ]]; then
     if ! ( mkdir -p "$project_backup_dir" && settings_fp "$settings" > "$m" ) 2>/dev/null; then
       echo "  WARN    cannot record the created-file marker in $project_backup_dir;"
@@ -1278,6 +1347,7 @@ record_created_settings() {
 
 # jq test: the file holds nothing but the empty hooks/permissions skeleton
 # (exact: $1 = exact) or that skeleton plus nothing (loose, after a strip).
+# Returns jq's own status: 0 skeleton, 1 not, 2 or more = jq failed.
 settings_is_skeleton() {  # <file> <exact|loose>
   [[ -f "$1" && ! -L "$1" ]] && command -v jq >/dev/null 2>&1 || return 1
   if [[ "$2" == exact ]]; then
@@ -1300,6 +1370,8 @@ check_created_settings() {
   local m stored cur
   m="$(created_marker)"
   [[ -f "$m" && ! -L "$m" ]] || return 0
+  project_key_check
+  [[ "$project_key_state" == foreign ]] && return 0
   stored="$(cat "$m" 2>/dev/null || true)"
   cur="$(settings_fp "$settings")"
   if [[ -n "$cur" && "$cur" == "$stored" ]]; then
@@ -1327,16 +1399,36 @@ git_tracks_file() {
 # Step 2 (after the strip): delete the file only when the marker matched, the
 # strip left nothing but the empty skeleton, and no git repository tracks it
 # (a tracked file would show up as a deletion). The marker is consumed either way.
+# A jq failure in the skeleton test is not "not a skeleton": the marker stays
+# and uninstall_incomplete is set, so the caller keeps the registry line and
+# exits non-zero, and a re-run can finish.
 remove_created_settings_if_empty() {
-  local m
+  local m src=0
   m="$(created_marker)"
   [[ -f "$m" && ! -L "$m" ]] || return 0
-  if (( created_pre_ok )) && settings_is_skeleton "$settings" loose; then
-    if git_tracks_file "$settings"; then
-      echo "  keep    $settings (tracked by git; left as the empty skeleton)"
-    else
-      rm -f "$settings"
-      echo "  remove  $settings (this installer created it; nothing else was ever written to it)"
+  project_key_check
+  if [[ "$project_key_state" == foreign ]]; then
+    project_key_warn_foreign
+    return 0
+  fi
+  if (( created_pre_ok )); then
+    settings_is_skeleton "$settings" loose || src=$?
+    if (( src > 1 )); then
+      echo "  ERROR   jq failed (exit $src) while checking whether $settings is the empty skeleton;"
+      echo "          $settings and its created-file marker were left in place."
+      # The strip above was ours, so re-bind the marker to the stripped file:
+      # a re-run then finds it unchanged and can finish the removal.
+      settings_fp "$settings" > "$m" 2>/dev/null || true
+      uninstall_incomplete=1
+      return 0
+    fi
+    if (( src == 0 )); then
+      if git_tracks_file "$settings"; then
+        echo "  keep    $settings (tracked by git; left as the empty skeleton)"
+      else
+        rm -f "$settings"
+        echo "  remove  $settings (this installer created it; nothing else was ever written to it)"
+      fi
     fi
   fi
   rm -f "$m"
@@ -1346,11 +1438,27 @@ remove_created_settings_if_empty() {
 # made it, is recorded in a marker beside the file markers. --uninstall then
 # removes it again, with rmdir only (never recursive), once the strip has
 # left it empty. A pre-existing directory has no marker and is never touched.
+# The marker holds the directory's identity (claude_dir_id) at creation, so a
+# directory the user removed and recreated at the same path is not ours.
 # Best effort, like the file marker.
 claude_dir_marker() { printf '%s\n' "$project_backup_dir/claude_dir.mkdir"; }
-record_created_claude_dir() {
+# Identity of a directory: inode plus birth time (GNU %W, BSD %B), so an
+# inode number the filesystem reuses after `rm -rf; mkdir` still differs
+# where birth time is recorded. GNU first, BSD fallback (the repo idiom, #92).
+# Empty when stat cannot read it.
+claude_dir_id() {
+  [[ -d "$1" && ! -L "$1" ]] || return 0
+  stat -c '%i %W' "$1" 2>/dev/null || stat -f '%i %B' "$1" 2>/dev/null || true
+}
+record_created_claude_dir() {  # <the directory this run created>
   [[ "$scope" == project ]] || return 0
-  if ( mkdir -p "$project_backup_dir" && : > "$(claude_dir_marker)" ) 2>/dev/null; then
+  # Only <project>/.claude itself, literally: never a symlink target's parent.
+  [[ "$1" == "$project_dir/.claude" ]] || return 0
+  local id krc=0
+  id="$(claude_dir_id "$1")"
+  project_key_claim || krc=$?
+  (( krc == 1 )) && return 0
+  if [[ -n "$id" ]] && ( mkdir -p "$project_backup_dir" && printf '%s\n' "$id" > "$(claude_dir_marker)" ) 2>/dev/null; then
     claude_dir_marker_written=1
   else
     echo "  WARN    cannot record the created-directory marker in $project_backup_dir;"
@@ -1360,20 +1468,29 @@ record_created_claude_dir() {
 # The directory is always <project>/.claude, the path the install made, never
 # the parent of the (possibly symlink-resolved) settings target: a settings
 # file linked into a dotfiles directory must not get that directory removed.
-# The marker is consumed on every uninstall, so it can never outlive the
-# directory it described (a user who recreates .claude/ later is not ours).
-# The one exception is the other settings file of this project still being
-# wired: the uninstall that strips the last one then cleans up.
+# The rmdir runs only when the key directory names this project and the
+# directory still has the identity the marker recorded; the marker is
+# consumed either way. The one exception is the other settings file of this
+# project still being wired: the uninstall that strips the last one then
+# cleans up.
 remove_created_claude_dir_if_empty() {
-  local m d other
+  local m d other stored cur
   m="$(claude_dir_marker)"
   [[ -f "$m" && ! -L "$m" ]] || return 0
+  project_key_check
+  case "$project_key_state" in
+    own) : ;;
+    foreign) project_key_warn_foreign; return 0 ;;
+    *) return 0 ;;   # no path file: never trusted for the directory marker
+  esac
   d="$project_dir/.claude"
   other="settings.json"; [[ "$settings_name" == settings.json ]] && other="settings.local.json"
   if settings_has_our_hooks "$d/$other"; then
     return 0
   fi
-  if [[ -d "$d" && ! -L "$d" ]] && rmdir "$d" 2>/dev/null; then
+  stored="$(head -n 1 "$m" 2>/dev/null || true)"
+  cur="$(claude_dir_id "$d")"
+  if [[ -n "$stored" && "$cur" == "$stored" ]] && rmdir "$d" 2>/dev/null; then
     echo "  remove  $d/ (this installer created it; it is empty)"
   fi
   rm -f "$m"
@@ -1431,6 +1548,10 @@ patch_settings() {
   fi
 }
 
+# Set when unpatch_settings (or a step after it) returned without finishing:
+# the project-scope uninstall then keeps the markers and the registry line and
+# exits non-zero, so a re-run can still clean up.
+uninstall_incomplete=0
 unpatch_settings() {
   if ! command -v jq >/dev/null 2>&1; then
     echo
@@ -1454,6 +1575,7 @@ unpatch_settings() {
     echo "  - $perm_wr"
     echo "and, if you used --model, the top-level \"model\" key (the value this"
     echo "installer wrote, if any, is recorded in $model_pin_record)."
+    uninstall_incomplete=1
     return
   fi
   if [[ ! -f "$settings" ]]; then
@@ -1466,6 +1588,7 @@ unpatch_settings() {
   fi
   if ! jq -e . "$settings" >/dev/null 2>&1; then
     echo "  ERROR   $settings is not valid JSON — refusing to edit (left untouched)."
+    uninstall_incomplete=1
     return
   fi
   take_settings_backup
@@ -2089,6 +2212,26 @@ elif [[ "$mode" == install ]]; then
     echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
     exit 2
   fi
+  if [[ "$scope" == project ]]; then
+    # Refuse a .claude/ or settings link that points nowhere BEFORE anything
+    # is copied: creating the missing target directory would put a directory
+    # the user never asked for inside their dotfiles, and a marker naming
+    # <project>/.claude for it would let a later --uninstall remove the
+    # user's pre-existing .claude/ (#194).
+    _pc="$project_dir/.claude"
+    if [[ -L "$_pc" && ! -d "$_pc" ]]; then
+      echo "ERROR: $_pc is a dangling symlink (-> $(readlink "$_pc" 2>/dev/null || true)); refusing to create its target." >&2
+      echo "       Create the directory it points to, or remove the link, and re-run." >&2
+      exit 2
+    elif [[ -e "$_pc" && ! -d "$_pc" ]]; then
+      echo "ERROR: $_pc exists but is not a directory; refusing." >&2
+      exit 2
+    elif [[ -n "$settings_link" && ! -d "$(dirname "$settings")" ]]; then
+      echo "ERROR: $settings_link is a dangling symlink (-> $settings, whose directory does not exist); refusing to create it." >&2
+      echo "       Create $(dirname "$settings")/, or remove the link, and re-run." >&2
+      exit 2
+    fi
+  fi
   echo "installing handoff skill from $repo_root into $claude_home"
   echo
   echo "symlinks:"
@@ -2100,11 +2243,15 @@ elif [[ "$mode" == install ]]; then
     # project's .claude/ on demand (install mode only: --doctor and
     # --uninstall never create anything).
     echo "project settings ($project_dir):"
-    if [[ ! -d "$(dirname "$settings")" ]]; then
-      mkdir -p "$(dirname "$settings")"
+    # Only <project>/.claude itself is ever created (the refusals above rule
+    # out a dangling link), so the marker always describes the directory
+    # this run made.
+    if [[ ! -e "$project_dir/.claude" && ! -L "$project_dir/.claude" ]]; then
+      mkdir "$project_dir/.claude"
       claude_dir_made_this_run=1
-      echo "  new     $(dirname "$settings")/"
-      record_created_claude_dir
+      claude_dir_made_id="$(claude_dir_id "$project_dir/.claude")"
+      echo "  new     $project_dir/.claude/"
+      record_created_claude_dir "$project_dir/.claude"
     fi
   else
     echo "settings.json:"
@@ -2172,7 +2319,15 @@ elif [[ "$scope" == project ]]; then
       echo "          nothing was cleared there (was the project installed under another path?)"
     fi
     registry_remove "$project_dir" "$settings_name"
-    rm -f "$(created_marker)" "$(claude_dir_marker)" 2>/dev/null || true   # no file or dir left for them to describe
+    # No file or dir left for the markers to describe. Only this project's:
+    # a key directory naming another project is left alone, and one without
+    # a path file (an older install) never had a directory marker.
+    project_key_check
+    case "$project_key_state" in
+      own) rm -f "$(created_marker)" "$(claude_dir_marker)" 2>/dev/null || true ;;
+      legacy) rm -f "$(created_marker)" 2>/dev/null || true ;;
+      foreign) project_key_warn_foreign ;;
+    esac
     echo
     echo "done. the repo at $repo_root is untouched."
     exit 0
@@ -2180,7 +2335,16 @@ elif [[ "$scope" == project ]]; then
   echo "project settings ($project_dir):"
   check_created_settings
   unpatch_settings
-  remove_created_settings_if_empty
+  # A refused or unfinished strip (invalid JSON, no jq, a failed skeleton
+  # check) consumes nothing: markers and the registry line stay, so the
+  # hooks still wired there are still listed, and a re-run can finish.
+  (( uninstall_incomplete )) || remove_created_settings_if_empty
+  if (( uninstall_incomplete )); then
+    echo
+    echo "NOT done: $settings was not fully unpatched (see above). The registry"
+    echo "      line and markers were kept; fix it and re-run $(rerun_cmd) --uninstall."
+    exit 1
+  fi
   remove_created_claude_dir_if_empty
   registry_remove "$project_dir" "$settings_name"
   echo

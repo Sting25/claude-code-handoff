@@ -215,9 +215,12 @@ patch_in_progress=0
 # was there before instead: "absent" removes the file, "empty" truncates it.
 settings_seed_state=""
 # Project scope: the project's .claude/ directory and its marker, when THIS run
-# made them (set in 40-main.sh). An aborted run takes both away again, so the
-# line "an abort undoes that" is true for the directory as well as the file.
+# made them (set in 40-main.sh). An aborted run drops the marker it wrote, and
+# rmdirs the directory only while it is still empty and still the directory
+# this run made (same identity, see claude_dir_id): a directory that gained a
+# file, or was replaced, stays.
 claude_dir_made_this_run=0
+claude_dir_made_id=""
 claude_dir_marker_written=0
 cleanup() {
   local rc=$?
@@ -237,12 +240,15 @@ cleanup() {
   fi
   if (( rc != 0 )) && (( claude_dir_made_this_run )) && [[ -n "$project_dir" ]]; then
     # rmdir only (never recursive): a directory that gained anything else stays.
-    if [[ -d "$project_dir/.claude" && ! -L "$project_dir/.claude" ]] \
+    if [[ -d "$project_dir/.claude" && ! -L "$project_dir/.claude" && -n "$claude_dir_made_id" ]] \
+       && [[ "$(claude_dir_id "$project_dir/.claude")" == "$claude_dir_made_id" ]] \
        && rmdir "$project_dir/.claude" 2>/dev/null; then
       echo "  restore $project_dir/.claude/ removed again; this run created it (aborted, rc=$rc)" >&2
-      if (( claude_dir_marker_written )) && [[ -n "$project_backup_dir" ]]; then
-        rm -f "$project_backup_dir/claude_dir.mkdir" 2>/dev/null || true
-      fi
+    fi
+    # The marker goes whether or not the rmdir did: a run that did not finish
+    # leaves nothing for a later --uninstall to act on.
+    if (( claude_dir_marker_written )) && [[ -n "$project_backup_dir" ]]; then
+      rm -f "$project_backup_dir/claude_dir.mkdir" 2>/dev/null || true
     fi
   fi
 }
@@ -382,7 +388,16 @@ if [[ "$scope" == project ]]; then
       _gone_tail="/$(basename "$_gone_head")$_gone_tail"
       _gone_head="$(dirname "$_gone_head")"
     done
-    _gone_head="$(cd "$_gone_head" && pwd -P)"
+    # An ancestor that cannot be entered (mode 000) has no knowable physical
+    # path: say so and leave the registry line, rather than dying on a raw
+    # `cd: Permission denied` under set -e or clearing a line that may not match.
+    if ! _gone_phys="$(cd "$_gone_head" 2>/dev/null && pwd -P)"; then
+      echo "  WARN    cannot enter $_gone_head (the nearest existing parent of $project_dir)," >&2
+      echo "          so its physical path is unknown; the registry line and markers were left in place." >&2
+      echo "          Make it enterable and re-run the --uninstall." >&2
+      exit 1
+    fi
+    _gone_head="$_gone_phys"
     [[ "$_gone_head" == / ]] && _gone_head=""
     project_dir="$_gone_head$_gone_tail"
     project_gone=1
@@ -468,7 +483,10 @@ fi
 # LINK with a plain file, silently disconnecting the user's source of truth.
 # Resolving to the real path keeps tmp+mv atomic AND leaves the symlink intact
 # (Claude Code follows it to read). Applies to a project file the same way.
+# settings_link keeps the path the user named, so a refusal can name the link.
+settings_link=""
 if [[ -L "$settings" ]]; then
+  settings_link="$settings"
   settings_resolved="$(resolve_symlink "$settings")"
   echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
   settings="$settings_resolved"

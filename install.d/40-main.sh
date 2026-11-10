@@ -56,6 +56,26 @@ elif [[ "$mode" == install ]]; then
     echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
     exit 2
   fi
+  if [[ "$scope" == project ]]; then
+    # Refuse a .claude/ or settings link that points nowhere BEFORE anything
+    # is copied: creating the missing target directory would put a directory
+    # the user never asked for inside their dotfiles, and a marker naming
+    # <project>/.claude for it would let a later --uninstall remove the
+    # user's pre-existing .claude/ (#194).
+    _pc="$project_dir/.claude"
+    if [[ -L "$_pc" && ! -d "$_pc" ]]; then
+      echo "ERROR: $_pc is a dangling symlink (-> $(readlink "$_pc" 2>/dev/null || true)); refusing to create its target." >&2
+      echo "       Create the directory it points to, or remove the link, and re-run." >&2
+      exit 2
+    elif [[ -e "$_pc" && ! -d "$_pc" ]]; then
+      echo "ERROR: $_pc exists but is not a directory; refusing." >&2
+      exit 2
+    elif [[ -n "$settings_link" && ! -d "$(dirname "$settings")" ]]; then
+      echo "ERROR: $settings_link is a dangling symlink (-> $settings, whose directory does not exist); refusing to create it." >&2
+      echo "       Create $(dirname "$settings")/, or remove the link, and re-run." >&2
+      exit 2
+    fi
+  fi
   echo "installing handoff skill from $repo_root into $claude_home"
   echo
   echo "symlinks:"
@@ -67,11 +87,15 @@ elif [[ "$mode" == install ]]; then
     # project's .claude/ on demand (install mode only: --doctor and
     # --uninstall never create anything).
     echo "project settings ($project_dir):"
-    if [[ ! -d "$(dirname "$settings")" ]]; then
-      mkdir -p "$(dirname "$settings")"
+    # Only <project>/.claude itself is ever created (the refusals above rule
+    # out a dangling link), so the marker always describes the directory
+    # this run made.
+    if [[ ! -e "$project_dir/.claude" && ! -L "$project_dir/.claude" ]]; then
+      mkdir "$project_dir/.claude"
       claude_dir_made_this_run=1
-      echo "  new     $(dirname "$settings")/"
-      record_created_claude_dir
+      claude_dir_made_id="$(claude_dir_id "$project_dir/.claude")"
+      echo "  new     $project_dir/.claude/"
+      record_created_claude_dir "$project_dir/.claude"
     fi
   else
     echo "settings.json:"
@@ -139,7 +163,15 @@ elif [[ "$scope" == project ]]; then
       echo "          nothing was cleared there (was the project installed under another path?)"
     fi
     registry_remove "$project_dir" "$settings_name"
-    rm -f "$(created_marker)" "$(claude_dir_marker)" 2>/dev/null || true   # no file or dir left for them to describe
+    # No file or dir left for the markers to describe. Only this project's:
+    # a key directory naming another project is left alone, and one without
+    # a path file (an older install) never had a directory marker.
+    project_key_check
+    case "$project_key_state" in
+      own) rm -f "$(created_marker)" "$(claude_dir_marker)" 2>/dev/null || true ;;
+      legacy) rm -f "$(created_marker)" 2>/dev/null || true ;;
+      foreign) project_key_warn_foreign ;;
+    esac
     echo
     echo "done. the repo at $repo_root is untouched."
     exit 0
@@ -147,7 +179,16 @@ elif [[ "$scope" == project ]]; then
   echo "project settings ($project_dir):"
   check_created_settings
   unpatch_settings
-  remove_created_settings_if_empty
+  # A refused or unfinished strip (invalid JSON, no jq, a failed skeleton
+  # check) consumes nothing: markers and the registry line stay, so the
+  # hooks still wired there are still listed, and a re-run can finish.
+  (( uninstall_incomplete )) || remove_created_settings_if_empty
+  if (( uninstall_incomplete )); then
+    echo
+    echo "NOT done: $settings was not fully unpatched (see above). The registry"
+    echo "      line and markers were kept; fix it and re-run $(rerun_cmd) --uninstall."
+    exit 1
+  fi
   remove_created_claude_dir_if_empty
   registry_remove "$project_dir" "$settings_name"
   echo

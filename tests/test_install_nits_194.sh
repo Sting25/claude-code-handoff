@@ -15,7 +15,19 @@
 #      still clears the registry line and markers; no match prints a WARN
 #   G. `bash <(cat install.sh)` and `bash -s < install.sh` refuse (exit 2) and
 #      write nothing
-#   H. an install aborted after creating .claude/ removes it and its marker
+#   H. an install aborted after creating .claude/ removes it (while empty) and
+#      always drops its marker
+#   I. (second review of PR 202) a dangling settings.json link or a dangling
+#      .claude link is refused before anything is copied; no marker ever
+#      describes a pre-existing .claude, also after an aborted install
+#   J. two project paths with the same cksum key: the `path` file keeps one
+#      project's markers from acting on the other
+#   K. the directory marker is bound to the directory's identity: a .claude
+#      the user removed and recreated is never removed
+#   L. a refused or unfinished project uninstall (invalid JSON, a failed
+#      skeleton check) keeps the markers and registry line and exits non-zero
+#   M. a gone project whose nearest existing parent cannot be entered: WARN,
+#      registry line kept
 # Every run sandboxes HOME and CLAUDE_HOME, so nothing touches ~/.claude.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -216,15 +228,156 @@ exec "$REAL_JQ" "\$@"
 SH
 chmod +x "$SHIM/jq"
 fresh_sandbox
-OUT="$(cd "$P" && FAIL_JQ_MATCH='(.statusLine? // null) == null' PATH="$SHIM:$PATH" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --scope project --project "$P" 2>&1 </dev/null)"
+OUT="$(cd "$P" && FAIL_JQ_MATCH='.hooks //= {}' PATH="$SHIM:$PATH" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --scope project --project "$P" 2>&1 </dev/null)"
 RC=$?
 check "H: the forced abort exits nonzero" yes "$([[ $RC -ne 0 ]] && echo yes || echo no)"
 check "H: it got past the mkdir" yes "$(has "$OUT" "new     $P/.claude/")"
 check "H: .claude removed again" no "$(exists "$P/.claude")"
 check "H: no marker left behind" 0 "$(nmarkers)"
+check "H: no registry line" "" "$(cat "$H/.claude/handoff_projects" 2>/dev/null)"
 fresh_sandbox
 mkdir -p "$P/.claude"                                   # pre-existing: never ours to remove
-OUT="$(cd "$P" && FAIL_JQ_MATCH='(.statusLine? // null) == null' PATH="$SHIM:$PATH" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --scope project --project "$P" 2>&1 </dev/null)"
+OUT="$(cd "$P" && FAIL_JQ_MATCH='.hooks //= {}' PATH="$SHIM:$PATH" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --scope project --project "$P" 2>&1 </dev/null)"
 check "H: a pre-existing .claude survives the abort" yes "$(exists "$P/.claude")"
+
+# --- I. dangling links are refused; no marker for a pre-existing .claude ----------------------------
+# I1: a pre-existing .claude holding a settings.json link into a missing dotfiles directory.
+fresh_sandbox
+DOT="$(mktemp -d)"; cleanup_on_exit "$DOT"; DOT="$(cd "$DOT" && pwd -P)"
+mkdir -p "$P/.claude"; ln -s "$DOT/claude/settings.json" "$P/.claude/settings.json"
+inst --scope project --project "$P"
+check "I1: install refuses (exit 2)" 2 "$RC"
+check "I1: ERROR names the dangling link" yes "$(has "$OUT" "ERROR: $P/.claude/settings.json is a dangling symlink (-> $DOT/claude/settings.json, whose directory does not exist)")"
+check "I1: dotfiles directory not created" no "$(exists "$DOT/claude")"
+check "I1: nothing copied into the jailed home" 0 "$(find "$H/.claude" -mindepth 1 | wc -l | tr -d ' ')"
+check "I1: no marker" 0 "$(nmarkers)"
+rm "$P/.claude/settings.json"                      # the user drops the link
+inst --uninstall --scope project --project "$P"
+check "I1: later uninstall keeps the pre-existing .claude" yes "$(exists "$P/.claude")"
+# I2: the same layout under the abort shim: still refused before any jq runs, so no marker.
+fresh_sandbox
+DOT="$(mktemp -d)"; cleanup_on_exit "$DOT"; DOT="$(cd "$DOT" && pwd -P)"
+mkdir -p "$P/.claude"; ln -s "$DOT/claude/settings.json" "$P/.claude/settings.json"
+OUT="$(cd "$P" && FAIL_JQ_MATCH='.hooks //= {}' PATH="$SHIM:$PATH" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --scope project --project "$P" 2>&1 </dev/null)"
+RC=$?
+check "I2: refused (exit 2)" 2 "$RC"
+check "I2: no marker" 0 "$(nmarkers)"
+rm "$P/.claude/settings.json"
+inst --uninstall --scope project --project "$P"
+check "I2: later uninstall keeps the pre-existing .claude" yes "$(exists "$P/.claude")"
+# I3: <project>/.claude itself is a dangling link.
+fresh_sandbox
+NOWHERE="$(mktemp -d)"; cleanup_on_exit "$NOWHERE"; rmdir "$NOWHERE"
+ln -s "$NOWHERE" "$P/.claude"
+inst --scope project --project "$P"
+check "I3: dangling .claude link refused (exit 2)" 2 "$RC"
+check "I3: ERROR names it" yes "$(has "$OUT" "ERROR: $P/.claude is a dangling symlink")"
+check "I3: link target not created" no "$(exists "$NOWHERE")"
+check "I3: link left intact" yes "$([[ -L "$P/.claude" ]] && echo yes || echo no)"
+# I4: an abort after a marker was written drops the marker even when the rmdir cannot run
+# (here: the user's file landed in the new .claude mid-run, simulated by a pre-seeded abort
+# point after the directory gained a file).
+fresh_sandbox
+cat > "$SHIM/jq-i4" <<SH
+#!/usr/bin/env bash
+if [[ "\$*" == *'.hooks //= {}'* ]]; then : > "$P/.claude/user-note"; exit 5; fi
+exec "$REAL_JQ" "\$@"
+SH
+mkdir -p "$SHIM/i4"; mv "$SHIM/jq-i4" "$SHIM/i4/jq"; chmod +x "$SHIM/i4/jq"
+OUT="$(cd "$P" && PATH="$SHIM/i4:$PATH" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --scope project --project "$P" 2>&1 </dev/null)"
+RC=$?
+check "I4: aborted" yes "$([[ $RC -ne 0 ]] && echo yes || echo no)"
+check "I4: non-empty .claude kept" yes "$(exists "$P/.claude/user-note")"
+check "I4: no 'removed again' for the directory" no "$(has "$OUT" ".claude/ removed again")"
+check "I4: marker dropped anyway" 0 "$(nmarkers)"
+
+# --- J. cksum collision ------------------------------------------------------------------------------
+# These two names give the same CRC (cksum) for any common prefix of equal length.
+fresh_sandbox
+COLL="$(mktemp -d)"; cleanup_on_exit "$COLL"; COLL="$(cd "$COLL" && pwd -P)"
+PA="$COLL/proj-!!!!!"; PB="$COLL/proj-&?fq\$"
+mkdir -p "$PA" "$PB/.claude"
+check "J: the two paths share a cksum key" "$(printf '%s' "$PA" | cksum | awk '{print $1}')" "$(printf '%s' "$PB" | cksum | awk '{print $1}')"
+OUT="$(cd "$PA" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --scope project --project "$PA" 2>&1 </dev/null)"
+check "J: A installed with both markers" 2 "$(nmarkers)"
+OUT="$(cd "$PB" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --uninstall --scope project --project "$PB" 2>&1 </dev/null)"
+RC=$?
+check "J: uninstall of never-installed B exits 0" 0 "$RC"
+check "J: B's own .claude survives" yes "$(exists "$PB/.claude")"
+check "J: WARN names the foreign key" yes "$(has "$OUT" "is keyed to another project")"
+check "J: A's markers untouched" 2 "$(nmarkers)"
+OUT="$(cd "$PB" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --scope project --project "$PB" 2>&1 </dev/null)"
+check "J: install of B records no marker in A's key" 2 "$(nmarkers)"
+check "J: install of B warns" yes "$(has "$OUT" "is keyed to another project")"
+OUT="$(cd "$PB" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --uninstall --scope project --project "$PB" 2>&1 </dev/null)"
+check "J: B's .claude still survives its own uninstall" yes "$(exists "$PB/.claude")"
+OUT="$(cd "$PA" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --uninstall --scope project --project "$PA" 2>&1 </dev/null)"
+check "J: A's uninstall still removes A's created .claude" no "$(exists "$PA/.claude")"
+check "J: no marker left" 0 "$(nmarkers)"
+# A key directory from an older install (no path file) is never trusted for the directory marker.
+fresh_sandbox
+inst --scope project --project "$P"
+rm -f "$H/.claude/handoff_settings_backups"/*/path
+inst --uninstall --scope project --project "$P"
+check "J legacy: created settings file still removed" no "$(exists "$P/.claude/settings.json")"
+check "J legacy: .claude kept (directory marker not trusted)" yes "$(exists "$P/.claude")"
+
+# --- K. the directory marker is bound to the directory -------------------------------------------------
+fresh_sandbox
+inst --scope project --project "$P"
+rm -rf "$P/.claude"; mkdir "$P/.claude"             # the user's own directory now
+inst --uninstall --scope project --project "$P"
+check "K: uninstall exit 0" 0 "$RC"
+check "K: the user's recreated .claude survives" yes "$(exists "$P/.claude")"
+check "K: no 'installer created it; it is empty'" no "$(has "$OUT" "it is empty")"
+check "K: marker consumed" 0 "$(nmarkers)"
+
+# --- L. a refused or unfinished project uninstall --------------------------------------------------------
+fresh_sandbox
+inst --scope project --project "$P"
+cp "$P/.claude/settings.json" "$H/settings.good"
+printf '\n// oops\n' >> "$P/.claude/settings.json"
+inst --uninstall --scope project --project "$P"
+check "L1: invalid JSON: exit non-zero" 1 "$RC"
+check "L1: ERROR printed" yes "$(has "$OUT" "is not valid JSON")"
+check "L1: says NOT done" yes "$(has "$OUT" "NOT done:")"
+check "L1: markers kept" 2 "$(nmarkers)"
+check "L1: registry line kept" yes "$(has "$(cat "$H/.claude/handoff_projects" 2>/dev/null)" "$P")"
+check "L1: no 'done.' line" no "$(has "$OUT" "done. the repo")"
+cp "$H/settings.good" "$P/.claude/settings.json"   # the user fixes the file
+inst --uninstall --scope project --project "$P"
+check "L1: after the fix, uninstall exit 0" 0 "$RC"
+check "L1: after the fix, .claude removed" no "$(exists "$P/.claude")"
+check "L1: after the fix, registry line cleared" "" "$(cat "$H/.claude/handoff_projects" 2>/dev/null)"
+check "L1: after the fix, no marker" 0 "$(nmarkers)"
+# L2: the skeleton check's jq fails after a good strip.
+fresh_sandbox
+inst --scope project --project "$P"
+OUT="$(cd "$P" && FAIL_JQ_MATCH='del(.permissions.allow)' PATH="$SHIM:$PATH" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --uninstall --scope project --project "$P" 2>&1 </dev/null)"
+RC=$?
+check "L2: skeleton jq failure: exit non-zero" 1 "$RC"
+check "L2: ERROR names the skeleton check" yes "$(has "$OUT" "while checking whether $P/.claude/settings.json is the empty skeleton")"
+check "L2: markers kept" 2 "$(nmarkers)"
+check "L2: registry line kept" yes "$(has "$(cat "$H/.claude/handoff_projects" 2>/dev/null)" "$P")"
+inst --uninstall --scope project --project "$P"
+check "L2: re-run finishes: exit 0" 0 "$RC"
+check "L2: re-run removes .claude" no "$(exists "$P/.claude")"
+check "L2: re-run leaves no marker" 0 "$(nmarkers)"
+
+# --- M. gone project, nearest existing parent not enterable ------------------------------------------------
+fresh_sandbox
+mkdir -p "$P/locked/proj"
+inst --scope project --project "$P/locked/proj"
+rm -rf "$P/locked/proj"; chmod 000 "$P/locked"
+if ( cd "$P/locked" ) 2>/dev/null; then
+  skip "M: directory permissions are not enforced here (running as root?)"
+else
+  inst --uninstall --scope project --project "$P/locked/proj"
+  check "M: exit 1" 1 "$RC"
+  check "M: WARN names the parent" yes "$(has "$OUT" "WARN    cannot enter $P/locked (the nearest existing parent of $P/locked/proj)")"
+  check "M: no raw cd error" no "$(has "$OUT" "Permission denied")"
+  check "M: registry line kept" yes "$(has "$(cat "$H/.claude/handoff_projects" 2>/dev/null)" "$P/locked/proj")"
+fi
+chmod 755 "$P/locked"
 
 finish
