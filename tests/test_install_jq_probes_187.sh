@@ -20,7 +20,9 @@ REAL_JQ="$(command -v jq)"
 SHIM="$(mktemp -d)"
 cat > "$SHIM/jq" <<SH
 #!/usr/bin/env bash
-if [[ -n "\${FAIL_JQ_MATCH:-}" && "\$*" == *"\$FAIL_JQ_MATCH"* ]]; then exit 5; fi
+# FAIL_JQ_MATCH2, when set, must also match (two fragments, e.g. a filter and a path).
+if [[ -n "\${FAIL_JQ_MATCH:-}" && "\$*" == *"\$FAIL_JQ_MATCH"* \
+      && "\$*" == *"\${FAIL_JQ_MATCH2:-}"* ]]; then exit 5; fi
 exec "$REAL_JQ" "\$@"
 SH
 chmod +x "$SHIM/jq"
@@ -157,8 +159,11 @@ for root in '[]' '42' '"x"'; do
   fresh_home
   run_sh ""                       # healthy bin/ so doctor has no other fault
   printf '%s' "$root" > "$HOME_DIR/settings.json"
+  # A non-object root is reported once as broken (settings_usable), never as
+  # a jq failure.
   run_sh "" --doctor
-  check "doctor root $root: exit 0"            0   "$RC"
+  check "doctor root $root: exit nonzero (broken)" yes "$(nz $RC)"
+  check "doctor root $root: BROKEN not an object" yes "$(has "$OUT" 'is empty or not a JSON object')"
   check "doctor root $root: no jq failed"      no  "$(has "$ERR$OUT" 'jq failed')"
 done
 
@@ -279,6 +284,9 @@ check "registry scan: project registered"      yes "$(grep -q proj "$HOME_DIR/ha
 printf '%064d\n' 0 | tr 0 a > "$HOME_DIR/handoff_secret"; chmod 600 "$HOME_DIR/handoff_secret"
 SECRET_SUM="$(cksum < "$HOME_DIR/handoff_secret")"
 REG_SUM="$(cksum < "$HOME_DIR/handoff_projects")"
+run_sh 'def wired' --uninstall --keep-secret
+check "registry scan fails: re-run repeats --keep-secret" yes "$(has "$ERR" 're-run ./install.sh --uninstall --keep-secret.')"
+check "registry scan fails: names the file as a cause" yes "$(has "$ERR" 'Fix jq, or fix the file named above')"
 run_sh 'def wired' --uninstall
 check "registry scan fails: exit nonzero"      yes "$(nz $RC)"
 check "registry scan fails: secret kept"       "$SECRET_SUM" "$(cksum < "$HOME_DIR/handoff_secret" 2>/dev/null)"
@@ -300,5 +308,88 @@ check "doctor invalid JSON: exit nonzero"      yes "$(nz $RC)"
 check "doctor invalid JSON: BROKEN line"       yes "$(has "$OUT" "BROKEN  $HOME_DIR/settings.json is not valid JSON")"
 check "doctor invalid JSON: counted"           yes "$(has "$ERR" 'doctor: 1 issue(s) found.')"
 check "doctor invalid JSON: no jq failed WARN" no  "$(has "$ERR$OUT" 'jq failed')"
+
+# 17. A registered project whose settings.json is 0 bytes or whitespace only
+#     is a stale entry (settings_usable), never a jq failure: user-scope
+#     --uninstall exits 0 and handles the secret as for a stale project
+#     (deleted, nothing still signs with it), project-scope --uninstall clears
+#     the registry line, --doctor lists it as stale and exits 0. The user's own
+#     settings.json in that state is one BROKEN line, never "fix jq".
+for content in '' $'  \n\t\n'; do
+  label="$([[ -z "$content" ]] && echo 0-byte || echo whitespace)"
+  for step in user project doctor; do
+    fresh_home
+    run_sh ""
+    mkdir -p "$HOME_DIR/proj"
+    run_sh "" --scope project --project "$HOME_DIR/proj"
+    printf '%064d\n' 0 | tr 0 a > "$HOME_DIR/handoff_secret"; chmod 600 "$HOME_DIR/handoff_secret"
+    printf '%s' "$content" > "$HOME_DIR/proj/.claude/settings.json"
+    case "$step" in
+      user)
+        run_sh "" --uninstall
+        check "$label project file, user --uninstall: exit 0"       0  "$RC"
+        check "$label project file, user --uninstall: no jq failed" no "$(has "$ERR$OUT" 'jq failed')"
+        # lib.sh jails HANDOFF_SECRET_FILE, so the removal itself is skipped;
+        # what matters is that no project is counted as still signing.
+        check "$label project file, user --uninstall: secret not kept for it" no \
+          "$(has "$OUT" 'still sign with')"
+        check "$label project file, user --uninstall: reached secret removal" yes \
+          "$(has "$OUT" 'handoff secret (HANDOFF_SECRET_FILE override set')"
+        ;;
+      project)
+        run_sh "" --uninstall --scope project --project "$HOME_DIR/proj"
+        check "$label project file, project --uninstall: exit 0"       0  "$RC"
+        check "$label project file, project --uninstall: no jq failed" no "$(has "$ERR$OUT" 'jq failed')"
+        check "$label project file, project --uninstall: registry line gone" no \
+          "$(grep -q proj "$HOME_DIR/handoff_projects" 2>/dev/null && echo yes || echo no)"
+        ;;
+      doctor)
+        run_sh "" --doctor
+        check "$label project file, doctor: exit 0"       0   "$RC"
+        check "$label project file, doctor: no jq failed" no  "$(has "$ERR$OUT" 'jq failed')"
+        check "$label project file, doctor: listed stale" yes "$(has "$OUT" 'stale project registry entries')"
+        ;;
+    esac
+  done
+  fresh_home
+  run_sh ""
+  printf '%s' "$content" > "$HOME_DIR/settings.json"
+  run_sh "" --doctor
+  check "$label user file, doctor: exit nonzero"   yes "$(nz $RC)"
+  check "$label user file, doctor: BROKEN line"    yes "$(has "$OUT" "BROKEN  $HOME_DIR/settings.json is empty or not a JSON object")"
+  check "$label user file, doctor: no jq failed"   no  "$(has "$ERR$OUT" 'jq failed')"
+done
+
+# 18. The doctor's registry scans run in its own shell (registry_collect), so
+#     a jq failure reading a registered project makes doctor exit non-zero.
+fresh_home
+run_sh ""
+mkdir -p "$HOME_DIR/proj"
+run_sh "" --scope project --project "$HOME_DIR/proj"
+run_sh "" --doctor
+check "doctor registry healthy: exit 0"          0   "$RC"
+# Fail only the read of the project file: the shim matches its path.
+FAIL_JQ_MATCH2="$HOME_DIR/proj/.claude/settings.json"
+export FAIL_JQ_MATCH2
+run_sh 'def wired' --doctor
+unset FAIL_JQ_MATCH2
+check "doctor registry read fails: WARN"         yes "$(has "$ERR" 'jq failed (exit 5) while checking')"
+check "doctor registry read fails: exit nonzero" yes "$(nz $RC)"
+
+# 19. A settings file doctor cannot open is "cannot be read", not "not valid
+#     JSON". Skipped as root, where mode 000 is still readable.
+fresh_home
+run_sh ""
+chmod 000 "$HOME_DIR/settings.json"
+if [[ -r "$HOME_DIR/settings.json" ]]; then
+  chmod 600 "$HOME_DIR/settings.json"
+  skip "mode 000 is readable here (running as root)"
+else
+  run_sh "" --doctor
+  chmod 600 "$HOME_DIR/settings.json"
+  check "doctor unreadable: BROKEN cannot be read" yes "$(has "$OUT" 'cannot be read (check its permissions)')"
+  check "doctor unreadable: not 'not valid JSON'"  no  "$(has "$OUT" 'not valid JSON')"
+  check "doctor unreadable: exit nonzero"          yes "$(nz $RC)"
+fi
 
 finish

@@ -154,11 +154,17 @@ else
   registry_collect wired
   orphan_list="$REGISTRY_OUT"
   if (( sh_jq_failed )); then
+    # The re-run repeats the secret flag the user passed, so it does the
+    # same thing once jq (or the file) is fixed.
+    rerun_flags=""
+    if (( remove_secret )); then rerun_flags=" --remove-secret"; fi
+    if (( keep_secret )); then rerun_flags=" --keep-secret"; fi
     echo "  ERROR   jq failed while reading $sh_jq_failed_file from the project registry" >&2
     echo "          ($project_registry), so it is unknown which projects still sign" >&2
     echo "          with the HMAC secret; ${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}" >&2
     echo "          was kept and the registry left as it was. Settings and bin/ links" >&2
-    echo "          were already removed above; fix jq and re-run ./install.sh --uninstall." >&2
+    echo "          were already removed above. Fix jq, or fix the file named above," >&2
+    echo "          and re-run ./install.sh --uninstall$rerun_flags." >&2
     exit 1
   fi
   sh_jq_failed=$scan_prev_failed

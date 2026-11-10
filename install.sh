@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: a0f1f50735ead16071d97df10bf8a21001e41c7b507c99ec2bbcad3f32408563
+# SOURCE-SHA256: 0dd030009fbaea7c380cdb6334d4ade022e8f1fc0c19a027c2bf3c1a5e3c53aa
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1430,8 +1430,14 @@ unpatch_settings() {
     echo "  ok      $settings is empty; nothing to strip"
     return
   fi
-  if ! jq -e . "$settings" >/dev/null 2>&1; then
-    echo "  ERROR   $settings is not valid JSON — refusing to edit (left untouched)."
+  if ! settings_usable "$settings"; then
+    if jq empty "$settings" >/dev/null 2>&1; then
+      # Whitespace only, a non-object root, or several documents: there is
+      # no hooks object for this installer to have written, so nothing to strip.
+      echo "  ok      $settings is empty or not a JSON object; nothing to strip"
+    else
+      echo "  ERROR   $settings is not valid JSON; refusing to edit (left untouched)."
+    fi
     return
   fi
   take_settings_backup
@@ -1538,7 +1544,8 @@ rerun_cmd() {
       printf '%s\n' "./install.sh --scope project --project $(shq "$proj") --local"
       return 0
     fi
-    first="$(registry_scan wired | head -n 1 || true)"
+    registry_collect wired
+    first="${REGISTRY_OUT%%$'\n'*}"
     if [[ -n "$first" ]]; then
       rp="${first%%$'\t'*}"; rn="${first#*$'\t'}"
       if [[ "$rn" == settings.local.json ]]; then
@@ -1561,7 +1568,8 @@ rerun_remedy() {
   list=""
   if [[ "$scope" != project ]] && ! settings_has_our_hooks "$user_settings"; then
     proj="$(wiring_project_root)"
-    list="$(registry_scan wired)"
+    registry_collect wired
+    list="$REGISTRY_OUT"
     # The project the doctor runs in counts even when it is not registered.
     tab=$'\t'; nl=$'\n'
     for rn in settings.json settings.local.json; do
@@ -1595,6 +1603,18 @@ shq() {
   printf "'%s'" "$q"
 }
 
+# settings_usable <file>: 0 when <file> holds exactly one JSON document and
+# that document is an object; 1 for anything else (0 bytes, whitespace only,
+# invalid JSON, a non-object root such as [] 42 "x" null, two documents, a
+# file jq cannot open). Total: every outcome is an answer, so callers never
+# read an unusable file as a jq failure. `jq -e .` alone is not enough: on a
+# 0-byte or whitespace file it exits 4 ("no valid result"), which looks like
+# a jq failure, and `jq empty` passes such a file. Shared by
+# settings_has_our_hooks, unpatch_settings and the doctor's settings gate.
+settings_usable() {
+  jq -es 'length == 1 and (.[0] | type) == "object"' "$1" >/dev/null 2>&1
+}
+
 # settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
 # least one of this installer's hook commands (the markers the patcher
 # writes). 1 otherwise, including when jq is missing.
@@ -1610,8 +1630,10 @@ settings_has_our_hooks() {
   local f="$1" rc=0
   [[ -f "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
-  # Unparseable JSON is a real "no" (documented above), not a jq failure.
-  jq empty "$f" >/dev/null 2>&1 || return 1
+  # An unusable file (empty, unparseable, not an object) is a real "no"
+  # (settings_usable), not a jq failure. Only the wiring read below, on a
+  # usable file, can report one.
+  settings_usable "$f" || return 1
   # shellcheck disable=SC2016  # jq variables, bound by --arg
   jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
         --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" '
@@ -1748,18 +1770,14 @@ registry_remove() {  # <project dir> <settings file name>
   echo "  remove  registry: $1 ($2)"
 }
 
-# registry_scan <wired|stale>: print "<dir><TAB><name>" for each registered
-# project whose file does (wired) or does not (stale) carry our hooks.
-registry_scan() {
-  registry_collect "$1"
-  if [[ -n "$REGISTRY_OUT" ]]; then printf '%s\n' "$REGISTRY_OUT"; fi
-  return 0
-}
-# registry_collect <wired|stale>: the same scan, with the lines left in
-# REGISTRY_OUT instead of printed. It runs in the caller's shell (no command
-# substitution), so a jq failure it hits stays visible in sh_jq_failed; a
-# caller that acts on the result (user-scope --uninstall deleting the shared
-# secret) must check that, since every unreadable file reads as stale.
+# registry_collect <wired|stale>: leave in REGISTRY_OUT one "<dir><TAB><name>"
+# line per registered project whose file does (wired) or does not (stale)
+# carry our hooks. Callers run it in their own shell, never in a command
+# substitution, so a jq failure it hits stays visible in sh_jq_failed (the
+# doctor then exits non-zero); a caller that acts on the result (user-scope
+# --uninstall deleting the shared secret) must check that, since a file whose
+# wiring read failed reads as stale. An empty or non-object file is a plain
+# stale entry (settings_usable), not a jq failure.
 REGISTRY_OUT=""
 registry_collect() {
   local want="$1" rp rn has nl=$'\n'
@@ -1808,7 +1826,8 @@ report_registry_orphans() {
 # our hooks. Informational only.
 report_registry_stale() {
   local list
-  list="$(registry_scan stale)"
+  registry_collect stale
+  list="$REGISTRY_OUT"
   [[ -n "$list" ]] || return 0
   echo "  note    stale project registry entries (the file no longer carries this"
   echo "          installer's hooks), from $project_registry; clear each with the"
@@ -1974,11 +1993,17 @@ doctor() {
     echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
     echo
   elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
-       && ! jq -e . "$settings" >/dev/null 2>&1 \
-       && ! jq empty "$settings" >/dev/null 2>&1; then
-    # Not valid JSON: the reads below would only report jq failures, and
-    # re-running doctor cannot fix the file, so name it once as broken.
-    echo "  BROKEN  $settings is not valid JSON"
+       && ! settings_usable "$settings"; then
+    # Unusable file: the reads below would only report jq failures, and
+    # re-running doctor cannot fix the file, so name it once as broken,
+    # saying which of the three it is (settings_usable).
+    if [[ ! -r "$settings" ]]; then
+      echo "  BROKEN  $settings cannot be read (check its permissions)"
+    elif jq empty "$settings" >/dev/null 2>&1; then
+      echo "  BROKEN  $settings is empty or not a JSON object"
+    else
+      echo "  BROKEN  $settings is not valid JSON"
+    fi
     broken=$((broken + 1))
     echo
   elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
@@ -2200,11 +2225,17 @@ else
   registry_collect wired
   orphan_list="$REGISTRY_OUT"
   if (( sh_jq_failed )); then
+    # The re-run repeats the secret flag the user passed, so it does the
+    # same thing once jq (or the file) is fixed.
+    rerun_flags=""
+    if (( remove_secret )); then rerun_flags=" --remove-secret"; fi
+    if (( keep_secret )); then rerun_flags=" --keep-secret"; fi
     echo "  ERROR   jq failed while reading $sh_jq_failed_file from the project registry" >&2
     echo "          ($project_registry), so it is unknown which projects still sign" >&2
     echo "          with the HMAC secret; ${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}" >&2
     echo "          was kept and the registry left as it was. Settings and bin/ links" >&2
-    echo "          were already removed above; fix jq and re-run ./install.sh --uninstall." >&2
+    echo "          were already removed above. Fix jq, or fix the file named above," >&2
+    echo "          and re-run ./install.sh --uninstall$rerun_flags." >&2
     exit 1
   fi
   sh_jq_failed=$scan_prev_failed
