@@ -36,6 +36,12 @@
 #      handed-back token while A sweeps. A fixed two-pass release returned
 #      with C's capture in the dir, and C's hand-back then left an ownerless
 #      token; the release must keep going until the lock is free.
+#  11. (#183 review) A release that cannot finish (a shim re-creates the token
+#      every pass) gives up at its pass cap: one stderr line, rc 0, and the
+#      statement after it still runs under `set -e`.
+#  12. (#183 review) A hand-back that lands between the release's owner check
+#      and its capture sweep (the capture is removed by the reclaimer) is
+#      caught by the re-check of owner.
 set -u
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 WH="$REPO_ROOT/bin/write_handoff.sh"
@@ -85,6 +91,7 @@ case "$site" in
     : > "$HOLD_WON"
     n=0; until [[ -e "$HOLD_REL" ]] || (( n > 1000 )); do sleep 0.01 2>/dev/null || sleep 1; n=$((n + 1)); done
     if [[ "$site" == wh-hold ]]; then release_mkdir_lock "$lock"; else ta_release_lock "$lock"; fi
+    if [[ -n "${HOLD_AFTER:-}" ]]; then : > "$HOLD_AFTER"; fi
     ;;
   wh-release) release_mkdir_lock "$lock"; rc=$? ;;
   ta-release) ta_release_lock "$lock"; rc=$? ;;
@@ -376,6 +383,9 @@ done
 cat > "$shim/rm" <<SHIM
 #!/usr/bin/env bash
 "$(command -v rm)" "\$@"; rc=\$?
+if [[ -n "\${RACE_RM_REMAT:-}" ]]; then
+  for a in "\$@"; do case "\$a" in */owner) echo "\$PPID" > "\$a" ;; esac; done
+fi
 case "\$*" in
   *owner.reap.*)
     if [[ -n "\${RACE_RM_HOLD:-}" && ! -e "\${RACE_RM_HOLD}.passed" ]]; then
@@ -410,6 +420,41 @@ for site in wh ta; do
     ln "$lock/owner.reap.C" "$lock/owner" 2>/dev/null && rm -f "$lock/owner.reap.C"
   fi
   check "$site two reapers: lock freed, no ownerless token left" no \
+    "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
+done
+
+# --- 11. the pass cap: no failure out of a release, one stderr line ----------
+# The rm shim re-creates the releaser's token every time the release removes
+# it, so the loop can never finish. Run under -e like the hooks' call sites.
+for site in wh ta; do
+  d="$work/cap.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  PATH="$shim:$PATH" RACE_RM_REMAT=1 HOLD_WON="$d/a_won" HOLD_REL="$d/a_rel" HOLD_AFTER="$d/after" \
+    bash -e "$drv" "$funcs" "$site-hold" "$lock" "" "" "" > "$d/oa" 2>"$d/ea" </dev/null & pa=$!
+  wait_for "$d/a_won"; : > "$d/a_rel"; wait "$pa"; rcp=$?
+  check "$site pass cap: process exit status" 0 "$rcp"
+  check "$site pass cap: the statement after the release ran" yes \
+    "$([[ -e "$d/after" ]] && echo yes || echo no)"
+  check "$site pass cap: exactly one stderr line" 1 "$(grep -c 'release gave up after 16 passes' "$d/ea")"
+  check "$site pass cap: nothing else on stderr" 1 "$(wc -l < "$d/ea" | tr -d ' ')"
+done
+
+# --- 12. hand-back between the owner check and the capture sweep ---------------
+# A's token sits in a capture (owner absent). The release's first rmdir fails
+# and parks; the reclaimer then hands the token back and removes its capture,
+# so the sweep finds nothing and removed stays 0. Only a re-check of owner
+# sees the token that is ours again.
+for site in wh ta; do
+  d="$work/recheck.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  PATH="$shim:$PATH" RACE_RMDIR_HOLD="$d/r_go" HOLD_WON="$d/a_won" HOLD_REL="$d/a_rel" \
+    bash "$drv" "$funcs" "$site-hold" "$lock" "" "" "" > "$d/oa" 2>/dev/null </dev/null & pa=$!
+  wait_for "$d/a_won"
+  mv "$lock/owner" "$lock/owner.reap.B"
+  : > "$d/a_rel"
+  parked=no; wait_for "$d/r_go.parked" && parked=yes
+  check "$site re-check: release parked after its first rmdir" yes "$parked"
+  ln "$lock/owner.reap.B" "$lock/owner" && rm -f "$lock/owner.reap.B"
+  : > "$d/r_go"; wait "$pa"
+  check "$site re-check: lock freed, no token of ours left behind" no \
     "$([[ -e "$lock" || -L "$lock" ]] && echo yes || echo no)"
 done
 

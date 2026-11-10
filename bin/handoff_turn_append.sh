@@ -234,23 +234,29 @@ ta_release_lock() {  # <lock_dir>
   # (the old behaviour, or a second one without the check) would delete a
   # legitimate late claimant's token and let the next acquirer run beside it.
   # Why read-then-rm and not "rename the token aside, verify, put it back"
-  # (the alternative #170 floated): renaming ANOTHER holder's token aside
-  # empties owner for a moment, and under uutils' non-atomic mkdir (#153) a
-  # third process can win the O_EXCL claim in that gap, so two own the lock.
+  # (the alternative #170 floated): that would move ANOTHER holder's token
+  # whenever a non-owner releases, and this design never touches a token that
+  # is not ours (the rename also bumps the dir mtime and empties owner under
+  # the reclaim guards, which are written for reclaimers, not for releases).
   # Residual: the read and the rm are two steps, so a whole reclaim (capture,
   # remove, claim) landing between them would have us remove its new token.
   # That needs a stale-aged lock whose holder is still alive and releasing,
   # and it is the same window the rest of this design accepts.
-  # Invariant of the loop: each pass removes our own token if it is at owner,
-  # tries rmdir, and if that fails sweeps our own owner.reap.* captures (a
-  # stale reclaimer holds one while it decides whether to hand the token
-  # back). A reclaimer can hand the token back, or a second reclaimer can
-  # capture the handed-back token, after any step, so one fixed sweep is not
-  # enough: repeat until rmdir succeeds (lock freed) or a pass finds nothing
-  # of ours left to remove (nothing more we may touch). Every pass that
-  # continues removed one of our own entries, and the cap keeps a wedged dir
-  # from spinning; hitting it returns non-zero with the lock left for the
-  # staleness window.
+  # Loop: each pass removes our own token if it is at owner, tries rmdir,
+  # and if that fails sweeps our own owner.reap.* captures (a stale reclaimer
+  # holds one while it decides whether to hand the token back). A reclaimer
+  # can hand the token back, or a second reclaimer can capture the
+  # handed-back token, after any step, so one fixed sweep is not enough: it
+  # repeats until rmdir succeeds or a pass finds nothing of ours, and then
+  # looks at owner once more, because a hand-back can land between the
+  # owner check and the capture sweep of the same pass. What is guaranteed:
+  # we never remove an entry that is not ours, and a chain of hand-backs and
+  # re-captures, one per pass, ends with the lock freed. The remaining gap is
+  # a hand-back AND a fresh capture both landing inside one pass; that leaves
+  # a token of ours in the dir until the staleness window. The cap keeps a
+  # wedged dir from spinning; on hitting it the release says so on stderr and
+  # returns 0 (callers run it as a bare statement under set -e and it has
+  # never been allowed to fail), leaving the lock to the staleness window.
   for (( pass = 0; pass < 16; pass++ )); do
     removed=0
     if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then
@@ -263,9 +269,18 @@ ta_release_lock() {  # <lock_dir>
       tok=""; read -r tok < "$f" 2>/dev/null || true
       if [[ "$tok" == "$$" ]]; then rm -f "$f" 2>/dev/null && removed=1; fi
     done
-    (( removed )) || return 0
+    if (( ! removed )); then
+      # Nothing found by the two looks above; one more look at owner, since a
+      # hand-back can have landed in between.
+      if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then
+        tok=""; read -r tok < "$lock_dir/owner" 2>/dev/null || true
+        [[ "$tok" == "$$" ]] && continue
+      fi
+      return 0
+    fi
   done
-  return 1
+  echo "handoff lock: release gave up after 16 passes; leaving $lock_dir to the staleness window." >&2
+  return 0
 }
 # Stale reclaim, single winner (#155): the same body as write_handoff.sh's
 # reclaim_stale_mkdir_lock (keep the two in sync; the reasoning is written
