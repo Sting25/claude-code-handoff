@@ -396,7 +396,14 @@ if [[ "$scope" == project ]]; then
   # Project-scope backups live OUTSIDE the project (a .bak next to a tracked
   # settings.json is one `git add .` from being committed), one directory
   # per project keyed by a cksum of its physical path.
-  project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$project_dir" | cksum | awk '{print $1}')"
+  # A vanished project (--uninstall of a removed worktree) cannot be
+  # resolved with pwd -P, so its parent is: the key must match the one the
+  # install used (issue #178), or the created-file marker would be orphaned.
+  _key_dir="$project_dir"
+  if (( project_gone )) && [[ -d "$(dirname "$project_dir")" ]]; then
+    _key_dir="$(cd "$(dirname "$project_dir")" && pwd -P)/$(basename "$project_dir")"
+  fi
+  project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$_key_dir" | cksum | awk '{print $1}')"
   # A project-scope --uninstall never touches the secret (see 40-main.sh),
   # so --keep-secret is a no-op there too; say so, same as issue #82.
   if (( keep_secret || remove_secret )) && [[ "$mode" == uninstall ]]; then

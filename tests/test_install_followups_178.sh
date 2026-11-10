@@ -135,6 +135,65 @@ check "7: --local created settings.local.json" yes "$(exists "$P/.claude/setting
 inst --uninstall --project "$P" --local
 check "7: --local created file removed" no "$(exists "$P/.claude/settings.local.json")"
 
+# --- 7b. the marker is bound to the file it was written for -------------------------------
+for variant in settings.json settings.local.json; do
+  lf=""; [[ "$variant" == settings.local.json ]] && lf="--local"
+  # A: created, user deletes it and writes their own {}, reinstalls, uninstalls.
+  fresh_sandbox
+  inst --project "$P" $lf
+  rm "$P/.claude/$variant"; printf '{}\n' > "$P/.claude/$variant"
+  inst --project "$P" $lf
+  check "7b A($variant): reinstall over a user file drops the stale marker" 0 "$(find "$H/.claude/handoff_settings_backups" -name '*.created' | wc -l | tr -d ' ')"
+  inst --uninstall --project "$P" $lf
+  check "7b A($variant): user-authored file survives" yes "$(exists "$P/.claude/$variant")"
+  # B: created, project dir removed, gone-uninstall; a new project at the same path.
+  fresh_sandbox
+  inst --project "$P" $lf
+  rm -rf "$P"
+  RUN_DIR="$H" inst --uninstall --project "$P" $lf
+  RUN_DIR=""
+  check "7b B($variant): gone-uninstall consumes the marker" 0 "$(find "$H/.claude/handoff_settings_backups" -name '*.created' 2>/dev/null | wc -l | tr -d ' ')"
+  mkdir -p "$P/.claude"; printf '{"permissions":{"allow":[]}}\n' > "$P/.claude/$variant"
+  inst --project "$P" $lf
+  inst --uninstall --project "$P" $lf
+  check "7b B($variant): new project's own file survives" yes "$(exists "$P/.claude/$variant")"
+  # Reinstall over our own created file keeps the marker: still removed.
+  fresh_sandbox
+  inst --project "$P" $lf
+  inst --project "$P" $lf
+  inst --uninstall --project "$P" $lf
+  check "7b ($variant): repeat install then uninstall still removes it" no "$(exists "$P/.claude/$variant")"
+done
+
+# --- 7c. a git-tracked created file is kept ------------------------------------------------
+fresh_sandbox
+must git -C "$P" init -q
+inst --project "$P"
+must git -C "$P" add .claude/settings.json
+must git -C "$P" -c user.email=t@example.com -c user.name=t commit -q -m s
+inst --uninstall --project "$P"
+check "7c: tracked file kept" yes "$(exists "$P/.claude/settings.json")"
+check "7c: says it is tracked" yes "$(has "$OUT" "tracked by git; left as the empty skeleton")"
+check "7c: no deletion in git status" "" "$(git -C "$P" status --porcelain | grep '^ D' || true)"
+check "7c: file stripped to the skeleton" 0 "$(jq -r '(.hooks | length) + (.permissions.allow | length)' "$P/.claude/settings.json")"
+
+# --- 7d. an unwritable marker location does not fail the install -----------------------------
+fresh_sandbox
+mkdir -p "$H/.claude/handoff_settings_backups"; chmod 500 "$H/.claude/handoff_settings_backups"
+if [[ -w "$H/.claude/handoff_settings_backups" ]]; then
+  skip "7d: directory permissions are not enforced here (running as root?)"
+else
+  inst --project "$P"
+  check "7d: install exit 0" 0 "$RC"
+  check "7d: file wired" 1 "$(jq -r '.hooks.Stop | length' "$P/.claude/settings.json")"
+  check "7d: registry written" yes "$(has "$(cat "$H/.claude/handoff_projects" 2>/dev/null)" "$(cd "$P" && pwd -P)")"
+  check "7d: WARN printed" yes "$(has "$OUT" "WARN    cannot record the created-file marker")"
+  chmod 700 "$H/.claude/handoff_settings_backups"
+  inst --uninstall --project "$P"
+  check "7d: later uninstall keeps the skeleton" yes "$(exists "$P/.claude/settings.json")"
+fi
+chmod -R u+w "$H/.claude/handoff_settings_backups" 2>/dev/null
+
 # --- 8. install-time model note --------------------------------------------------------
 fresh_sandbox
 inst --project "$P"

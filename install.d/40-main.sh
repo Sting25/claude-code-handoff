@@ -106,11 +106,13 @@ elif [[ "$scope" == project ]]; then
     echo "project settings ($project_dir):"
     echo "  ok      $project_dir no longer exists; nothing to unpatch"
     registry_remove "$project_dir" "$settings_name"
+    rm -f "$(created_marker)" 2>/dev/null || true   # no file left for it to describe
     echo
     echo "done. the repo at $repo_root is untouched."
     exit 0
   fi
   echo "project settings ($project_dir):"
+  check_created_settings
   unpatch_settings
   remove_created_settings_if_empty
   registry_remove "$project_dir" "$settings_name"

@@ -219,6 +219,18 @@ inst --uninstall --project "$P"
 check "G: uninstall removes the project pin (and the file it created)" no "$([[ -e "$P/.claude/settings.json" ]] && echo yes || echo no)"
 check "G: project pin record consumed" 0 "$(find "$H/.claude" -maxdepth 1 -name 'handoff-model-pin.project.*' | wc -l | tr -d ' ')"
 
+# G2: the same pin on a file that existed before the install: the pin and our
+# hooks are stripped, the file survives with the user's key.
+fresh_sandbox
+mkdir -p "$P/.claude"; printf '%s' '{"theme":"dark"}' > "$P/.claude/settings.json"
+inst --project "$P" --model 'opus[1m]'
+check "G2: model pinned in the existing file" 'opus[1m]' "$(pj '.model')"
+inst --uninstall --project "$P"
+check "G2: pre-existing file survives" yes "$([[ -e "$P/.claude/settings.json" ]] && echo yes || echo no)"
+check "G2: model pin stripped" null "$(pj '.model // "null"')"
+check "G2: hooks stripped" 0 "$(pj '.hooks | length')"
+check "G2: user key kept" dark "$(pj '.theme')"
+
 # --- H. doctor: user-scope wiring next to a project layout ------------------------
 WIRED_MSG="User-scope wiring present: these hooks fire in every project"
 fresh_sandbox

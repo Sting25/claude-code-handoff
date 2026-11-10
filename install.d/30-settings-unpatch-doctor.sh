@@ -123,33 +123,86 @@ take_settings_backup() {
 
 # Project scope (issue #178): remember that THIS installer created the
 # project settings file, so a later --uninstall can remove it again once
-# nothing but our own empty residue is left in it. Written only after the
-# patch sequence completed (an abort already removes the file itself), and
-# only for a file that did not exist; a pre-existing file, even an empty
-# one, is never recorded and so is never removed.
+# nothing but our own empty residue is left in it. The marker holds a
+# fingerprint (cksum) of the file as the install left it, so it is bound to
+# that file: a file the user deleted and rewrote, or a new project at the
+# same path, never matches. Only a file that did not exist is recorded; a
+# reinstall over an existing file keeps the marker only while the file is
+# still byte-identical to what the marker was written for, and otherwise
+# drops it. Writing the marker is best effort: failing to write it must not
+# fail an install whose wiring is already in place.
 created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
+settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
+  [[ -f "$1" && ! -L "$1" ]] || return 0
+  cksum < "$1" 2>/dev/null | awk '{print $1 " " $2}'
+}
+# Fingerprint of the settings file before this run's patch touches it.
+pre_patch_fp=""
 record_created_settings() {
-  [[ "$scope" == project && "$settings_seed_state" == absent ]] || return 0
-  mkdir -p "$project_backup_dir"
-  : > "$(created_marker)"
+  [[ "$scope" == project ]] || return 0
+  local m stored
+  m="$(created_marker)"
+  if [[ "$settings_seed_state" == absent ]]; then
+    if ! ( mkdir -p "$project_backup_dir" && settings_fp "$settings" > "$m" ) 2>/dev/null; then
+      echo "  WARN    cannot record the created-file marker in $project_backup_dir;"
+      echo "          --uninstall will leave $settings as an empty skeleton"
+    fi
+    return 0
+  fi
+  [[ -f "$m" && ! -L "$m" ]] || return 0
+  stored="$(cat "$m" 2>/dev/null || true)"
+  if [[ -n "$pre_patch_fp" && "$pre_patch_fp" == "$stored" ]]; then
+    settings_fp "$settings" > "$m" 2>/dev/null || true
+  else
+    rm -f "$m" 2>/dev/null || true
+  fi
 }
 
-# Project-scope --uninstall: delete the settings file when this installer
-# created it and what is left is only the empty hooks/permissions skeleton
-# the strip leaves behind. Anything else in the file (a key the user added,
-# a hook that is not ours) keeps it. The marker is consumed either way.
+# jq test: the file holds nothing but the empty hooks/permissions skeleton
+# (exact: $1 = exact) or that skeleton plus nothing (loose, after a strip).
+settings_is_skeleton() {  # <file> <exact|loose>
+  [[ -f "$1" && ! -L "$1" ]] && command -v jq >/dev/null 2>&1 || return 1
+  if [[ "$2" == exact ]]; then
+    jq -e '. == {"hooks":{},"permissions":{"allow":[]}}' "$1" >/dev/null 2>&1
+  else
+    jq -e '
+      (if (.hooks // {}) == {} then del(.hooks) else . end)
+      | (if (.permissions.allow // []) == [] then del(.permissions.allow) else . end)
+      | (if (.permissions // {}) == {} then del(.permissions) else . end)
+      | . == {}' "$1" >/dev/null 2>&1
+  fi
+}
+
+# Project-scope --uninstall, step 1 (before the strip): decide whether this
+# file is the one the marker was written for: byte-identical to the install,
+# or already exactly the empty skeleton. Sets created_pre_ok.
+created_pre_ok=0
+check_created_settings() {
+  local m stored cur
+  m="$(created_marker)"
+  [[ -f "$m" && ! -L "$m" ]] || return 0
+  stored="$(cat "$m" 2>/dev/null || true)"
+  cur="$(settings_fp "$settings")"
+  if [[ -n "$cur" && "$cur" == "$stored" ]] || settings_is_skeleton "$settings" exact; then
+    created_pre_ok=1
+  fi
+}
+
+# Step 2 (after the strip): delete the file only when the marker matched, the
+# strip left nothing but the empty skeleton, and git does not track it (a
+# tracked file would show up as a deletion). The marker is consumed either way.
 remove_created_settings_if_empty() {
   local m
   m="$(created_marker)"
   [[ -f "$m" && ! -L "$m" ]] || return 0
-  if [[ -f "$settings" && ! -L "$settings" ]] && command -v jq >/dev/null 2>&1 \
-     && jq -e '
-          (if (.hooks // {}) == {} then del(.hooks) else . end)
-          | (if (.permissions.allow // []) == [] then del(.permissions.allow) else . end)
-          | (if (.permissions // {}) == {} then del(.permissions) else . end)
-          | . == {}' "$settings" >/dev/null 2>&1; then
-    rm -f "$settings"
-    echo "  remove  $settings (this installer created it; nothing else was ever written to it)"
+  if (( created_pre_ok )) && settings_is_skeleton "$settings" loose; then
+    if command -v git >/dev/null 2>&1 \
+       && git -C "$project_dir" ls-files --error-unmatch -- "$settings" >/dev/null 2>&1; then
+      echo "  keep    $settings (tracked by git; left as the empty skeleton)"
+    else
+      rm -f "$settings"
+      echo "  remove  $settings (this installer created it; nothing else was ever written to it)"
+    fi
   fi
   rm -f "$m"
 }
@@ -161,6 +214,7 @@ patch_settings() {
     print_manual_snippet
     return
   fi
+  pre_patch_fp="$(settings_fp "$settings")"
   ensure_settings_json || return
   if [[ -n "$settings_seed_state" ]]; then
     # Neither scope backs up a file this run just seeded as {}: there is
