@@ -41,6 +41,18 @@ run_sh() {
   RC=$?
   ERR="$(cat "$HOME_DIR/err")"
 }
+# run_sh_secret: as run_sh, with lib.sh's HANDOFF_SECRET_FILE jail stripped
+# (`env -u`, as test_uninstall_secret.sh does), so --uninstall really decides
+# about the secret at its default path $HOME_DIR/handoff_secret instead of
+# printing "skip ... override set". A "secret kept" check under the jail
+# cannot fail; these runs can.
+run_sh_secret() {
+  local m="$1"; shift
+  OUT="$(env -u HANDOFF_SECRET_FILE FAIL_JQ_MATCH="$m" HANDOFF_MODEL="" PATH="$SHIM:$PATH" HOME="$HOME_DIR" CLAUDE_HOME="$HOME_DIR" \
+    bash "$SRC/install.sh" "$@" 2>"$HOME_DIR/err" </dev/null)"
+  RC=$?
+  ERR="$(cat "$HOME_DIR/err")"
+}
 fresh_home() { HOME_DIR="$(mktemp -d)"; cleanup_on_exit "$HOME_DIR"; }
 has() { [[ "$1" == *"$2"* ]] && echo yes || echo no; }
 nz() { [[ $1 -ne 0 ]] && echo yes || echo no; }
@@ -287,7 +299,7 @@ REG_SUM="$(cksum < "$HOME_DIR/handoff_projects")"
 run_sh 'def wired' --uninstall --keep-secret
 check "registry scan fails: re-run repeats --keep-secret" yes "$(has "$ERR" 're-run ./install.sh --uninstall --keep-secret.')"
 check "registry scan fails: names the file as a cause" yes "$(has "$ERR" 'Fix jq, or fix the file named above')"
-run_sh 'def wired' --uninstall
+run_sh_secret 'def wired' --uninstall
 check "registry scan fails: exit nonzero"      yes "$(nz $RC)"
 check "registry scan fails: secret kept"       "$SECRET_SUM" "$(cksum < "$HOME_DIR/handoff_secret" 2>/dev/null)"
 check "registry scan fails: registry intact"   "$REG_SUM" "$(cksum < "$HOME_DIR/handoff_projects" 2>/dev/null)"
@@ -400,7 +412,7 @@ fi
 #     --uninstall deleted the shared secret), --doctor called the file BROKEN.
 #     The fragment is the predicate's own text, so the known-good re-run on
 #     stdin fails too and the failure is jq's, not the file's.
-USABLE='length == 1 and (.[0] | type)'
+USABLE='try (fromjson | type == "object") catch false'
 # 19a. --uninstall stops before editing: settings byte-identical, links kept.
 fresh_home
 run_sh ""
@@ -434,7 +446,8 @@ check "usable check fails, project install: no registry line" no "$(grep -q proj
 # 19d. User-scope --uninstall whose registry scan hits the failure on the
 #      registered project's file (the user file is empty, so its own unpatch
 #      never reaches the check): the project would read as stale and the
-#      shared secret would go. It must survive and the run must fail.
+#      shared secret would go. It must survive and the run must fail. Run
+#      outside the secret jail, so "secret kept" is a real decision.
 fresh_home
 run_sh ""
 mkdir -p "$HOME_DIR/proj"
@@ -443,7 +456,7 @@ printf '%064d\n' 0 | tr 0 a > "$HOME_DIR/handoff_secret"; chmod 600 "$HOME_DIR/h
 SECRET_SUM="$(cksum < "$HOME_DIR/handoff_secret")"
 REG_SUM="$(cksum < "$HOME_DIR/handoff_projects")"
 : > "$HOME_DIR/settings.json"
-run_sh "$USABLE" --uninstall
+run_sh_secret "$USABLE" --uninstall
 check "usable check fails in registry scan: exit nonzero" yes "$(nz $RC)"
 check "usable check fails in registry scan: secret kept"  "$SECRET_SUM" "$(cksum < "$HOME_DIR/handoff_secret" 2>/dev/null)"
 check "usable check fails in registry scan: registry intact" "$REG_SUM" "$(cksum < "$HOME_DIR/handoff_projects" 2>/dev/null)"
@@ -451,9 +464,11 @@ check "usable check fails in registry scan: ERROR names file" yes "$(has "$ERR" 
 check "usable check fails in registry scan: WARN names the check" yes "$(has "$ERR" 'while checking whether')"
 check "usable check fails in registry scan: no 'remove' secret" no "$(has "$OUT" 'per-machine HMAC secret')"
 # 19e. --uninstall on a settings file it cannot read: named as such, never
-#      as "not valid JSON", and left alone.
+#      as "not valid JSON", and the run stops before the bin/ links go (the
+#      hooks may still be wired in there).
 fresh_home
 run_sh ""
+NB="$(nbin)"
 chmod 000 "$HOME_DIR/settings.json"
 if [[ -r "$HOME_DIR/settings.json" ]]; then
   chmod 600 "$HOME_DIR/settings.json"
@@ -461,8 +476,39 @@ if [[ -r "$HOME_DIR/settings.json" ]]; then
 else
   run_sh "" --uninstall
   chmod 600 "$HOME_DIR/settings.json"
-  check "uninstall unreadable: ERROR cannot be read"       yes "$(has "$OUT" 'cannot be read (check its permissions)')"
+  check "uninstall unreadable: ERROR cannot be read"       yes "$(has "$ERR" 'cannot be read (check its permissions)')"
   check "uninstall unreadable: no 'not valid JSON'"        no  "$(has "$OUT$ERR" 'not valid JSON')"
+  check "uninstall unreadable: exit nonzero"               yes "$(nz $RC)"
+  check "uninstall unreadable: bin links kept"             "$NB" "$(nbin)"
+  run_sh "" --uninstall
+  check "uninstall unreadable, fixed re-run: exit 0"       0   "$RC"
+fi
+# 19f. A registered project whose settings.json this process cannot read is
+#      unknown, not stale: a user-scope --uninstall (outside the secret jail)
+#      keeps the shared secret and the registry and exits non-zero. It used
+#      to delete the secret and exit 0 while that project was still wired.
+fresh_home
+run_sh ""
+mkdir -p "$HOME_DIR/proj"
+run_sh "" --scope project --project "$HOME_DIR/proj"
+printf '%064d\n' 0 | tr 0 a > "$HOME_DIR/handoff_secret"; chmod 600 "$HOME_DIR/handoff_secret"
+SECRET_SUM="$(cksum < "$HOME_DIR/handoff_secret")"
+REG_SUM="$(cksum < "$HOME_DIR/handoff_projects")"
+chmod 000 "$HOME_DIR/proj/.claude/settings.json"
+if [[ -r "$HOME_DIR/proj/.claude/settings.json" ]]; then
+  chmod 600 "$HOME_DIR/proj/.claude/settings.json"
+  skip "mode 000 is readable here (running as root)"
+else
+  run_sh_secret "" --uninstall
+  chmod 600 "$HOME_DIR/proj/.claude/settings.json"
+  check "unreadable project file, user uninstall: exit nonzero" yes "$(nz $RC)"
+  check "unreadable project file, user uninstall: secret kept"  "$SECRET_SUM" "$(cksum < "$HOME_DIR/handoff_secret" 2>/dev/null)"
+  check "unreadable project file, user uninstall: registry intact" "$REG_SUM" "$(cksum < "$HOME_DIR/handoff_projects" 2>/dev/null)"
+  check "unreadable project file, user uninstall: WARN names the cause" yes "$(has "$ERR" 'cannot be read (check its permissions)')"
+  check "unreadable project file, user uninstall: no 'remove' secret" no "$(has "$OUT" 'per-machine HMAC secret')"
+  run_sh_secret "" --uninstall
+  check "unreadable project file, fixed re-run: exit 0"        0   "$RC"
+  check "unreadable project file, fixed re-run: secret kept for wired project" yes "$(has "$OUT" 'still sign with')"
 fi
 
 finish

@@ -300,7 +300,7 @@ unpatch_settings() {
     echo "  ok      $settings is empty; nothing to strip"
     return
   fi
-  usable_rc=0
+  local usable_rc=0
   settings_usable "$settings" || usable_rc=$?
   if [[ $usable_rc -eq 2 ]]; then
     # jq failed before anything is known about the file (#187): not "nothing
@@ -313,7 +313,12 @@ unpatch_settings() {
   fi
   if [[ $usable_rc -ne 0 ]]; then
     if [[ ! -r "$settings" ]]; then
-      echo "  ERROR   $settings cannot be read (check its permissions); refusing to edit (left untouched)."
+      # Unknown content, so the hooks may still be wired: stop before the
+      # bin/ links go, as for a jq failure (an ERROR followed by exit 0 and
+      # removed links would leave every hook dangling).
+      echo "  ERROR   $settings cannot be read (check its permissions); refusing to edit (left untouched)." >&2
+      echo "          Fix the file and re-run the same --uninstall command." >&2
+      exit 1
     elif jq empty "$settings" >/dev/null 2>&1; then
       # Whitespace only, a non-object root, or several documents: there is
       # no hooks object for this installer to have written, so nothing to strip.
@@ -489,26 +494,26 @@ shq() {
 # settings_usable <file>: 0 when <file> holds exactly one JSON document and
 # that document is an object; 1 when it does not (0 bytes, whitespace only,
 # invalid JSON, a non-object root such as [] 42 "x" null, two documents, a
-# file jq cannot open); 2 when jq itself failed, so nothing is known about
-# the file (settings_usable_rc then holds jq's exit code). Every outcome is
-# an answer, so callers never read an unusable file as a jq failure, and
-# never read a jq failure as an unusable file (#187). `jq -e .` alone is not
-# enough: on a 0-byte or whitespace file it exits 4 ("no valid result"),
-# which looks like a jq failure, and `jq empty` passes such a file. jq's
-# exit code alone cannot tell a file that is not JSON (exit 2) from a usage
-# or system error (also 2), so after any exit above 1 the same filter is run
-# again on a known-good document from stdin: if jq cannot evaluate that
-# either, jq is the problem; if it can, the file is. Shared by
+# file this process cannot read); 2 when jq itself failed, so nothing is
+# known about the file (settings_usable_rc then holds jq's exit code). Every
+# outcome is an answer, so callers never read an unusable file as a jq
+# failure, and never read a jq failure as an unusable file (#187). The
+# filter cannot fail on the file's content: the file is read raw (-R -s, one
+# string, so 0 bytes and whitespace are strings too, never "no valid
+# result") and parsed inside try/catch, so a parse error is the answer
+# `false` (exit 1), not an exit 2 that would look like a jq usage or system
+# error. With content ruled out as a cause, any exit above 1 is jq's own
+# failure, with no second probe needed to guess whose fault it was. The
+# readability check runs first in bash so a mode-000 file is a plain "not
+# usable" its callers can name, not a jq failure. Shared by
 # settings_has_our_hooks, unpatch_settings and the doctor's settings gate.
 settings_usable_rc=0
 settings_usable() {
   local rc=0
   settings_usable_rc=0
-  jq -es 'length == 1 and (.[0] | type) == "object"' "$1" >/dev/null 2>&1 || rc=$?
+  [[ -r "$1" ]] || return 1
+  jq -Rse 'try (fromjson | type == "object") catch false' "$1" >/dev/null 2>&1 || rc=$?
   if [[ $rc -le 1 ]]; then return "$rc"; fi
-  if printf '{}' | jq -es 'length == 1 and (.[0] | type) == "object"' >/dev/null 2>&1; then
-    return 1
-  fi
   settings_usable_rc=$rc
   return 2
 }
@@ -528,11 +533,22 @@ settings_has_our_hooks() {
   local f="$1" rc=0
   [[ -f "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
+  # A file this process cannot read is unknown, not "not wired": this is the
+  # read the user-scope --uninstall registry scan relies on before it deletes
+  # the shared secret, and a mode-000 project file may well still be wired.
+  # Reported through sh_jq_failed like a jq failure, so every caller that
+  # acts on "not wired" stops the same way (the WARN names the real cause).
+  if [[ ! -r "$f" ]]; then
+    echo "  WARN    $f cannot be read (check its permissions);" >&2
+    echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+    sh_jq_failed=1
+    sh_jq_failed_file="$f"
+    return 1
+  fi
   # An unusable file (empty, unparseable, not an object) is a real "no"
   # (settings_usable), not a jq failure. jq failing inside that check (2) is
-  # one, reported like a failure of the wiring read below: this is the read
-  # the user-scope --uninstall registry scan relies on before it deletes the
-  # shared secret, so "unknown" must never collapse into "not wired".
+  # one, reported like a failure of the wiring read below, for the same
+  # reason: "unknown" must never collapse into "not wired".
   settings_usable "$f" || rc=$?
   if [[ $rc -eq 2 ]]; then
     echo "  WARN    jq failed (exit $settings_usable_rc) while checking whether $f is a JSON object;" >&2
@@ -897,7 +913,7 @@ doctor() {
   # A missing settings file still gets a line rather than silence: the
   # status line is the context nudge's most accurate signal, so its absence
   # is worth naming even when there is no file to inspect.
-  usable_rc=0
+  local usable_rc=0
   if command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
     settings_usable "$settings" || usable_rc=$?
   fi
