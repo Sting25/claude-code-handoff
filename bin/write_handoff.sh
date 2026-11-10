@@ -732,8 +732,9 @@ release_mkdir_lock() {  # <lock_dir>
 # 1 s newer than its dir (create and write straddling a second). A token
 # more than 1 s newer than the dir we judged means another reclaimer won
 # after our check and we just took a live holder's token: it goes straight
-# back (a hard link, which never replaces a token someone else made
-# meanwhile) and we report held. A new token is at least the window newer
+# back (a hard link, or an O_EXCL copy of its pid where the filesystem has no
+# hard links, #188; neither replaces a token someone else made meanwhile)
+# and we report held. A new token is at least the window newer
 # than the judged dir, so the 1 s allowance holds for any window of 2 s or
 # more. (4b) A caller with nothing to capture claims only if the dir mtime
 # is still the one it judged: a capture, claim or release by anyone else
@@ -755,7 +756,7 @@ release_mkdir_lock() {  # <lock_dir>
 # every owner.reap.* entry older than the window (a live reclaimer's capture
 # of a fresh token is fresh, so it is never swept from under it).
 reclaim_stale_mkdir_lock() {  # <lock_dir>
-  local lock_dir="$1" stale_secs lock_mtime now reap reap_mtime g g_mtime
+  local lock_dir="$1" stale_secs lock_mtime now reap reap_mtime g g_mtime tok
   [[ -L "$lock_dir" || ! -d "$lock_dir" ]] && return 1
   stale_secs="${HANDOFF_LOCK_STALE_SECS:-300}"
   # Numeric guard before the (( )) below: bash arithmetic recursively
@@ -784,8 +785,47 @@ reclaim_stale_mkdir_lock() {  # <lock_dir>
       # a release by that holder in the meantime shows up (the release
       # removes captures, see release_mkdir_lock); then there is nothing
       # to hand back and the lock is already free.
+      # A filesystem without hard links (exFAT, FAT32, some SMB shares)
+      # fails every ln (#188). The capture is then still there, so the
+      # token goes back by content: the pid it holds is written to owner
+      # with the same noclobber O_EXCL create a claim uses, which, like
+      # ln, never replaces an owner someone else made meanwhile (that
+      # failure is the warning below). Not a rename back: BSD mv -n checks
+      # for owner and then renames over it, so an owner created in between
+      # would be replaced and two processes would own the lock (GNU mv may
+      # use renameat2 with RENAME_NOREPLACE; O_EXCL is the portable choice).
+      # The capture is checked again right before the create: the holder's
+      # release removes it, then the dir, and a copy written after that
+      # would land in whatever dir is there by then. Residual: if the
+      # holder releases between that check and the create, and a new
+      # acquirer has made the dir but not yet claimed it, the copy lands
+      # in that dir and holds it until the staleness window. That is a
+      # lock held too long, never a lock with two owners. A create that
+      # fails because the dir is gone means the holder released: the lock
+      # is free and there is nothing to report. An empty read is a claim
+      # captured between its create and its write; its write lands in the
+      # capture, so it is read once more after a short pause. Still empty,
+      # nothing is handed back and owner stays absent. That is safe: a
+      # third acquirer finds nothing to capture and the dir mtime check
+      # (4b) stops it, since our capture changed the mtime, and the
+      # holder's release still frees the lock. An empty owner would hold
+      # the lock until the staleness window, because that release does not
+      # recognize it as its own.
       if ! ln "$reap" "$lock_dir/owner" 2>/dev/null && [[ -e "$reap" ]]; then
-        echo "lock reclaim: could not hand a live holder's token back to $lock_dir (another process claimed it meanwhile)." >&2
+        tok=""; read -r tok < "$reap" 2>/dev/null || true
+        if [[ -z "$tok" ]]; then
+          sleep 0.1 2>/dev/null || sleep 1
+          read -r tok < "$reap" 2>/dev/null || true
+        fi
+        if [[ -z "$tok" ]]; then
+          if [[ -e "$reap" ]]; then
+            echo "lock reclaim: captured an empty token in $lock_dir; not handing it back." >&2
+          fi
+        elif [[ -e "$reap" ]] \
+             && ! ( set -o noclobber; printf '%s\n' "$tok" > "$lock_dir/owner" ) 2>/dev/null \
+             && [[ -d "$lock_dir" ]]; then
+          echo "lock reclaim: could not hand a live holder's token back to $lock_dir (another process claimed it meanwhile, or the create failed)." >&2
+        fi
       fi
       rm -f "$reap" 2>/dev/null || true
       return 1
