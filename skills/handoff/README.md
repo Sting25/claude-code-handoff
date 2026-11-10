@@ -46,6 +46,7 @@ scripts from there at runtime.
 │   ├── handoff_recover_tail.sh    # /handoff-recover helper: rescues crash-dropped final turns past the dump cursor
 │   ├── handoff_statusline.sh      # statusLine command: renders the line + caches CC's ctx numbers
 │   ├── handoff_compact_reset.sh   # PostCompact hook: resets ctx sidecars after compaction
+│   ├── handoff_worktree_remove.sh # WorktreeRemove hook: salvages a removed worktree's handoff + dumps
 │   └── handoff_provenance.sh      # sourced LIBRARY (not executable): root resolution + HMAC signing/verification
 ├── skills/
 │   ├── handoff/
@@ -55,7 +56,9 @@ scripts from there at runtime.
 │   │   └── SKILL.md               # /handoff-more: load older handoffs from history/ into context
 │   └── handoff-recover/
 │       └── SKILL.md               # /handoff-recover: reconstruct a handoff when the prior session didn't run one
-├── settings.json                  # SessionStart/SessionEnd/PreCompact/PostCompact/Stop/UserPromptSubmit hooks + statusLine
+├── settings.json                  # user scope (default): the seven hooks + statusLine
+│                                  # (project scope: <project>/.claude/settings.json,
+│                                  # or settings.local.json with --local; not under ~/.claude/)
 └── RULES.md                       # self-policing rule (optional)
 ```
 
@@ -63,9 +66,12 @@ scripts from there at runtime.
 
 Easiest: clone the [claude-code-handoff repo](https://github.com/Sting25/claude-code-handoff)
 and run `./install.sh` — it symlinks all the files into `~/.claude/`
-and patches `~/.claude/settings.json` to add the six hooks plus six
-permissions, and wires the statusLine **only if you don't already
-have one** (an existing statusLine is never overwritten — the
+and patches a settings file to add the seven hooks plus seven
+permissions (`~/.claude/settings.json` by default; with `--scope project`
+(`--project <dir>`, else the current directory's git toplevel, else the
+current directory itself outside a git repo) the project's
+`.claude/settings.json`, or `.claude/settings.local.json` with `--local`),
+and wires the statusLine **only if you don't already have one** (an existing statusLine is never overwritten; the
 installer prints the manual step instead). Edits in the repo flow
 live without re-installing.
 
@@ -73,15 +79,15 @@ Manual install:
 
 1. Drop `bin/write_handoff.sh`, `bin/handoff_turn_append.sh`,
    `bin/handoff_ctx_check.sh`, `bin/handoff_session_start.sh`,
-   `bin/handoff_recover_tail.sh`, `bin/handoff_statusline.sh`, and
-   `bin/handoff_compact_reset.sh` into `~/.claude/bin/` and `chmod +x`
-   all seven. (Without `handoff_recover_tail.sh`, `/handoff-recover`
+   `bin/handoff_recover_tail.sh`, `bin/handoff_statusline.sh`,
+   `bin/handoff_compact_reset.sh`, and `bin/handoff_worktree_remove.sh`
+   into `~/.claude/bin/` and `chmod +x` all eight. (Without `handoff_recover_tail.sh`, `/handoff-recover`
    still runs but silently loses the crash-truncated final turn — the
    content the helper exists to rescue.)
 2. Drop `bin/handoff_provenance.sh` into `~/.claude/bin/` as well —
    **do not skip this one.** It is a sourced library, not a hook, so it
    needs no `+x` bit and nothing ever invokes it directly; that is
-   exactly why it is easy to miss. Every one of the seven scripts above
+   exactly why it is easy to miss. Every one of the eight scripts above
    sources it, and both signing (`write_handoff.sh`) and loading
    (`handoff_session_start.sh`) are gated on its presence. Omit it and
    you get an install that looks fine and works for snapshots, but
@@ -93,7 +99,8 @@ Manual install:
 3. Drop `skills/handoff/SKILL.md`, `skills/handoff-more/SKILL.md`, and
    `skills/handoff-recover/SKILL.md` into the matching
    `~/.claude/skills/<name>/` directories.
-4. Add hooks to `~/.claude/settings.json`:
+4. Add hooks to `~/.claude/settings.json` (or, to wire one project only, to
+   that project's `.claude/settings.json` or `.claude/settings.local.json`):
 
    ```json
    {
@@ -122,6 +129,12 @@ Manual install:
            "command": "bash $HOME/.claude/bin/handoff_compact_reset.sh 2>/dev/null || true"
          }]
        }],
+       "WorktreeRemove": [{
+         "hooks": [{
+           "type": "command",
+           "command": "bash $HOME/.claude/bin/handoff_worktree_remove.sh 2>/dev/null || true"
+         }]
+       }],
        "Stop": [{
          "hooks": [{
            "type": "command",
@@ -142,7 +155,8 @@ Manual install:
          "Bash(bash /home/<you>/.claude/bin/handoff_ctx_check.sh)",
          "Bash(bash /home/<you>/.claude/bin/handoff_session_start.sh)",
          "Bash(bash /home/<you>/.claude/bin/handoff_statusline.sh)",
-         "Bash(bash /home/<you>/.claude/bin/handoff_compact_reset.sh)"
+         "Bash(bash /home/<you>/.claude/bin/handoff_compact_reset.sh)",
+         "Bash(bash /home/<you>/.claude/bin/handoff_worktree_remove.sh)"
        ]
      },
      "statusLine": {
@@ -186,6 +200,10 @@ Manual install:
      model id checked against a built-in model table; when none
      applies the reminder says the window is unknown, gives no
      percentage, and fires at 100,000 tokens instead.
+   - **`SessionEnd`** runs `write_handoff.sh --if-curated`: a mechanical
+     git-state safety net that writes an auto handoff only when no curated
+     one exists, so a session that ends without `/handoff` still leaves
+     something to load.
    - **`PreCompact`** fires the same safety net as `SessionEnd`
      before auto or manual compaction — compaction destroys the
      conversation just like an ending, and `SessionEnd` doesn't
@@ -193,6 +211,11 @@ Manual install:
    - **`PostCompact`** runs `handoff_compact_reset.sh` to clear the
      session's ctx sidecars, so the freed window starts fresh and the
      nudge cadence starts over from 30%.
+   - **`WorktreeRemove`** runs `handoff_worktree_remove.sh` when Claude Code
+     removes a worktree it created (Claude Code 2.1.300 or later). It saves
+     the worktree's curated `handoff_current.md` and its raw dumps into the
+     main checkout's `.claude/handoff_history/worktrees/`, so they outlive
+     the worktree.
    - **`statusLine`** (not a hook — its own settings key) runs
      `handoff_statusline.sh`: renders
      `model | ctx N% (usedk/windowk) | handoff: <state>` where state

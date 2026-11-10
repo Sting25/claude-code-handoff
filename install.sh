@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: b2b012e3fb486004656f4c17969538099755ac4557ab015e4e3663d327bd9623
+# SOURCE-SHA256: 0fb8f143027f23b7b33179e04dee5bcd6fa15439e9302bc00be415f9d1969968
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -32,16 +32,22 @@ install.sh — wire this repo's handoff skill into ~/.claude/.
 What it does:
   1. Symlinks (or copies, where symlinks aren't available — e.g. Git
      Bash on Windows) bin/ scripts + skills/* into ~/.claude/.
-  2. Patches ~/.claude/settings.json to add seven hooks
-     (SessionStart / SessionEnd / PreCompact / PostCompact / WorktreeRemove / Stop /
-     UserPromptSubmit), seven permission entries, and (only when you
-     don't already have one) a statusLine command (never overwrites
-     an existing statusLine; prints the manual step instead).
-     Requires jq; falls back to printing the snippet if jq is missing.
+  2. Patches one settings file to add seven hooks (SessionStart / SessionEnd /
+     PreCompact / PostCompact / WorktreeRemove / Stop / UserPromptSubmit),
+     seven permission entries, and (only when you don't already have one) a
+     statusLine command (never overwrites an existing statusLine; prints the
+     manual step instead). Which file: ~/.claude/settings.json by default,
+     or with --scope project the project's .claude/settings.json or
+     .claude/settings.local.json (see "Scope" below).
+     Requires jq. Without it, install refuses (exit 1); --uninstall removes the
+     scripts but cannot unpatch the settings file and prints the entries to
+     remove by hand; --doctor reports jq as BROKEN.
 
 Idempotent. Existing files at symlink targets are backed up to
-<path>.bak.<timestamp> before being replaced. Existing settings.json
-is backed up the same way before any patch. Re-runs are safe and only
+<path>.bak.<timestamp> before being replaced. An existing settings file is
+backed up before any patch: <path>.bak.<timestamp> next to it in user scope, or
+~/.claude/handoff_settings_backups/<cksum of project path>/<name>.bak.<timestamp>
+in project scope (never inside the project). Re-runs are safe and only
 touch what's actually missing.
 
 Installing from a volatile path (a /tmp worktree, git-archive extract, CI
