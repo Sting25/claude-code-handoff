@@ -137,10 +137,10 @@ link_mode="auto"
 # --uninstall --keep-secret (issue #65): preserve the per-machine HMAC secret
 # instead of deleting it. Only consulted by remove_secret_if_ours() in
 # install mode "uninstall" (harmless, and unused, with any other mode). The
-# secret is per-machine identity, not per-install-mode state: a user moving
-# from bare-scripts to the plugin (the README's own recommended migration,
-# via the dual-mode warning) runs --uninstall first, and without this flag
-# that silently invalidates every already-signed handoff_current.md: the
+# secret is per-machine identity, not per-install state: a user who runs a
+# user-scope --uninstall before reinstalling (for example to move the
+# wiring from user scope to --scope project) would, without this flag,
+# silently invalidate every already-signed handoff_current.md: the
 # HANDOFF_BIND_BEGIN/END rules block stops verifying and downgrades to
 # reference data with no error, no prompt, nothing in the diff. Default stays
 # "delete" (unchanged, opt-in only) because the secret is also genuinely

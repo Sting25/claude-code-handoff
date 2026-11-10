@@ -253,9 +253,9 @@ remove_secret_if_ours() {
   # accurately instead of pointing at a file that was never in play (#82).
   local effective="${HANDOFF_SECRET_FILE:-$secret}"
   # --keep-secret (issue #65): skip the deletion entirely and say so. The
-  # secret is per-machine identity, not per-install-mode state, so a user
-  # switching from bare-scripts to the plugin (the README's own migration
-  # path, via the dual-mode warning) can carry it forward and keep every
+  # secret is per-machine identity, not per-install state, so a user who
+  # uninstalls before a reinstall (for example moving from user scope to
+  # --scope project) can carry it forward and keep every
   # already-signed handoff_current.md verifying instead of it silently
   # downgrading to reference data. Checked before every other guard below:
   # keeping the file needs none of the shape/ownership proof that deleting
@@ -272,11 +272,11 @@ remove_secret_if_ours() {
     echo "  skip    $effective (--keep-secret; preserving the per-machine HMAC secret)"
     if [[ -n "${HANDOFF_SECRET_FILE:-}" ]]; then
       echo "          Existing signed handoffs keep verifying. HANDOFF_SECRET_FILE points"
-      echo "          here, so both install modes will keep reading it from this path."
+      echo "          here, so a reinstall will keep reading it from this path."
     else
-      echo "          Existing signed handoffs keep verifying. Both install modes read"
+      echo "          Existing signed handoffs keep verifying. A reinstall reads"
       echo "          this same default path, so it needs no copying: it's already"
-      echo "          where the plugin install will find it."
+      echo "          where the next install will find it."
     fi
     return 0
   fi

@@ -20,118 +20,53 @@ digest you never read.
 - **Keeps a history of past handoffs** (last 5 by default) that you can pull back into context on demand.
 - **Auto-rebuilds a missing or corrupted handoff on load**: if `handoff_current.md` is missing, empty, unreadable, or fails an integrity check, the next session start composes a best-effort stand-in from your history and per-turn backups instead of loading nothing, clearly labeled `AUTO-REBUILT` and never written to disk or signed.
 - **Guards against a stale resumed session clobbering a fresher one's handoff** — refuses (exit 3) rather than silently rotating a newer session's curated work under an older one's; see [Cross-session overwrite guard](docs/reference.md#cross-session-overwrite-guard).
-- **Self-prunes its own stale cached plugin versions on every session start** (v0.18.0+): Claude Code never removes an old cached version once a newer one installs, and a leftover one can otherwise get loaded instead of the current version. This closes that gap automatically, no user action required.
 - **Works in git and non-git projects**, in both the Claude Code CLI and the desktop app.
 
 ## Installation
 
-Two supported install modes, both fully maintained: install as a
-**plugin** (recommended — hooks and skills come with it automatically,
-no manual patching) or install the **bare scripts** (legacy, still
-fully supported) into `~/.claude/`. Pick one — see
-[Dual-mode warning](#dual-mode-warning) below before running both.
-
-For the plugin, the recommended layout is a **per-project opt-in**: the
-plugin is active only in the repos where you install it. Installing at
-user scope (active in every project) stays supported as the
-alternative.
-
-### Per-project plugin install (recommended)
-
-Run these in the project you want the handoff in, in this order:
-
-1. Declare the marketplace for the project:
-
-   ```bash
-   claude plugin marketplace add Sting25/claude-code-handoff --scope project
-   ```
-
-   (Alternatively, add an `extraKnownMarketplaces` entry for
-   `claude-code-handoff` to the project's `.claude/settings.json`.)
-
-2. Install the plugin at project scope:
-
-   ```bash
-   claude plugin install claude-code-handoff@claude-code-handoff --scope project
-   ```
-
-   This writes `enabledPlugins` to the project's `.claude/settings.json`.
-   Use `--scope local` instead to write `.claude/settings.local.json`
-   and keep the install out of the committed settings.
-
-If you are switching from the global (user-scope) layout, remove it
-first:
-
-```bash
-claude plugin uninstall claude-code-handoff@claude-code-handoff --scope user
-```
-
-The uninstall is required, not optional. Scope precedence is local,
-then project, then user, and a user-level `false` does not disable a
-plugin that a project enables, so you cannot opt out of the global
-install by overriding it. Uninstall at user scope, then install in each
-project that should have the plugin.
-
-What to expect:
-
-- Project scope also covers that repo's git worktrees.
-- Only loaded plugins register hooks and skills, so a project that has
-  not opted in sees neither the hooks nor `/handoff`, `/handoff-more`,
-  or `/handoff-recover`.
-- Collaborators must run the install command themselves. Committing
-  `.claude/settings.json` records that the plugin is enabled but does
-  not install it on their machines.
-
-### Plugin install, user scope (alternative)
-
-Installs the plugin once for every project on the machine. Inside
-Claude Code:
-
-```
-/plugin marketplace add Sting25/claude-code-handoff
-/plugin install claude-code-handoff@claude-code-handoff
-```
-
-This adds the `claude-code-handoff` marketplace — self-hosted in this
-repo at [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json)
-— and installs the `claude-code-handoff` plugin from it. Hooks
-([`hooks/hooks.json`](hooks/hooks.json)) and skills (`skills/`) come
-with the plugin and are picked up automatically — no
-`~/.claude/settings.json` patching, no symlinking. Scripts run from
-the plugin's own `bin/`, wherever Claude Code checks the plugin out
-(cache path pattern
-`${CLAUDE_CONFIG_DIR:-~/.claude}/plugins/cache/<marketplace>/claude-code-handoff/<version>/bin/`).
-
-The one thing a plugin install can't wire up for you is the optional
-status line: see [docs/reference.md](docs/reference.md#status-line)
-for how to wire it in by hand.
-
-### Bare-scripts install (legacy / alternative)
-
-Still fully supported — dual-mode is a deliberate design choice, not a
-deprecated path.
+One install path: clone the repo and run `install.sh`. The recommended
+layout wires the hooks into one project only, so the tool runs where you
+opted in and nowhere else:
 
 ```bash
 git clone https://github.com/Sting25/claude-code-handoff.git ~/code/claude-code-handoff
 cd ~/code/claude-code-handoff
-./install.sh
-```
-
-The installer symlinks the scripts and skills into `~/.claude/` and
-patches `~/.claude/settings.json` (backed up first; idempotent; your
-own settings are left untouched).
-
-To wire the hooks into one project only (recommended), name the project:
-
-```bash
 ./install.sh --scope project --project ~/code/myapp
 ```
 
-That writes the hooks into `~/code/myapp/.claude/settings.json` (add
-`--local` for `.claude/settings.local.json`) and leaves
-`~/.claude/settings.json` alone. The scripts and skills are still
-shared from `~/.claude/`. Uninstall with the same flags:
-`./install.sh --uninstall --scope project --project ~/code/myapp`.
+The installer symlinks the scripts into `~/.claude/bin` and the skills
+into `~/.claude/skills`, then writes the seven hooks, the status line,
+and the permission entries into `~/code/myapp/.claude/settings.json`
+(backed up first; idempotent; your own settings are left untouched).
+`~/.claude/settings.json` is not touched. Add `--local` to target
+`.claude/settings.local.json` instead (that file is per machine and not
+committed, so its hooks do not reach the project's git worktrees). Run
+`--scope project` from inside the project to skip `--project`. Repeat
+the command for each project that should have the handoff; every wired
+project shares the same scripts in `~/.claude/bin`.
+
+What to expect:
+
+- Only wired projects run the hooks. The skills (`/handoff`,
+  `/handoff-more`, `/handoff-recover`) are installed for your user, but
+  they need the hooks and do nothing useful in a project that is not
+  wired.
+- Project scope in `.claude/settings.json` also covers that repo's git
+  worktrees.
+- Collaborators run the installer themselves. A committed
+  `.claude/settings.json` that names `~/.claude/bin` scripts is harmless
+  on a machine without the install: every hook command ends in
+  `2>/dev/null || true`, so it does nothing there.
+
+Plain `./install.sh` (no scope flag) still wires the hooks into
+`~/.claude/settings.json`, which makes them run in every project on the
+machine. Avoid that wiring if you want the tool in one project only; the
+doctor warns when the user file and a project file both carry the hooks.
+
+Uninstall a project with the same flags:
+`./install.sh --uninstall --scope project --project ~/code/myapp`. That
+strips only that project's settings file and keeps the shared scripts,
+skills, and HMAC secret for your other projects.
 
 The tracked `settings.json` carries this machine's absolute home path in
 its `permissions.allow` entries. `--local` keeps that out of git, at the
@@ -141,7 +76,7 @@ gitignored and per checkout).
 `install.sh` is a generated artifact (concatenated from `install.d/`
 by `tools/build-install.sh`; CI rebuilds and diffs it on every change)
 and ships with a checksum. Inside a full clone, git already guarantees
-integrity — but if you ever fetch `install.sh` on its own instead of
+integrity, but if you ever fetch `install.sh` on its own instead of
 cloning, fetch `install.sh.sha256` from the same tag and verify before
 running:
 
@@ -149,46 +84,80 @@ running:
 shasum -a 256 -c install.sh.sha256
 ```
 
-A mismatch means a corrupted or tampered download — don't run it. (Both
+A mismatch means a corrupted or tampered download: don't run it. (Both
 files travel the same channel, so this catches corruption and casual
 tampering, not a fully compromised host.)
 
-### Either way
+### Using it
 
-Once installed (either mode), in any project:
+Once installed, in a wired project:
 
-- **`/handoff`** — run at the end of a working session; writes the snapshot and fills in the "Notes from this session" prose block. Invoke at 30-50% context remaining, not at 5%.
-- **`/handoff-recover`** — run when a new session shows an `ACTION: RUN /handoff-recover` banner; reconstructs the notes a crashed or un-handed-off session never wrote.
-- **`/handoff-more`** — run in a fresh session to pull older handoffs into context, beyond the most recent one that auto-loads.
+- **`/handoff`**: run at the end of a working session; writes the snapshot and fills in the "Notes from this session" prose block. Invoke at 30-50% context remaining, not at 5%.
+- **`/handoff-recover`**: run when a new session shows an `ACTION: RUN /handoff-recover` banner; reconstructs the notes a crashed or un-handed-off session never wrote.
+- **`/handoff-more`**: run in a fresh session to pull older handoffs into context, beyond the most recent one that auto-loads.
 
-Everything else — loading, per-turn backups, the context nudge — runs
+Everything else (loading, per-turn backups, the context nudge) runs
 through hooks without you thinking about it.
 
-### Dual-mode warning
+### Keeping signed handoffs across a reinstall
 
-Claude Code does not dedupe hooks across install modes. If you install
-the plugin *and* leave a bare-scripts install wired into
-`~/.claude/settings.json`, both sets of hooks fire on every event —
-every `SessionStart`/`Stop`/`SessionEnd`/etc. runs twice, doubling
-writes and raw-dump appends. Pick one mode per machine. The doctor
-(`./install.sh --doctor`) warns when it detects both installed at
-once — run it if you're unsure which mode you're in.
-
-### Switching install modes
-
-Leaving bare-scripts mode means running `./install.sh --uninstall`
-first, and by default that deletes the per-machine HMAC secret at
-`~/.claude/handoff_secret` (see [Uninstall
+A user-scope `./install.sh --uninstall` deletes the per-machine HMAC
+secret at `~/.claude/handoff_secret` (see [Uninstall
 details](docs/reference.md#uninstall-details)) so no key material is
-left behind by a tool you removed. If you have any already-signed
-`handoff_current.md` (or entries in `handoff_history/`) you want to
-keep verifying as binding rules after switching to the plugin, run
+left behind by a tool you removed, unless a registered project is still
+wired: those projects sign with the same secret, so it is kept and the
+uninstall says so (`--remove-secret` deletes it anyway). If you are uninstalling only to
+reinstall (for example to move from user scope to `--scope project`)
+and have already-signed `handoff_current.md` files (or entries in
+`handoff_history/`) you want to keep verifying as binding rules, run
 `./install.sh --uninstall --keep-secret` instead: it skips that
-deletion. Both install modes read the secret from the same default
-path, so nothing needs to be copied. Without `--keep-secret`, existing
-signed handoffs still load fine, just as reference data instead of
-binding rules, and `/handoff` re-signs new ones under the plugin's
-fresh secret.
+deletion. Without `--keep-secret`, existing signed handoffs still load
+fine, just as reference data instead of binding rules, and `/handoff`
+re-signs new ones under a fresh secret. A project-scope uninstall never
+removes the secret.
+
+### Migrating from the plugin (0.19 and earlier)
+
+Versions up to 0.19 also shipped as a Claude Code plugin, and 0.19.0 is
+the last version published as a plugin. That distribution is gone;
+`install.sh` is the only install path. To move a plugin install over:
+
+1. Remove the plugin at the scope you installed it with. Run
+   `claude plugin list` to see that scope (the installer and
+   `./install.sh --doctor` also print the matching command while the
+   plugin is still installed). For a global install:
+
+   ```bash
+   claude plugin uninstall claude-code-handoff@claude-code-handoff --scope user
+   ```
+
+   For a per-project install, run it from inside the project directory,
+   since project and local scope act on the `.claude/` settings of the
+   directory you run the command in (use `--scope local` if you installed
+   with that):
+
+   ```bash
+   cd <dir>
+   claude plugin uninstall claude-code-handoff@claude-code-handoff --scope project
+   ```
+
+2. Remove the marketplace entry:
+
+   ```bash
+   claude plugin marketplace remove claude-code-handoff
+   ```
+
+3. Install the scripts and wire the project:
+
+   ```bash
+   ./install.sh --scope project --project <dir>
+   ```
+
+The HMAC secret is per machine (`~/.claude/handoff_secret`), and the
+plugin read the same file, so handoffs it signed keep verifying as
+binding rules after the switch. Until the plugin is gone, the installer
+and `./install.sh --doctor` say so: its hook commands differ from the
+installer's, so both sets would run on every event.
 
 ## Requirements
 
@@ -205,16 +174,15 @@ fresh secret.
 - `openssl` — optional. Without it, handoffs aren't HMAC-signed and
   the rules layer loads as reference data instead of binding; nothing
   errors.
-- Tested on Linux — that CI job blocks. The macOS CI job (bash 3.2 /
-  BSD userland) is advisory, non-blocking; the scripts handle BSD
-  differences like `flock` and `date`. Windows (Git Bash / WSL) is
-  untested in CI.
+- Tested in CI on Linux (bash 5) and macOS (bash 3.2, BSD userland);
+  both jobs are required to merge. The scripts handle BSD differences
+  like `flock` and `date`. Windows (Git Bash / WSL) is untested in CI.
 
 ## How it works
 
-Seven hooks drive it, wired up by either install mode (the plugin ships
-them in `hooks/hooks.json`; the bare-scripts installer patches them
-into `~/.claude/settings.json`):
+Seven hooks drive it, written by the installer into the project's
+`.claude/settings.json` (or `~/.claude/settings.json` for a user-scope
+install):
 `SessionStart` loads the latest handoff into a new session,
 `SessionEnd` and `PreCompact` write a mechanical git-state safety net
 before an ending or a compaction, `Stop` appends each turn to a
@@ -251,24 +219,17 @@ environment variable) and
 
 ## Updating, doctor, uninstall
 
-This section covers the **bare-scripts install**. Symlink install
-means updating is just `git pull` in the clone — live next session, no
+Symlink install means updating is just `git pull` in the clone (live next session, no
 re-install (re-run `./install.sh` only when
 [`CHANGELOG.md`](CHANGELOG.md) says a hook changed). Run
 `./install.sh --doctor` anytime to confirm every installed hook still
-resolves (and to check for a plugin install running alongside it — see
-[Dual-mode warning](#dual-mode-warning)). `./install.sh --uninstall`
+resolves (add `--scope project --project <dir>` to check a project's
+wiring; it also warns when the user file and a project file both carry
+the hooks). `./install.sh --uninstall`
 removes the symlinks, strips only the entries it can prove are its own
 from settings.json (backup first), and deletes the per-machine HMAC
 secret — details in
 [docs/reference.md](docs/reference.md#uninstall-details).
-
-Plugin installs update and uninstall through Claude Code's own plugin
-management (`/plugin` in-session) instead — there's no `git pull` or
-`install.sh` step for that mode. For a per-project install, name the
-same scope the plugin was installed at, for example
-`claude plugin uninstall claude-code-handoff@claude-code-handoff --scope project`
-(or `--scope local`); a user-scope install uses `--scope user`.
 
 Installing from a volatile path (`/tmp`, CI scratch) auto-switches to
 copy mode; `--copy` / `--link` force it, and `--model 'opus[1m]'` pins

@@ -39,8 +39,8 @@ do_uninstall() {  # [ENV=VAL ...]
   # -u and win.
   OUT="$(env -u HANDOFF_SECRET_FILE CLAUDE_HOME="$HOME_DIR" "$@" bash "$SRC_DIR/install.sh" --uninstall 2>&1)"
 }
-# Same as do_uninstall, but also passes --keep-secret (issue #65: switching
-# from bare-scripts to the plugin must not silently unbind already-signed
+# Same as do_uninstall, but also passes --keep-secret (issue #65: an
+# uninstall followed by a reinstall must not silently unbind already-signed
 # handoffs by deleting the per-machine HMAC secret out from under them).
 do_uninstall_keep_secret() {
   OUT="$(env -u HANDOFF_SECRET_FILE CLAUDE_HOME="$HOME_DIR" bash "$SRC_DIR/install.sh" --uninstall --keep-secret 2>&1)"
@@ -67,7 +67,7 @@ do_uninstall
 check "no-newline secret -> removed"  no "$([ -e "$HOME_DIR/handoff_secret" ] && echo yes || echo no)"
 cleanup
 
-# === --keep-secret (issue #65): migration to the plugin must not silently ===
+# === --keep-secret (issue #65): an uninstall before a reinstall must not ===
 # === unbind already-signed handoffs by deleting the shared HMAC secret ======
 
 # --- --keep-secret: OURS survives, with content and permissions intact ------

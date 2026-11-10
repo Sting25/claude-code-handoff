@@ -40,8 +40,8 @@ set -euo pipefail
 # root resolution below because the payload's "cwd" feeds the resolver.
 # --- Bounded stdin read (issue #160). Canonical copy: read_hook_payload() in
 # bin/write_handoff.sh (rationale there); tests/test_stdin_readers_bounded.sh
-# diffs this copy against it. Duplicated, not sourced, because the plugin
-# (${CLAUDE_PLUGIN_ROOT}/bin) and install.sh ($HOME/.claude/bin) layouts differ
+# diffs this copy against it. Duplicated, not sourced, so each hook stays a
+# single self-contained file in $HOME/.claude/bin with nothing to source
 # and this hook must stay dependency-light. Waits HANDOFF_STDIN_TIMEOUT whole
 # seconds (default 2, min 1) for a first line, then drains to EOF; a closed
 # pipe returns EOF at once.
@@ -387,15 +387,6 @@ if [ -n "$prov_dir" ] && [ -f "$prov_dir/handoff_provenance.sh" ]; then
   . "$prov_dir/handoff_provenance.sh"
 fi
 
-# Self-prune stale cached versions of THIS plugin (bin/handoff_cache_prune.sh).
-# Independent of repo/root resolution above (it operates on the global plugin
-# cache, not this project's .claude/), so it runs before that resolution and
-# on every fire of this hook, plugin install or not: the shape guard inside
-# the script itself is what makes it a no-op everywhere except a real plugin
-# cache install. `|| true`: must never be able to fail this hook.
-if [ -n "$prov_dir" ] && [ -f "$prov_dir/handoff_cache_prune.sh" ]; then
-  bash "$prov_dir/handoff_cache_prune.sh" 2>/dev/null || true
-fi
 if type handoff_resolve_root >/dev/null 2>&1; then
   handoff_resolve_root "$hook_cwd"
   repo="$HANDOFF_ROOT"
@@ -858,25 +849,14 @@ fi
 # here. Cheap (three path tests), and silent unless something is actually
 # broken. Runs before the no-handoff exit below so a fresh repo still warns.
 # (issue #21)
-# Mode-aware (issue #71): the check above was written for a bare-scripts
-# install, where these siblings are SYMLINKS back to a persistent clone and
-# "Re-run install.sh from your persistent clone" is correct remediation. In a
-# plugin install self_dir is the plugin's OWN cached bin/ — the siblings are
-# regular files, never symlinks — so the dangling-symlink branch can't fire
-# there at all (this check is inert in plugin mode) and, worse, its
-# remediation is the dual-mode trap (#64): a plugin user has no persistent
-# clone to re-run install.sh from. Detect the shape cheaply from self_dir's
-# own path (matches install.sh's plugin-cache layout,
-# .../plugins/cache/<marketplace>/claude-code-handoff/<version>/bin) rather
-# than adding a dependency, and give each shape its own remediation. Also
-# extended (cheap, jq-free, same three-path-test budget) to catch the
-# plugin-mode failure this check previously could not see at all: a sibling
-# simply MISSING (not a dangling link — a corrupted/partial cache
-# extraction), which is exactly the shape a plugin install fails in.
+# Two shapes (issue #71): a sibling that is a dangling symlink (the scripts
+# were symlinked from a clone that later moved or got cleaned up) and a
+# sibling that is simply MISSING (a partial copy or a hand-deleted file).
+# Both have the same remediation: re-run install.sh from a persistent clone.
 self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || self_dir=""
 if [ -n "$self_dir" ]; then
   broken=""   # dangling symlink (bare-scripts / clone-symlinked install)
-  missing=""  # plain missing file (plugin cache install: no symlinks here)
+  missing=""  # plain missing file (partial copy, hand-deleted script)
   for sib in write_handoff.sh handoff_turn_append.sh handoff_ctx_check.sh; do
     if [ -L "$self_dir/$sib" ] && [ ! -e "$self_dir/$sib" ]; then
       broken="$broken $sib"
@@ -884,35 +864,18 @@ if [ -n "$self_dir" ]; then
       missing="$missing $sib"
     fi
   done
-  plugin_remedy=0
-  case "$self_dir" in
-    */plugins/cache/*) plugin_remedy=1 ;;
-  esac
   if [ -n "$broken" ]; then
     echo "⚠️  handoff: dangling hook link(s):$broken"
     echo "    Those hooks are silently disabled (handoffs may not be written)."
-    if [ "$plugin_remedy" = "1" ]; then
-      echo "    This looks like a plugin install: reinstall it (/plugin uninstall"
-      echo "    claude-code-handoff, then /plugin install again), or diagnose from"
-      echo "    a clone with: bash <clone>/install.sh --doctor"
-    else
-      echo "    Re-run install.sh from your persistent clone, or diagnose with:"
-      echo "    bash <clone>/install.sh --doctor"
-    fi
+    echo "    Re-run install.sh from your persistent clone, or diagnose with:"
+    echo "    bash <clone>/install.sh --doctor"
     echo
   fi
   if [ -n "$missing" ]; then
     echo "⚠️  handoff: missing hook script(s):$missing"
     echo "    Those hooks are silently disabled (handoffs may not be written)."
-    if [ "$plugin_remedy" = "1" ]; then
-      echo "    The plugin's cached copy looks corrupted or partially extracted."
-      echo "    Reinstall it (/plugin uninstall claude-code-handoff, then"
-      echo "    /plugin install again), or diagnose from a clone with:"
-      echo "    bash <clone>/install.sh --doctor"
-    else
-      echo "    Re-run install.sh from your persistent clone, or diagnose with:"
-      echo "    bash <clone>/install.sh --doctor"
-    fi
+    echo "    Re-run install.sh from your persistent clone, or diagnose with:"
+    echo "    bash <clone>/install.sh --doctor"
     echo
   fi
 fi
@@ -1345,7 +1308,7 @@ if [ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ] && [ "$inherited" = "0" ]; then
       # mid-session.
       ss_flag="$hb/.ss_health_${ss_sid}"
       if [ ! -f "$ss_flag" ] && [ ! -L "$ss_flag" ]; then
-        echo "⚠️  handoff: the Stop hook does not appear to have run last session — no .ctx_tokens_/.ctx_model_/.ctx_ sidecar or handoff_raw_ dump was recorded for it in .claude/handoff_backups/. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone, or the plugin's doctor command if you installed via /plugin install."
+        echo "⚠️  handoff: the Stop hook does not appear to have run last session: no .ctx_tokens_/.ctx_model_/.ctx_ sidecar or handoff_raw_ dump was recorded for it in .claude/handoff_backups/. Likely causes, in order: jq not on PATH, hooks not registered or not dispatching, a symlinked .claude or handoff_backups directory, or a transcript_path the hook could not read. Run the doctor to check: ./install.sh --doctor from a clone."
         echo
         : > "$ss_flag" 2>/dev/null || true
       fi

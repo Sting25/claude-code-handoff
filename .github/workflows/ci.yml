@@ -13,10 +13,10 @@ on:
     branches: [main]
     # ALL tags, not 'v*': a mistyped tag (0.15.0, release-1) used to trigger
     # no CI at all — zero validation, silently. Now every tag runs the suite
-    # and plugin-version-sync rejects any tag that isn't vX.Y.Z == VERSION.
+    # and the version-sync job rejects any tag that isn't vX.Y.Z == VERSION.
     tags: ['**']
 
-# Least-privilege token for every job (lint.yml pins the same). All steps
+# Least-privilege token for every job. All steps
 # are plain shell + first-party checkout; nothing needs write access, and a
 # future step addition shouldn't inherit one by default.
 permissions:
@@ -82,33 +82,22 @@ jobs:
           shellcheck bin/*.sh tests/*.sh tools/build-install.sh install.sh
 
   # v0.14.0: flags the missed-tag/missing-version failure mode. VERSION is
-  # the single source of truth; plugin.json's own "version" field is only
-  # free-standing JSON, so nothing stops it drifting from VERSION on a normal
-  # commit. On a release tag the check goes further: the tag itself must
-  # match VERSION, and CHANGELOG.md must already document the release — a
-  # tag pushed without either is exactly how a "shipped" version ends up
-  # undocumented or mismatched with what the plugin manifest advertises.
-  plugin-version-sync:
-    name: plugin version sync — required
+  # the single source of truth. On a release tag the tag itself must match
+  # VERSION, and CHANGELOG.md must already document the release: a tag
+  # pushed without either is exactly how a "shipped" version ends up
+  # undocumented or mismatched. Branch protection matches the display
+  # name below, not the job id.
+  version-sync:
+    name: version sync (required)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Validate plugin manifests + VERSION sync
+      - name: Validate VERSION and release tag sync
         run: |
           set -euo pipefail
 
           version="$(tr -d '[:space:]' < VERSION)"
           echo "VERSION file: $version"
-
-          for f in .claude-plugin/plugin.json hooks/hooks.json .claude-plugin/marketplace.json; do
-            jq . "$f" >/dev/null || { echo "::error::$f does not parse as JSON"; exit 1; }
-          done
-
-          plugin_version="$(jq -r '.version' .claude-plugin/plugin.json)"
-          if [[ "$plugin_version" != "$version" ]]; then
-            echo "::error::.claude-plugin/plugin.json version ($plugin_version) != VERSION ($version)"
-            exit 1
-          fi
 
           # Tag builds: refs/tags/vX.Y.Z must match VERSION, and CHANGELOG.md
           # must carry the matching "## [X.Y.Z]" heading; any other tag shape
@@ -234,8 +223,8 @@ jobs:
 
   # #108: version bumps travel only in release commits. The real incident:
   # PR #99 merged a VERSION bump to main with no tag and no GitHub release,
-  # and marketplace installs (which track main) picked up an unreleased
-  # version. plugin-version-sync above audits tag pushes after the fact;
+  # and installs tracking main picked up an unreleased version. The
+  # version-sync job above audits tag pushes after the fact;
   # this is the preventive PR-time half, keyed off the release/* branch
   # convention this repo already uses. PRs only: pushes have no head ref.
   version-freeze:
@@ -246,7 +235,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - name: Fail if VERSION or plugin.json version changed outside release/*
+      - name: Fail if VERSION changed outside release/*
         env:
           HEAD_REF: ${{ github.head_ref }}
           BASE_REF: ${{ github.base_ref }}
@@ -264,37 +253,4 @@ jobs:
             echo "::error file=VERSION::VERSION changed outside a release/* PR; version bumps travel only in release PRs (see #108)"
             exit 1
           fi
-          old_v="$(git show "$base:.claude-plugin/plugin.json" | jq -r '.version')"
-          new_v="$(jq -r '.version' .claude-plugin/plugin.json)"
-          if [ "$old_v" != "$new_v" ]; then
-            echo "::error file=.claude-plugin/plugin.json::plugin.json version changed ($old_v -> $new_v) outside a release/* PR (see #108)"
-            exit 1
-          fi
           echo "no version changes on non-release branch $HEAD_REF"
-
-  # #107: validate both manifests with the marketplace's own validator.
-  # Two passes because the validator, pointed at a directory holding both
-  # manifests, silently auto-picks marketplace.json only; the plugin
-  # manifest must be validated from a copy without marketplace.json
-  # (verified: a plugin.json stripped of a required field fails pass 2
-  # with exit 1, so this is not re-validating the marketplace twice).
-  # Deliberately UNPINNED (@latest), unlike everything else in CI: the
-  # point is to hear when the CURRENT validator starts rejecting these
-  # manifests, so tracking the live validator is the feature, not drift.
-  # If a validator release goes red on an unchanged tree, that is real
-  # information about what the marketplace now enforces.
-  plugin-validate:
-    name: plugin validate --strict (both manifests)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Two-pass claude plugin validate --strict
-        run: |
-          set -euo pipefail
-          echo "pass 1: marketplace.json (validator auto-picks it)"
-          npx --yes @anthropic-ai/claude-code@latest plugin validate --strict .
-          echo "pass 2: plugin.json (from a copy without marketplace.json)"
-          workdir="$(mktemp -d)"
-          cp -R . "$workdir/repo"
-          rm -f "$workdir/repo/.claude-plugin/marketplace.json"
-          npx --yes @anthropic-ai/claude-code@latest plugin validate --strict "$workdir/repo"
