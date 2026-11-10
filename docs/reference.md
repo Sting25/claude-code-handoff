@@ -1102,7 +1102,7 @@ are kept, the last as the empty skeleton. If the record cannot be written,
 the install warns and the uninstall leaves the skeleton. The same applies
 to the `<project>/.claude/` directory: when the install created it, the
 uninstall removes it again (never recursively) once it is empty and is
-still the directory the install made (same inode and birth time). The
+still the directory the install made (same inode and birth time, to the nanosecond where the filesystem records it). The
 records are trusted only when the backup directory's `path` file names
 the project, since two paths can share a cksum key. An install refuses a
 dangling `.claude` link, or a settings file linked into a directory that

@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 428235f412e3cc92be8aff1b3a536faf7352491721e57f2ef173d3d27c641e35
+# SOURCE-SHA256: e6fa2faad689e1d3a8aba5f7c206055bd25b7a8b4393073d4225bc6729203469
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1442,13 +1442,16 @@ remove_created_settings_if_empty() {
 # directory the user removed and recreated at the same path is not ours.
 # Best effort, like the file marker.
 claude_dir_marker() { printf '%s\n' "$project_backup_dir/claude_dir.mkdir"; }
-# Identity of a directory: inode plus birth time (GNU %W, BSD %B), so an
-# inode number the filesystem reuses after `rm -rf; mkdir` still differs
-# where birth time is recorded. GNU first, BSD fallback (the repo idiom, #92).
-# Empty when stat cannot read it.
+# Identity of a directory: inode plus birth time with nanoseconds (GNU %w,
+# BSD %FB). ext4 reuses a freed inode number at once, and a seconds-only
+# birth time is the same for an `rm -rf; mkdir` in the same second (measured
+# on the ubuntu CI runner), so the fractional part is what tells them apart.
+# A filesystem without birth times prints "-" (GNU) and falls back to the
+# inode alone. GNU first, BSD fallback (the repo idiom, #92). Empty when stat
+# cannot read it.
 claude_dir_id() {
   [[ -d "$1" && ! -L "$1" ]] || return 0
-  stat -c '%i %W' "$1" 2>/dev/null || stat -f '%i %B' "$1" 2>/dev/null || true
+  stat -c '%i %w' "$1" 2>/dev/null || stat -f '%i %FB' "$1" 2>/dev/null || true
 }
 record_created_claude_dir() {  # <the directory this run created>
   [[ "$scope" == project ]] || return 0
