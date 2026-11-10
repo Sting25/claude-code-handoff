@@ -605,8 +605,8 @@ fi
 # O_CREAT|O_EXCL open performed by the shell itself, so it has exactly one
 # winner whatever coreutils is installed (measured 0 of 1000 double-successes
 # on bash 3.2). A loser must leave the directory alone, it is the winner's,
-# and report a miss. The token holds the owner's pid for diagnosis only;
-# nothing reads it back.
+# and report a miss. The token holds the owner's pid, which
+# release_mkdir_lock reads back as the proof that a token is its own (#170).
 claim_mkdir_lock() {  # <lock_dir>; 0 = this process owns the lock
   ( set -o noclobber; printf '%s\n' "$$" > "$1/owner" ) 2>/dev/null
 }
@@ -616,14 +616,62 @@ claim_mkdir_lock() {  # <lock_dir>; 0 = this process owns the lock
 # repo meanwhile. Never through a symlink (the lock dir is ours, but stay
 # consistent with the acquisition guard).
 release_mkdir_lock() {  # <lock_dir>
-  [[ -L "$1" ]] && return 0
-  rm -f "$1/owner" 2>/dev/null || true
-  rmdir "$1" 2>/dev/null && return 0
-  # Still there: a stale reclaimer may hold a capture of our token
-  # (owner.reap.*, see the reclaim below). Remove captures and retry, so the
-  # lock is freed now and the reclaimer finds nothing to hand back.
-  rm -f "$1"/owner.reap.* 2>/dev/null || true
-  rmdir "$1" 2>/dev/null || true
+  local lock_dir="$1" tok f pass removed
+  [[ -L "$lock_dir" ]] && return 0
+  # Release removes only OUR OWN token (#170). The token holds the owner's
+  # pid and this process's $$ is the proof of ownership: a token with any
+  # other content belongs to a later owner and is never touched, so a late
+  # release cannot free a lock that changed hands. A plain unconditional rm
+  # (the old behaviour, or a second one without the check) would delete a
+  # legitimate late claimant's token and let the next acquirer run beside it.
+  # Why read-then-rm and not "rename the token aside, verify, put it back"
+  # (the alternative #170 floated): that would move ANOTHER holder's token
+  # whenever a non-owner releases, and this design never touches a token that
+  # is not ours (the rename also bumps the dir mtime and empties owner under
+  # the reclaim guards, which are written for reclaimers, not for releases).
+  # Residual: the read and the rm are two steps, so a whole reclaim (capture,
+  # remove, claim) landing between them would have us remove its new token.
+  # That needs a stale-aged lock whose holder is still alive and releasing,
+  # and it is the same window the rest of this design accepts.
+  # Loop: each pass removes our own token if it is at owner, tries rmdir,
+  # and if that fails sweeps our own owner.reap.* captures (a stale reclaimer
+  # holds one while it decides whether to hand the token back). A reclaimer
+  # can hand the token back, or a second reclaimer can capture the
+  # handed-back token, after any step, so one fixed sweep is not enough: it
+  # repeats until rmdir succeeds or a pass finds nothing of ours, and then
+  # looks at owner once more, because a hand-back can land between the
+  # owner check and the capture sweep of the same pass. What is guaranteed:
+  # we never remove an entry that is not ours, and a chain of hand-backs and
+  # re-captures, one per pass, ends with the lock freed. The remaining gap is
+  # a hand-back AND a fresh capture both landing inside one pass; that leaves
+  # a token of ours in the dir until the staleness window. The cap keeps a
+  # wedged dir from spinning; on hitting it the release says so on stderr and
+  # returns 0 (callers run it as a bare statement under set -e and it has
+  # never been allowed to fail), leaving the lock to the staleness window.
+  for (( pass = 0; pass < 16; pass++ )); do
+    removed=0
+    if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then
+      tok=""; read -r tok < "$lock_dir/owner" 2>/dev/null || true
+      if [[ "$tok" == "$$" ]]; then rm -f "$lock_dir/owner" 2>/dev/null && removed=1; fi
+    fi
+    rmdir "$lock_dir" 2>/dev/null && return 0
+    for f in "$lock_dir"/owner.reap.*; do
+      [[ -f "$f" && ! -L "$f" ]] || continue
+      tok=""; read -r tok < "$f" 2>/dev/null || true
+      if [[ "$tok" == "$$" ]]; then rm -f "$f" 2>/dev/null && removed=1; fi
+    done
+    if (( ! removed )); then
+      # Nothing found by the two looks above; one more look at owner, since a
+      # hand-back can have landed in between.
+      if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then
+        tok=""; read -r tok < "$lock_dir/owner" 2>/dev/null || true
+        [[ "$tok" == "$$" ]] && continue
+      fi
+      return 0
+    fi
+  done
+  echo "handoff lock: release gave up after 16 passes; leaving $lock_dir to the staleness window." >&2
+  return 0
 }
 # Stale reclaim, single winner (#155). Shared idiom with handoff_turn_append.sh's
 # ta_reclaim_stale_lock (keep the two bodies in sync). Returns 0 with the lock
@@ -662,8 +710,8 @@ release_mkdir_lock() {  # <lock_dir>
 # never removed or recreated on this path, so there is no mkdir window and no
 # second mkdir to race.
 # Orphans: a kill between capture and removal leaves an owner.reap.* entry in
-# the dir. The release removes captures when its rmdir fails (a holder's dir
-# can only hold captures of its own token), and the reclaim winner sweeps
+# the dir. The release removes the captures of its own token (matched by pid)
+# when its rmdir fails, and the reclaim winner sweeps
 # every owner.reap.* entry older than the window (a live reclaimer's capture
 # of a fresh token is fresh, so it is never swept from under it).
 reclaim_stale_mkdir_lock() {  # <lock_dir>
@@ -2066,7 +2114,7 @@ elif (( IF_CURATED )); then
   # cleanup trap) — but SAY SO, and print nothing on stdout.
   #
   # The silent version of this skip could void the safety net outright. The
-  # lock dir records only its owner's pid, which nothing reaps, so a writer that took a
+  # lock dir records only its owner's pid (a release removes only a token carrying its own), so a writer that took a
   # SIGKILL, met the OOM killer, or lost the machine mid-sequence leaves one
   # behind with nothing to reap it; until it ages past
   # HANDOFF_LOCK_STALE_SECS (default 300s) EVERY SessionEnd and PreCompact

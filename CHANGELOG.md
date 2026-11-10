@@ -89,6 +89,7 @@ are appended).
   directory is now reclaimed instead of staying stuck forever. Applies to
   the write lock, the shared .gitignore lock and the per-session lock used
   where `flock` is missing (macOS).
+- A lock release now removes only its own ownership token (#170). The release used to delete whatever token sat in the lock directory, so a release that ran after the lock had changed hands could free it from under the new owner, and a stale reclaimer handing a token back during a release could leave a token with no live owner that blocked every safety-net write for up to five minutes. The release now removes the token only when it carries its own process id, and repeats (removing its own token, then its own leftover reclaim captures, then trying to remove the directory) until nothing of its own is left (a hand-back and a fresh capture landing inside a single pass can still leave a token until the staleness window), and says so on stderr if it gives up. Applies to the write lock, the shared .gitignore lock and the per-session lock used where `flock` is missing (macOS).
 
 ## [0.19.0] - 2026-11-03
 
