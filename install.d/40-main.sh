@@ -206,6 +206,17 @@ else
   # place, so a re-run of --uninstall finds everything it needs.
   echo "settings.json:"
   unpatch_settings
+  # A refused or unfinished strip (invalid JSON, no jq, #215/#208) leaves the
+  # hooks wired. Removing the bin/ links now would leave every one of them
+  # dangling and the exit code would call that success: stop before anything
+  # is removed, so a re-run after the fix can finish.
+  if (( uninstall_incomplete )); then
+    echo
+    echo "NOT done: $settings was not fully unpatched (see above). The bin/ links,"
+    echo "      skills and HMAC secret were kept so the hooks still wired there keep"
+    echo "      working; fix it and re-run ./install.sh --uninstall."
+    exit 1
+  fi
   echo
   echo "symlinks:"
   uninstall_symlinks
