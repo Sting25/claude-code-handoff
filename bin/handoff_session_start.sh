@@ -138,12 +138,40 @@ if [ "$ss_budget" -gt 0 ]; then
     printf '⚠️  handoff: could not create a temp buffer, so this output was not trimmed to the hook-output limit; if it arrives as a preview, read .claude/handoff_current.md directly.\n\n'
   fi
 fi
+# --- One-line form of a printed path (#206). Canonical copy: handoff_oneline
+# in bin/write_handoff.sh (rationale there); tests/test_session_start_path_oneline.sh
+# diffs this copy and bin/handoff_provenance.sh's against it. Duplicated, not
+# sourced, because the lib is optional here and the first print site runs
+# before it is sourced. A project, main-checkout or worktree path is chosen by
+# whoever names the directory, and this script's stdout is the model's
+# context: a newline in a raw path printed a forged "(provenance verified)"
+# heading and bare BIND marker lines there, and split the shrink record
+# below. Every path this script prints goes through it.
+handoff_oneline() {  # <text>
+  # Backslash is doubled by splitting on it, not by ${s//...}: bash 5.2's
+  # patsub_replacement collapses a \\ replacement back to one backslash, and
+  # bash 3.2 keeps the quotes of a quoted replacement literally (measured on
+  # ubuntu CI and macOS /bin/bash). LF and CR use ${s//...}, whose \n and \r
+  # replacements come through unchanged on both.
+  local s="$1" rest bs="\\" esc_bs="\\\\" nl=$'\n' cr=$'\r' esc_n='\n' esc_r='\r'
+  if [[ "$s" == *"$bs"* ]]; then
+    rest="$s"; s=""
+    while [[ "$rest" == *"$bs"* ]]; do
+      s="$s${rest%%"$bs"*}$esc_bs"
+      rest="${rest#*"$bs"}"
+    done
+    s="$s$rest"
+  fi
+  s="${s//$nl/$esc_n}"
+  s="${s//$cr/$esc_r}"
+  printf '%s' "$s"
+}
 # Region markers carry the per-run nonce: handoff content is attacker-
 # influenced (a cloned repo can plant it), and must not be able to forge or
 # close a region. Both are no-ops when not buffering, so no marker can leak.
 shrink_begin() {  # <priority: lower is trimmed first> <path of the full text>
   [ -n "$ss_buf" ] || return 0
-  printf '@@HANDOFF_SHRINK_BEGIN %s %s %s\n' "$ss_nonce" "$1" "$2"
+  printf '@@HANDOFF_SHRINK_BEGIN %s %s %s\n' "$ss_nonce" "$1" "$(handoff_oneline "$2")"
 }
 shrink_end() {
   [ -n "$ss_buf" ] || return 0
@@ -587,11 +615,11 @@ fi
 current_is_symlink=0
 if [ -L "$repo/.claude" ]; then
   current_is_symlink=1
-  echo "⚠️  handoff: $repo/.claude is a symlink — refusing to read through it (a cloned repo could point it at a directory outside the repo, so every file under it is attacker-chosen). Treating the handoff as absent; replace the symlink with a real directory to restore loading."
+  echo "⚠️  handoff: $(handoff_oneline "$repo")/.claude is a symlink; refusing to read through it (a cloned repo could point it at a directory outside the repo, so every file under it is attacker-chosen). Treating the handoff as absent; replace the symlink with a real directory to restore loading."
   echo
 elif [ -L "$current" ]; then
   current_is_symlink=1
-  echo "⚠️  handoff: $current is a symlink — refusing to read through it (a cloned repo could point it at a file outside the repo, e.g. a key or dotfile). Treating the handoff as absent; replace the symlink with a regular file to restore loading."
+  echo "⚠️  handoff: $(handoff_oneline "$current") is a symlink; refusing to read through it (a cloned repo could point it at a file outside the repo, e.g. a key or dotfile). Treating the handoff as absent; replace the symlink with a regular file to restore loading."
   echo
 fi
 
@@ -694,12 +722,12 @@ emit_worktree_handoffs() {  # [print the data caveat first if "1"]
       ts="${base%%__*}"; wt="${base#*__}"; br="${wt#*__}"; wt="${wt%%__*}"
       # shellcheck disable=SC2016  # the backticks are literal Markdown
       printf -- '- Session in worktree `%s` (branch `%s`) handed off at %s %s:%s:%s: read `%s`\n' \
-        "$wt" "$br" "${ts:0:10}" "${ts:11:2}" "${ts:13:2}" "${ts:15:2}" "$f"
+        "$wt" "$br" "${ts:0:10}" "${ts:11:2}" "${ts:13:2}" "${ts:15:2}" "$(handoff_oneline "$f")"
     done <<EOF_WT
 $copies
 EOF_WT
     if [ "$total" -gt "$wt_list_max" ]; then
-      echo "- ...and $((total - wt_list_max)) older ones in \`$repo/$HANDOFF_WT_COPY_RELDIR/\`"
+      echo "- ...and $((total - wt_list_max)) older ones in \`$(handoff_oneline "$repo")/$HANDOFF_WT_COPY_RELDIR/\`"
     fi
   fi
   if [ -n "$raws" ]; then
@@ -715,12 +743,12 @@ EOF_WT
       sid="${br#*__}"; br="${br%%__*}"
       # shellcheck disable=SC2016  # the backticks are literal Markdown
       printf -- '- Uncurated session `%s...` in worktree `%s` (branch `%s`) last wrote at %s %s:%s:%s: raw per-turn dump at `%s` (reference data; /handoff-recover can compose notes from it)\n' \
-        "$sid" "$wt" "$br" "${ts:0:10}" "${ts:11:2}" "${ts:13:2}" "${ts:15:2}" "$f"
+        "$sid" "$wt" "$br" "${ts:0:10}" "${ts:11:2}" "${ts:13:2}" "${ts:15:2}" "$(handoff_oneline "$f")"
     done <<EOF_WR
 $raws
 EOF_WR
     if [ "$total" -gt "$wt_list_max" ]; then
-      echo "- ...and $((total - wt_list_max)) older raw dumps in \`$repo/$HANDOFF_WT_COPY_RELDIR/\`"
+      echo "- ...and $((total - wt_list_max)) older raw dumps in \`$(handoff_oneline "$repo")/$HANDOFF_WT_COPY_RELDIR/\`"
     fi
   fi
   shrink_end
@@ -760,7 +788,7 @@ fi
 if [ -n "$inherit_main" ] && [ "$current_is_symlink" = "0" ] && [ ! -e "$current" ]; then
   main_doc="$inherit_main/.claude/handoff_current.md"
   if [ -L "$inherit_main/.claude" ] || [ -L "$main_doc" ]; then
-    echo "⚠️  handoff: the main checkout's $main_doc is a symlink (or sits under a symlinked .claude/); refusing to inherit it, for the same reason this worktree's own handoff would be refused."
+    echo "⚠️  handoff: the main checkout's $(handoff_oneline "$main_doc") is a symlink (or sits under a symlinked .claude/); refusing to inherit it, for the same reason this worktree's own handoff would be refused."
     echo
   elif [ -f "$main_doc" ]; then
     inherited=1
@@ -1040,7 +1068,7 @@ handoff_newest_raw_dump() {  # <backup_dir> <exclude_session_id>
 # Advisory only — the next writer reclaims a stale lock on its own, and this
 # must never block loading.
 if [ -d "$repo/.claude/.handoff_write.lock" ]; then
-  echo "⚠️  handoff: a write lock is left over at .claude/.handoff_write.lock: a previous writer was killed before it could release it. Until it ages out (HANDOFF_LOCK_STALE_SECS, default 300s), SessionEnd/PreCompact safety-net writes in this repo are being SKIPPED, so the handoff can go stale without any sign. If no writer is running now: rm -rf '$repo/.claude/.handoff_write.lock'"
+  echo "⚠️  handoff: a write lock is left over at .claude/.handoff_write.lock: a previous writer was killed before it could release it. Until it ages out (HANDOFF_LOCK_STALE_SECS, default 300s), SessionEnd/PreCompact safety-net writes in this repo are being SKIPPED, so the handoff can go stale without any sign. If no writer is running now: rm -rf '$(handoff_oneline "$repo")/.claude/.handoff_write.lock'"
   echo
 fi
 
@@ -1054,7 +1082,7 @@ fi
 # behaviour below, with the corrupted main doc left for a main-checkout
 # session to deal with.
 if [ "$inherited" = "1" ] && [ -n "$current_corrupt_reason" ]; then
-  echo "ℹ️ handoff: the main checkout's handoff ($current) looks corrupted ($current_corrupt_reason); not inheriting it. A session in the main checkout will offer to rebuild it."
+  echo "ℹ️ handoff: the main checkout's handoff ($(handoff_oneline "$current")) looks corrupted ($current_corrupt_reason); not inheriting it. A session in the main checkout will offer to rebuild it."
   echo
   inherited=0
   current="$wt_current"
@@ -1080,10 +1108,10 @@ if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ] || [ -n "$current_corr
 
   if [ -n "$current_corrupt_reason" ]; then
     reason_text="corrupted ($current_corrupt_reason)"
-    echo "⚠️  handoff: $current is present but looks corrupted ($current_corrupt_reason), attempting an automatic best-effort rebuild from .claude/handoff_history/ and .claude/handoff_backups/ instead of loading it (run /handoff-more or /handoff-recover to inspect what exists)."
+    echo "⚠️  handoff: $(handoff_oneline "$current") is present but looks corrupted ($current_corrupt_reason), attempting an automatic best-effort rebuild from .claude/handoff_history/ and .claude/handoff_backups/ instead of loading it (run /handoff-more or /handoff-recover to inspect what exists)."
   else
     reason_text="missing"
-    echo "⚠️  handoff: no handoff to load at $current, but this project has prior handoff artifacts (.claude/handoff_history/ or .claude/handoff_backups/), so one may have been expected. Attempting an automatic best-effort rebuild (run /handoff-more or /handoff-recover to inspect what exists)."
+    echo "⚠️  handoff: no handoff to load at $(handoff_oneline "$current"), but this project has prior handoff artifacts (.claude/handoff_history/ or .claude/handoff_backups/), so one may have been expected. Attempting an automatic best-effort rebuild (run /handoff-more or /handoff-recover to inspect what exists)."
   fi
   echo
   emit_worktree_handoffs 1
@@ -1130,7 +1158,7 @@ if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ] || [ -n "$current_corr
       echo
     fi
     if [ -n "$rebuild_dump" ]; then
-      echo "### Source: newest handoff_backups/ raw per-turn dump (\`$(basename "$rebuild_dump")\`)"
+      echo "### Source: newest handoff_backups/ raw per-turn dump (\`$(handoff_oneline "$(basename "$rebuild_dump")")\`)"
       echo
       emit_untrusted "$rebuild_dump" 1
       echo
@@ -1334,7 +1362,7 @@ fi
 # recorded root is this worktree was written by a session here and behaves
 # exactly as before, banner included.
 if [ "$inherited" = "1" ]; then
-  echo "ℹ️ handoff: this worktree has no handoff yet; loading the main checkout's handoff as inherited context: $current"
+  echo "ℹ️ handoff: this worktree has no handoff yet; loading the main checkout's handoff as inherited context: $(handoff_oneline "$current")"
   echo
 fi
 recorded_root="$(LC_ALL=C sed -nE 's/^<!-- HANDOFF_ROOT: (.*) in_git=[01] -->[[:space:]]*$/\1/p' "$current" 2>/dev/null | head -n 1 || true)"
@@ -1350,17 +1378,17 @@ if [ -n "$recorded_root" ]; then
     # The inherited doc is expected to record the main checkout; anything
     # else means the MAIN checkout's doc was moved or copied in.
     if [ "$recorded_phys" != "$main_phys" ]; then
-      echo "⚠️  handoff: this doc was written for '$recorded_root' but is loading at '$inherit_main' (the main checkout of this worktree): likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
+      echo "⚠️  handoff: this doc was written for '$(handoff_oneline "$recorded_root")' but is loading at '$(handoff_oneline "$inherit_main")' (the main checkout of this worktree): likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
       echo
     fi
   elif [ -n "$main_phys" ] && [ "$recorded_phys" = "$main_phys" ] \
        && [ "$recorded_phys" != "$repo_phys" ]; then
     inherited=1
     fallback_history_dir="$inherit_main/.claude/handoff_history"
-    echo "ℹ️ handoff: this handoff was inherited from the main checkout ($inherit_main); it was copied into this worktree"
+    echo "ℹ️ handoff: this handoff was inherited from the main checkout ($(handoff_oneline "$inherit_main")); it was copied into this worktree"
     echo
   elif [ "$recorded_phys" != "$repo_phys" ]; then
-    echo "⚠️  handoff: this doc was written for '$recorded_root' but is loading at '$repo' — likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
+    echo "⚠️  handoff: this doc was written for '$(handoff_oneline "$recorded_root")' but is loading at '$(handoff_oneline "$repo")'; likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
     echo
   fi
 fi
@@ -1511,7 +1539,7 @@ if [ "$is_placeholder" = "1" ] \
     echo "## Also loaded: previous handoff (current one had no curated Notes)"
     echo
     if [ "$inherited" = "1" ]; then
-      echo "_From \`$prev\` (the main checkout's history): the most recent handoff with potentially curated prose._"
+      echo "_From \`$(handoff_oneline "$prev")\` (the main checkout's history): the most recent handoff with potentially curated prose._"
     else
       echo "_From \`$(basename "$prev")\`: the most recent handoff with potentially curated prose._"
     fi
