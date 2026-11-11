@@ -10,7 +10,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CC="$REPO_ROOT/bin/handoff_ctx_check.sh"
 command -v jq >/dev/null 2>&1 || { echo "health detector bounded scan"; skip "jq missing"; finish; exit; }
-echo "handoff_ctx_check.sh — health detector A bounded transcript scan (#179)"
+echo "handoff_ctx_check.sh: health detector A bounded transcript scan (#179)"
 
 repo="$(mk_repo)"; cleanup_on_exit "$repo"
 sid="BOUNDED179"
