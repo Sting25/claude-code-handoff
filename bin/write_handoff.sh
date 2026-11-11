@@ -195,10 +195,48 @@ fi
 # embedded-content injection handoff_sanitize_markers exists to close (it
 # already guards the pin body the same way, below): apply it here too
 # rather than trusting self_dir as inert.
+# #186: a name printed in the document's title and header lines goes on ONE
+# line. A newline in the project path (or the substrate name) would start a
+# new document line there, and a line that is exactly a BIND marker opens or
+# closes a rules region. A balanced BEGIN..END pair in the path therefore
+# planted its own region, which verified and loaded in the binding tier; only
+# an unbalanced payload failed the marker check and fell back to plain data.
+# Backslash becomes \\ first, then newline and carriage return become the
+# two-character escapes \n and \r, so the name stays recognizable and a
+# directory literally named `a\nb` does not read like an escaped newline.
+# The verify block uses handoff_shquote instead, because its lines must also
+# survive a paste into a shell.
+handoff_oneline() {  # <text>
+  # Backslash is doubled by splitting on it, not by ${s//...}: bash 5.2's
+  # patsub_replacement collapses a \\ replacement back to one backslash, and
+  # bash 3.2 keeps the quotes of a quoted replacement literally (measured on
+  # ubuntu CI and macOS /bin/bash). LF and CR use ${s//...}, whose \n and \r
+  # replacements come through unchanged on both.
+  local s="$1" rest bs="\\" esc_bs="\\\\" nl=$'\n' cr=$'\r' esc_n='\n' esc_r='\r'
+  if [[ "$s" == *"$bs"* ]]; then
+    rest="$s"; s=""
+    while [[ "$rest" == *"$bs"* ]]; do
+      s="$s${rest%%"$bs"*}$esc_bs"
+      rest="${rest#*"$bs"}"
+    done
+    s="$s$rest"
+  fi
+  s="${s//$nl/$esc_n}"
+  s="${s//$cr/$esc_r}"
+  printf '%s' "$s"
+}
 handoff_self_dir_safe="$self_dir"
 if [[ -n "$self_dir" ]] && type handoff_sanitize_markers >/dev/null 2>&1; then
   handoff_self_dir_safe="$(printf '%s' "$self_dir" | handoff_sanitize_markers)"
 fi
+# The marker defang above works on whole lines only, so any other line a
+# newline in self_dir starts (a second HANDOFF_WRITER or HANDOFF_ROOT record,
+# a heading) reached the signed preamble raw (#186 review: a planted WRITER
+# line was the LAST one, so handoff_parse_writer_marker read it and the
+# cross-session overwrite guard never fired). handoff_oneline then folds the
+# result onto one line. Defang first, so an exact marker line still reads as
+# defanged inside the folded text.
+handoff_self_dir_safe="$(handoff_oneline "$handoff_self_dir_safe")"
 handoff_bare_scripts_bin="${CLAUDE_HOME:-$HOME/.claude}/bin"
 if [[ -z "$self_dir" ]]; then
   handoff_mode_intro="Auto-written by write_handoff.sh (its own directory could not be
@@ -1754,16 +1792,22 @@ write_epoch="$(date +%s)"
 # Always wraps in single quotes (each ' becomes '\''), so spaces and shell
 # metacharacters survive a paste and non-ASCII bytes pass through unchanged
 # (bash 3.2's printf %q would turn them into octal escapes). A path holding a
-# newline falls back to printf %q, which emits a one-line $'...' form.
+# newline or a carriage return falls back to printf %q, which emits a one-line
+# $'...' form (#186: a raw CR inside the bound Verify block is a control byte
+# in the rules tier, and on some terminals rewrites the line it is on).
 handoff_shquote() {  # <path>
   # Replacement held in variables: the inline form quotes differently in bash 3.2 and 5.
   local sq="'" bs="\\" rep
   rep="$sq$bs$sq$sq"
   case "$1" in
-    *$'\n'*) printf '%q' "$1" ;;
+    *$'\n'*|*$'\r'*) printf '%q' "$1" ;;
     *) printf "'%s'" "${1//$sq/$rep}" ;;
   esac
 }
+
+# repo_name is printed only in the document (title and Repo heading), so it
+# is made one-line once here.
+repo_name="$(handoff_oneline "$repo_name")"
 
 git_short() { git -C "$1" rev-parse --short HEAD 2>/dev/null || echo "?"; }
 git_subj()  { git -C "$1" log -1 --pretty=%s 2>/dev/null || echo "?"; }
@@ -1861,7 +1905,18 @@ handoff_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")"
   # `git init` / arrived with a clone), instead of silently loading a doc
   # that describes some other tree. An inert HTML comment, covered by the
   # HMAC like every other line.
-  printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n' "$repo_root" "$in_git"
+  # #186: a root holding a newline or carriage return is not recorded. Raw,
+  # it would split this line (and could inject a marker line); escaped, the
+  # loader would read back a path that does not exist and warn of a moved
+  # project on every load. Absent is what the loader already treats as an
+  # older doc: no root check, no warning. Said once on stderr, since the
+  # loader's root checks are then off for this project.
+  case "$repo_root" in
+    *$'\n'*|*$'\r'*)
+      echo "write_handoff.sh: the project path contains a newline or carriage return; HANDOFF_ROOT is not recorded, so the loader's moved-project, in_git-flip and inherited-copy checks are off for this root." >&2
+      ;;
+    *) printf '<!-- HANDOFF_ROOT: %s in_git=%s -->\n' "$repo_root" "$in_git" ;;
+  esac
   # Writer marker (issue #63), read by the guard above on the NEXT write.
   # Right after HANDOFF_ROOT so it sits in the verbatim preamble both HMACs
   # cover. --restamp never regenerates the preamble, but since #132 it does
@@ -1947,8 +2002,9 @@ EOF
 
   snapshot_repo "$repo_root" "Repo: $repo_name"
 
+  substrate_label="$(handoff_oneline "$SUBSTRATE_NAME")"
   if [[ -n "$substrate_root" ]]; then
-    snapshot_repo "$substrate_root" "Substrate: $SUBSTRATE_NAME"
+    snapshot_repo "$substrate_root" "Substrate: $substrate_label"
   fi
 
   # In-flight markdown across configured paths in the main repo.
@@ -1980,14 +2036,14 @@ EOF
     for d in $SUBSTRATE_INFLIGHT_DIRS; do
       [[ -d "$substrate_root/$d" ]] || continue
       # shellcheck disable=SC2016  # backticks are literal markdown code spans in the output
-      printf '## In-flight (untracked or modified .md under `%s/%s/`)\n\n' "$SUBSTRATE_NAME" "$d"
+      printf '## In-flight (untracked or modified .md under `%s/%s/`)\n\n' "$substrate_label" "$d"
       found="$(list_inflight_md "$substrate_root" "$d/")"
       if [[ -z "$found" ]]; then
         printf '_none_\n\n'
       else
         while IFS= read -r f; do
           [[ -z "$f" ]] && continue
-          echo "- \`$SUBSTRATE_NAME/$f\`"
+          echo "- \`$substrate_label/$f\`"
         done <<< "$found"
         printf '\n'
       fi

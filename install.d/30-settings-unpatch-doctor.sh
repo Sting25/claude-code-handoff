@@ -1,8 +1,6 @@
 maybe_uninstall_hook() {
   local event="$1" marker="$2"
-  if ! jq -e --arg e "$event" --arg m "$marker" \
-         '(.hooks[$e] // []) | any(.. | .command? // "" | contains($m))' \
-         "$settings" >/dev/null 2>&1; then
+  if ! jq_probe "hook $event" --arg e "$event" --arg m "$marker" "$probe_hook" "$settings"; then
     echo "  ok      hook $event (not present)"
     return
   fi
@@ -23,8 +21,7 @@ maybe_uninstall_hook() {
 
 maybe_uninstall_perm() {
   local perm="$1"
-  if ! jq -e --arg p "$perm" '(.permissions.allow // []) | index($p)' \
-         "$settings" >/dev/null 2>&1; then
+  if ! jq_probe "permission $perm" --arg p "$perm" "$probe_perm" "$settings"; then
     echo "  ok      permission not present: $perm"
     return
   fi
@@ -42,9 +39,7 @@ maybe_uninstall_perm() {
 # the hook.
 migrate_legacy_ss_hook() {
   local marker="$ss_legacy_marker"
-  if ! jq -e --arg m "$marker" \
-         '(.hooks.SessionStart // []) | any(.. | .command? // "" | contains($m))' \
-         "$settings" >/dev/null 2>&1; then
+  if ! jq_probe "hook SessionStart" --arg e SessionStart --arg m "$marker" "$probe_hook" "$settings"; then
     return
   fi
   jq --arg m "$marker" '
@@ -181,8 +176,11 @@ project_key_claim() {
 }
 created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
 settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
-  [[ -f "$1" && ! -L "$1" ]] || return 0
-  cksum < "$1" 2>/dev/null | awk '{print $1 " " $2}'
+  # -r first: a failed `<` redirect is reported before 2>/dev/null applies
+  # and, under pipefail, used to abort the run with a bare "Permission
+  # denied" on a mode-000 file (#187).
+  [[ -f "$1" && ! -L "$1" && -r "$1" ]] || return 0
+  { cksum < "$1"; } 2>/dev/null | awk '{print $1 " " $2}'
 }
 # Fingerprint of the settings file before this run's patch touches it.
 pre_patch_fp=""
@@ -387,9 +385,33 @@ unpatch_settings() {
     echo "  ok      $settings is empty; nothing to strip"
     return
   fi
-  if ! jq -e . "$settings" >/dev/null 2>&1; then
-    echo "  ERROR   $settings is not valid JSON — refusing to edit (left untouched)."
-    uninstall_incomplete=1
+  local usable_rc=0
+  settings_usable "$settings" || usable_rc=$?
+  if [[ $usable_rc -eq 2 ]]; then
+    # jq failed before anything is known about the file (#187): not "nothing
+    # to strip", which would exit 0 with the hooks still wired. Nothing has
+    # been edited yet, so stop here; the bin/ links are still in place for
+    # the re-run (settings are unpatched before the links are removed).
+    echo "  ERROR   jq failed (exit $settings_usable_rc) while reading $settings; refusing to edit (left untouched)." >&2
+    echo "          Fix jq and re-run the same --uninstall command." >&2
+    exit 1
+  fi
+  if [[ $usable_rc -ne 0 ]]; then
+    if [[ ! -r "$settings" ]]; then
+      # Unknown content, so the hooks may still be wired: stop before the
+      # bin/ links go, as for a jq failure (an ERROR followed by exit 0 and
+      # removed links would leave every hook dangling).
+      echo "  ERROR   $settings cannot be read (check its permissions); refusing to edit (left untouched)." >&2
+      echo "          Fix the file and re-run the same --uninstall command." >&2
+      exit 1
+    elif jq empty "$settings" >/dev/null 2>&1; then
+      # Whitespace only, a non-object root, or several documents: there is
+      # no hooks object for this installer to have written, so nothing to strip.
+      echo "  ok      $settings is empty or not a JSON object; nothing to strip"
+    else
+      echo "  ERROR   $settings is not valid JSON; refusing to edit (left untouched)."
+      uninstall_incomplete=1
+    fi
     return
   fi
   take_settings_backup
@@ -496,7 +518,8 @@ rerun_cmd() {
       printf '%s\n' "./install.sh --scope project --project $(shq "$proj") --local"
       return 0
     fi
-    first="$(registry_scan wired | head -n 1 || true)"
+    registry_collect wired
+    first="${REGISTRY_OUT%%$'\n'*}"
     if [[ -n "$first" ]]; then
       rp="${first%%$'\t'*}"; rn="${first#*$'\t'}"
       if [[ "$rn" == settings.local.json ]]; then
@@ -519,7 +542,8 @@ rerun_remedy() {
   list=""
   if [[ "$scope" != project ]] && ! settings_has_our_hooks "$user_settings"; then
     proj="$(wiring_project_root)"
-    list="$(registry_scan wired)"
+    registry_collect wired
+    list="$REGISTRY_OUT"
     # The project the doctor runs in counts even when it is not registered.
     tab=$'\t'; nl=$'\n'
     for rn in settings.json settings.local.json; do
@@ -564,24 +588,99 @@ shq() {
   printf "'%s'" "$q"
 }
 
+# settings_usable <file>: 0 when <file> holds exactly one JSON document and
+# that document is an object; 1 when it does not (0 bytes, whitespace only,
+# invalid JSON, a non-object root such as [] 42 "x" null, two documents, a
+# file this process cannot read); 2 when jq itself failed, so nothing is
+# known about the file (settings_usable_rc then holds jq's exit code). Every
+# outcome is an answer, so callers never read an unusable file as a jq
+# failure, and never read a jq failure as an unusable file (#187). The
+# filter cannot fail on the file's content: the file is read raw (-R -s, one
+# string, so 0 bytes and whitespace are strings too, never "no valid
+# result") and parsed inside try/catch, so a parse error is the answer
+# `false` (exit 1), not an exit 2 that would look like a jq usage or system
+# error. With content ruled out as a cause, any exit above 1 is jq's own
+# failure, with no second probe needed to guess whose fault it was. The
+# readability check runs first in bash so a mode-000 file is a plain "not
+# usable" its callers can name, not a jq failure. Shared by
+# settings_has_our_hooks, unpatch_settings and the doctor's settings gate.
+settings_usable_rc=0
+settings_usable() {
+  local rc=0
+  settings_usable_rc=0
+  [[ -r "$1" ]] || return 1
+  jq -Rse 'try (fromjson | type == "object") catch false' "$1" >/dev/null 2>&1 || rc=$?
+  if [[ $rc -le 1 ]]; then return "$rc"; fi
+  settings_usable_rc=$rc
+  return 2
+}
+
 # settings_has_our_hooks <file>: 0 when <file> exists, parses, and wires at
 # least one of this installer's hook commands (the markers the patcher
 # writes). 1 otherwise, including when jq is missing.
+# Set to 1 by settings_has_our_hooks (and doctor's own reads) on a jq failure;
+# sh_jq_failed_file names the last file settings_has_our_hooks could not read.
+# wired() is total like probe_hook: every level is guarded (`objects`,
+# `strings`, `// empty`), so a string, number, boolean, null or array at
+# .hooks, .hooks.<event> or deeper is a plain "no", never a jq error that
+# would read as a jq failure (tests/test_install_jq_probes_187.sh, matrix).
+sh_jq_failed=0
+sh_jq_failed_file=""
+sh_jq_failed_why=""   # "jq failed" or "permission denied": what the WARN said
 settings_has_our_hooks() {
-  local f="$1"
+  local f="$1" rc=0
   [[ -f "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
+  # A file this process cannot read is unknown, not "not wired": this is the
+  # read the user-scope --uninstall registry scan relies on before it deletes
+  # the shared secret, and a mode-000 project file may well still be wired.
+  # Reported through sh_jq_failed like a jq failure, so every caller that
+  # acts on "not wired" stops the same way (the WARN names the real cause).
+  if [[ ! -r "$f" ]]; then
+    echo "  WARN    $f cannot be read (check its permissions);" >&2
+    echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+    sh_jq_failed=1
+    sh_jq_failed_file="$f"
+    sh_jq_failed_why="permission denied"
+    return 1
+  fi
+  # An unusable file (empty, unparseable, not an object) is a real "no"
+  # (settings_usable), not a jq failure. jq failing inside that check (2) is
+  # one, reported like a failure of the wiring read below, for the same
+  # reason: "unknown" must never collapse into "not wired".
+  settings_usable "$f" || rc=$?
+  if [[ $rc -eq 2 ]]; then
+    echo "  WARN    jq failed (exit $settings_usable_rc) while checking whether $f is a JSON object;" >&2
+    echo "          treating its wiring as unknown. Fix jq and re-run." >&2
+    sh_jq_failed=1
+    sh_jq_failed_file="$f"
+    sh_jq_failed_why="jq failed"
+    return 1
+  fi
+  [[ $rc -eq 0 ]] || return 1
+  # shellcheck disable=SC2016  # jq variables, bound by --arg
   jq -e --arg ss "$ss_marker" --arg se "$se_marker" --arg post "$post_marker" \
         --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" '
+      def wired($k; $m): [(.hooks? | objects | .[$k]?) // empty | ..
+        | objects | .command? | strings | select(contains($m))] | length > 0;
       type == "object" and (
-      ( (.hooks.SessionStart // [])     | any(.. | .command? // "" | contains($ss)) ) or
-      ( (.hooks.SessionEnd // [])       | any(.. | .command? // "" | contains($se)) ) or
-      ( (.hooks.PreCompact // [])       | any(.. | .command? // "" | contains($se)) ) or
-      ( (.hooks.PostCompact // [])      | any(.. | .command? // "" | contains($post)) ) or
-      ( (.hooks.WorktreeRemove // [])   | any(.. | .command? // "" | contains($wr)) ) or
-      ( (.hooks.Stop // [])             | any(.. | .command? // "" | contains($st)) ) or
-      ( (.hooks.UserPromptSubmit // []) | any(.. | .command? // "" | contains($up)) ) )
-    ' "$f" >/dev/null 2>&1
+        wired("SessionStart"; $ss) or wired("SessionEnd"; $se)
+        or wired("PreCompact"; $se) or wired("PostCompact"; $post)
+        or wired("WorktreeRemove"; $wr) or wired("Stop"; $st)
+        or wired("UserPromptSubmit"; $up) )
+    ' "$f" >/dev/null 2>&1 || rc=$?
+  if [[ $rc -gt 1 ]]; then
+    # A jq failure on parseable JSON is not "not wired" (#187). The callers
+    # take 0/1, so say it loudly here and record it: doctor exits non-zero,
+    # install aborts before registering.
+    echo "  WARN    jq failed (exit $rc) while checking whether $f wires handoff hooks;" >&2
+    echo "          treating it as unknown. Fix jq and re-run." >&2
+    sh_jq_failed=1
+    sh_jq_failed_file="$f"
+    sh_jq_failed_why="jq failed"
+    return 1
+  fi
+  return "$rc"
 }
 
 # Physical path of a settings file (symlinks resolved, directory made
@@ -633,8 +732,14 @@ report_wiring() {
   if [[ -n "$pl" && "$pl" != "$pu" && "$pl" != "$ps" ]] && settings_has_our_hooks "$pl"; then lw=1; fi
   if (( u )) && { [[ "$scope" == project ]] || (( sw || lw )); }; then user_issue=1; fi
   if (( sw && lw )); then dup_issue=1; fi
-  (( user_issue || dup_issue )) || return 0
   if [[ "$label" == NOTE ]]; then p1="NOTE: "; pc="      "; else p1="  WARN    "; pc="          "; fi
+  if (( ! user_issue && ! dup_issue )); then
+    # A clean layout. The install-time note stays quiet; --doctor still says
+    # which file carries the hooks (#190), so a --local install is not left
+    # looking like the settings.json it checked first.
+    [[ "$label" == WARN ]] && (( u + sw + lw )) || return 0
+    p1="  ok      "
+  fi
   echo "${p1}this installer's hooks are wired in these settings files for $proj:"
   if (( u ));  then echo "${pc}  $user_settings (user scope)"; fi
   if (( sw )); then echo "${pc}  $proj/.claude/settings.json (project)"; fi
@@ -701,18 +806,37 @@ registry_remove() {  # <project dir> <settings file name>
   echo "  remove  registry: $1 ($2)"
 }
 
-# registry_scan <wired|stale>: print "<dir><TAB><name>" for each registered
-# project whose file does (wired) or does not (stale) carry our hooks.
-registry_scan() {
-  local want="$1" rp rn has
+# registry_collect <wired|stale>: leave in REGISTRY_OUT one "<dir><TAB><name>"
+# line per registered project whose file does (wired) or does not (stale)
+# carry our hooks. Callers run it in their own shell, never in a command
+# substitution, so a jq failure it hits stays visible in sh_jq_failed (the
+# doctor then exits non-zero); a caller that acts on the result (user-scope
+# --uninstall deleting the shared secret) must check that. A file whose
+# wiring read failed (jq failed, or the file cannot be read) is neither
+# wired nor stale: it is left out of both lists, so the doctor never offers
+# a removal command for a project it just called unknown. An empty or
+# non-object file is a plain stale entry (settings_usable), not a failure.
+REGISTRY_OUT=""
+registry_collect() {
+  local want="$1" rp rn has nl=$'\n' before failed=0
+  REGISTRY_OUT=""
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
+  # The flag is cleared per entry and folded back after the loop, so a
+  # second failing file after a first one is skipped too (a snapshot taken
+  # once would read as "already failed" for every later entry).
+  before=$sh_jq_failed
   while IFS=$'\t' read -r rp rn || [[ -n "$rp" ]]; do
     [[ -n "$rp" ]] || continue
     case "$rn" in settings.json|settings.local.json) ;; *) continue ;; esac
     has=stale
+    sh_jq_failed=0
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
-    if [[ "$has" == "$want" ]]; then printf '%s\t%s\n' "$rp" "$rn"; fi
+    if (( sh_jq_failed )); then failed=1; continue; fi
+    if [[ "$has" == "$want" ]]; then
+      REGISTRY_OUT="${REGISTRY_OUT:+$REGISTRY_OUT$nl}$rp"$'\t'"$rn"
+    fi
   done < "$project_registry"
+  sh_jq_failed=$(( before || failed ))
   return 0
 }
 
@@ -747,7 +871,8 @@ report_registry_orphans() {
 # our hooks. Informational only.
 report_registry_stale() {
   local list
-  list="$(registry_scan stale)"
+  registry_collect stale
+  list="$REGISTRY_OUT"
   [[ -n "$list" ]] || return 0
   echo "  note    stale project registry entries (the file no longer carries this"
   echo "          installer's hooks), from $project_registry; clear each with the"
@@ -806,10 +931,64 @@ report_plugin_leftover() {
 # it. (issue #21)
 
 doctor() {
-  local broken=0 dst tgt name mdl secret smode sign_reason
+  local broken=0 dst tgt name mdl mdl_rc sl_rc secret smode sign_reason other hint parse_rc why usable_pre
 
   if [[ "$scope" == project ]]; then
     echo "doctor: project scope, checking $settings"
+    sh_jq_failed_file=""   # set by the read below when it cannot know the answer
+    if ! settings_has_our_hooks "$settings"; then
+      # settings_has_our_hooks answers 1 for "no hooks" and for a file it
+      # cannot use alike. Tell them apart before concluding the flag-named
+      # file is merely unwired (#190), with the same total check as every
+      # other read (settings_usable, #187):
+      # - unknown (unreadable, or jq failed in any of its reads): already
+      #   reported there (WARN, sh_jq_failed, non-zero exit), so only the
+      #   note below names the cause; never "carries no handoff hooks";
+      # - unusable (invalid JSON, empty, not an object, several documents):
+      #   named and counted here only when the doctor switches away from it
+      #   below; otherwise the statusLine check names it as BROKEN and counts
+      #   it, so it is counted exactly once either way.
+      parse_rc=0; usable_pre=0; why="carries no handoff hooks"
+      if [[ ! -f "$settings" ]]; then
+        why="does not exist"
+      elif [[ "$sh_jq_failed_file" == "$settings" ]]; then
+        if [[ "$sh_jq_failed_why" == "permission denied" ]]; then
+          why="cannot be read"
+        else
+          why="could not be checked (jq failed)"
+        fi
+      elif command -v jq >/dev/null 2>&1; then
+        settings_usable "$settings" || usable_pre=$?
+        if (( usable_pre == 1 )); then
+          jq empty "$settings" >/dev/null 2>&1 || parse_rc=$?
+          if (( parse_rc )); then why="could not be parsed"; else why="is empty or not a JSON object"; fi
+        fi
+      fi
+      # The other project file may be the one that carries the wiring (a
+      # --local install checked without --local, or the reverse): say so
+      # instead of leaving the line above as the only file named (#190).
+      if (( use_local )); then
+        other="$project_dir/.claude/settings.json"; hint="settings.json"
+      else
+        other="$project_dir/.claude/settings.local.json"; hint="settings.local.json"
+      fi
+      if settings_has_our_hooks "$other"; then
+        # Switch to the detected file BEFORE the statusLine, model and remedy
+        # checks run, so they read it and rerun_cmd carries --local exactly
+        # when the wired file is settings.local.json (D1/D2 of the #190 review).
+        if (( parse_rc )); then
+          echo "  WARN    $settings could not be parsed (jq exit $parse_rc)"
+          broken=$((broken + 1))
+        elif (( usable_pre == 1 )); then
+          echo "  WARN    $settings is empty or not a JSON object"
+          broken=$((broken + 1))
+        fi
+        echo "  note    $settings $why; $other carries the handoff hooks,"
+        echo "          so this doctor run checks $hint instead (the flag named the other file)."
+        settings="$other"; settings_name="$hint"
+        if [[ "$hint" == settings.local.json ]]; then use_local=1; else use_local=0; fi
+      fi
+    fi
     echo
   fi
   echo "doctor: checking runtime dependencies"
@@ -909,17 +1088,55 @@ doctor() {
   # A missing settings file still gets a line rather than silence: the
   # status line is the context nudge's most accurate signal, so its absence
   # is worth naming even when there is no file to inspect.
+  local usable_rc=0
+  if command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
+    settings_usable "$settings" || usable_rc=$?
+  fi
   if command -v jq >/dev/null 2>&1 && [[ ! -f "$settings" ]]; then
     echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
     echo
-  elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
-    if jq -e --arg m "$sl_marker" '(.statusLine.command // "") | contains($m)' \
-         "$settings" >/dev/null 2>&1; then
-      echo "  ok      statusLine wired (ours)"
-    elif jq -e '(.statusLine // null) != null' "$settings" >/dev/null 2>&1; then
-      echo "  info    statusLine present (user's own — manual wiring documented in README)"
+  elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] && [[ $usable_rc -eq 2 ]]; then
+    # jq failed in the usability check itself (#187): nothing is known about
+    # the file, which is a jq failure (WARN, exit non-zero below), not a
+    # BROKEN file (re-running the installer cannot fix jq).
+    echo "  WARN    jq failed (exit $settings_usable_rc) while reading $settings;"
+    echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
+    sh_jq_failed=1
+    echo
+  elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] && [[ $usable_rc -ne 0 ]]; then
+    # Unusable file: the reads below would only report jq failures, and
+    # re-running doctor cannot fix the file, so name it once as broken,
+    # saying which of the three it is (settings_usable).
+    if [[ ! -r "$settings" ]]; then
+      echo "  BROKEN  $settings cannot be read (check its permissions)"
+    elif jq empty "$settings" >/dev/null 2>&1; then
+      echo "  BROKEN  $settings is empty or not a JSON object"
     else
-      echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
+      echo "  BROKEN  $settings is not valid JSON"
+    fi
+    broken=$((broken + 1))
+    echo
+  elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]]; then
+    # Read-only, so a jq failure (exit 2 or more, #187) is a WARN naming the
+    # unknown state rather than an abort, and not counted toward `broken`
+    # (re-running the installer cannot fix jq). Never a quiet "user's own".
+    sl_rc=0
+    jq -e --arg m "$sl_marker" "$probe_sl_ours" "$settings" >/dev/null 2>&1 || sl_rc=$?
+    if [[ $sl_rc -eq 0 ]]; then
+      echo "  ok      statusLine wired (ours)"
+    elif [[ $sl_rc -eq 1 ]]; then
+      sl_rc=0
+      jq -e "$probe_sl_present" "$settings" >/dev/null 2>&1 || sl_rc=$?
+      if [[ $sl_rc -eq 1 ]]; then
+        echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
+      elif [[ $sl_rc -eq 0 ]]; then
+        echo "  info    statusLine present (user's own; manual wiring documented in README)"
+      fi
+    fi
+    if [[ $sl_rc -gt 1 ]]; then
+      echo "  WARN    jq failed (exit $sl_rc) while probing statusLine in $settings;"
+      echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
+      sh_jq_failed=1
     fi
     # Model context-window check: advisory only, never counts toward broken.
     # Only an id whose window depends on the variant picked is worth a WARN:
@@ -931,12 +1148,20 @@ doctor() {
     # Foundry for `opus`, the Claude Platform on AWS for `sonnet`), which this
     # check cannot see. Any other value (including absent) is a legitimate
     # choice we stay quiet about.
-    mdl="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
+    mdl=""
+    mdl_rc=0
+    mdl="$(jq -r "$probe_model_read" "$settings" 2>/dev/null)" || mdl_rc=$?
+    if [[ $mdl_rc -ne 0 ]]; then
+      mdl=""
+      echo "  WARN    jq failed (exit $mdl_rc) while reading model from $settings;"
+      echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
+      sh_jq_failed=1
+    fi
     case "$mdl" in
       claude-opus-4-6|claude-sonnet-4-6)
-        echo "  WARN    model '$mdl' in settings.json may run at a 200k context window"
+        echo "  WARN    model '$mdl' in $settings_name may run at a 200k context window"
         echo "          (the id does not say which variant is picked); for the 1M window"
-        echo "          set \"model\": \"${mdl}[1m]\" (edit settings.json or run"
+        echo "          set \"model\": \"${mdl}[1m]\" (edit $settings_name or run"
         echo "          /model ${mdl}[1m] in a session)."
         ;;
     esac
@@ -950,6 +1175,12 @@ doctor() {
   if (( broken )); then
     echo "doctor: $broken issue(s) found." >&2
     rerun_remedy >&2
+    return 1
+  fi
+  if (( sh_jq_failed )); then
+    # Exits non-zero (owner decision, see the PR for #187): a jq failure means
+    # some state above is unknown, which a clean exit would hide from CI.
+    echo "doctor: ${sh_jq_failed_why:-jq failed} while reading settings (see WARN above); fix it and re-run ./install.sh --doctor." >&2
     return 1
   fi
   echo "doctor: all hooks resolve."

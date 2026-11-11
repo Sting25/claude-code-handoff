@@ -313,8 +313,9 @@ Code versions that don't send `context_window` in the statusLine
 payload, the line degrades to model + handoff state.
 
 **Wiring.** `statusLine` is a single slot in the settings file the
-installer patches (the project's `.claude/settings.json` with `--scope
-project`, `~/.claude/settings.json` otherwise), and only one command
+installer patches (`~/.claude/settings.json` by default, the project's
+`.claude/settings.json` with `--scope project`, or its
+`.claude/settings.local.json` with `--scope project --local`), and only one command
 can occupy it. `./install.sh` wires it for you, but only if that file
 doesn't already have a statusLine (an existing one is never
 overwritten; the installer prints the manual step instead).
@@ -996,7 +997,7 @@ control.
 `./install.sh`:
 
 1. Symlinks the bin scripts and skills into `~/.claude/`.
-2. Patches `~/.claude/settings.json` to add seven hooks
+2. Patches a settings file to add seven hooks
    (`SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`,
    `Stop`, `UserPromptSubmit`, `WorktreeRemove`), seven permission
    entries, and (**only if you don't already have one**) the
@@ -1004,7 +1005,12 @@ control.
    existing statusLine is never overwritten; the installer prints
    the manual wiring step instead (see [Status line](#status-line)).
 
-Settings.json is backed up before any change and the patch is
+Which settings file is patched depends on the scope: `~/.claude/settings.json`
+by default (`--scope user`), `<project>/.claude/settings.json` with
+`--scope project`, or `<project>/.claude/settings.local.json` with
+`--scope project --local`. See [Install scope](#install-scope-user-vs-project).
+
+An existing settings file is backed up before any change and the patch is
 idempotent — existing hooks and permissions are detected by marker
 substring and skipped on re-runs. Unrelated entries in your
 settings.json (other hooks, theme, etc.) are left untouched.
@@ -1162,11 +1168,11 @@ symlinks.
 ./install.sh --copy      # force copy mode (snapshot; survives source deletion)
 ./install.sh --link      # force symlinks even from a volatile path
 ./install.sh --model 'opus[1m]'   # also pin "model" in settings.json (env: HANDOFF_MODEL)
-./install.sh --doctor     # report any dangling/missing installed hooks (exit ≠0 if broken)
+./install.sh --doctor     # report any dangling/missing installed hooks (exit ≠0 if broken, or when jq fails to read a settings file)
 ```
 
-**Model pin (new machines).** Claude Code's model choice lives in each
-machine's `~/.claude/settings.json`, so a fresh install may default to a
+**Model pin (new machines).** Claude Code's model choice lives in the
+settings files on each machine, so a fresh install may default to a
 model you did not pick. The window matters because the context nudge
 measures against it: Opus 4.7 and later run at 1M, while Opus 4.6 and
 Sonnet 4.6 run at 200k unless you pick the `[1m]` variant, which the bare
@@ -1179,8 +1185,11 @@ differing request is reported and skipped. A plain install with no model
 configured prints a one-line NOTE instead of leaving the gap silent, and
 `--doctor` warns when the pinned model is a bare `claude-opus-4-6` or
 `claude-sonnet-4-6` (it may be running at 200k). The one-liner for a new
-machine: `./install.sh --model 'opus[1m]'`. `--uninstall` removes the key
-only if this installer set it and you never changed it since.
+machine: `./install.sh --model 'opus[1m]'`. `--model` writes the `model` key into
+whichever settings file the scope selects (`~/.claude/settings.json`, or the
+project's `.claude/settings.json` or `.claude/settings.local.json`).
+`--uninstall` removes the key only if this installer set it and you never
+changed it since.
 
 If a path the installer manages already holds a symlink of **yours**
 pointing somewhere else (a customized fork, a second clone, a dotfiles
@@ -1237,6 +1246,18 @@ default path, only a regular file (never a symlink, never a directory),
 and only when the content is exactly the 64-hex digest this tool
 generates. A file of yours that happens to sit at that name, or a custom
 `HANDOFF_SECRET_FILE` location, is reported and left alone.
+
+While a registered project-scope install is still wired, the secret is
+kept automatically (those projects sign with it; `--remove-secret` deletes
+it anyway). If jq fails while reading a registered project's settings file
+during that check, the uninstall cannot tell which projects still sign, so
+it keeps the secret and the registry, prints an `ERROR` naming the file,
+and exits 1. The settings and `bin/` links are already removed at that
+point; fix jq or the named file and re-run the same `--uninstall` command.
+A registered file that is empty or not a JSON object is not a jq failure:
+it counts as a project that is no longer wired. jq failing while it makes
+that distinction is one, and keeps the secret; so does a registered file
+this process cannot read.
 
 Pass `--keep-secret` to skip that deletion entirely:
 

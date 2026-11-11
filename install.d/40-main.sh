@@ -105,6 +105,11 @@ elif [[ "$mode" == install ]]; then
   if [[ "$scope" == project ]] && settings_has_our_hooks "$settings"; then
     registry_add "$project_dir" "$settings_name"
   fi
+  if (( sh_jq_failed )); then
+    echo "  ERROR   jq failed while checking $settings for our hooks; the project was NOT registered." >&2
+    echo "          fix jq and re-run $(rerun_cmd)." >&2
+    exit 1
+  fi
   echo
   if [[ -z "$model_pin" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] \
      && jq -e 'type == "object" and ((.model // null) == null)' "$settings" >/dev/null 2>&1; then
@@ -196,18 +201,44 @@ elif [[ "$scope" == project ]]; then
 else
   echo "uninstalling handoff skill from $claude_home"
   echo
-  echo "symlinks:"
-  uninstall_symlinks
-  echo
+  # Settings first, then files: a jq-probe abort inside unpatch_settings (#187)
+  # restores settings.json and must leave the bin/ scripts the hooks call in
+  # place, so a re-run of --uninstall finds everything it needs.
   echo "settings.json:"
   unpatch_settings
+  echo
+  echo "symlinks:"
+  uninstall_symlinks
   echo
   echo "local state:"
   # Registry first (issue #171 review): projects still wired sign their
   # handoffs with the same per-machine secret, so deleting it here would
   # silently downgrade every one of them. Keep it automatically while any
   # registered project is wired; --remove-secret deletes it anyway.
-  orphan_list="$(registry_scan wired)"
+  # The scan runs in this shell (registry_collect), not a command
+  # substitution, so a jq failure on a registered file is seen here. Every
+  # unreadable file would read as stale, which would delete the secret those
+  # projects still sign with: stop instead, before anything that depends on
+  # the scan.
+  scan_prev_failed=$sh_jq_failed
+  sh_jq_failed=0
+  registry_collect wired
+  orphan_list="$REGISTRY_OUT"
+  if (( sh_jq_failed )); then
+    # The re-run repeats the secret flag the user passed, so it does the
+    # same thing once jq (or the file) is fixed.
+    rerun_flags=""
+    if (( remove_secret )); then rerun_flags=" --remove-secret"; fi
+    if (( keep_secret )); then rerun_flags=" --keep-secret"; fi
+    echo "  ERROR   ${sh_jq_failed_why:-jq failed} while reading $sh_jq_failed_file from the project registry" >&2
+    echo "          ($project_registry), so it is unknown which projects still sign" >&2
+    echo "          with the HMAC secret; ${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}" >&2
+    echo "          was kept and the registry left as it was. Settings and bin/ links" >&2
+    echo "          were already removed above. Fix jq, or fix the file named above," >&2
+    echo "          and re-run ./install.sh --uninstall$rerun_flags." >&2
+    exit 1
+  fi
+  sh_jq_failed=$scan_prev_failed
   secret_path="${HANDOFF_SECRET_FILE:-$claude_home/handoff_secret}"
   if [[ -n "$orphan_list" ]] && (( ! remove_secret && ! keep_secret )); then
     orphan_n="$(printf '%s\n' "$orphan_list" | wc -l | tr -d ' ')"
