@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 97c31521323a40e6ead841e9b6e8ea2f4b848a60c00c59e5b17d2b80190a99b7
+# SOURCE-SHA256: 459f7ae957baffc6de153a043f51a948a936806518a0daa1d0ab2f09cc598bd2
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1839,6 +1839,10 @@ settings_has_our_hooks() {
   # same report as the unreadable file below.
   local d
   d="$(dirname "$f")"
+  # Walk up to the nearest ancestor that can be stat'ed: when the project
+  # directory, or any directory above it, cannot be searched, everything
+  # below it is hidden and the first stat-able one is the unsearchable one.
+  while [[ ! -e "$d" && "$d" != "/" && "$d" != "." ]]; do d="$(dirname "$d")"; done
   if [[ -d "$d" && ! -x "$d" ]]; then
     sh_warn_once "$f" "permission denied" "  WARN    $f cannot be read (check its permissions);" \
       "          treating its wiring as unknown. Fix the file and re-run."
@@ -2171,7 +2175,7 @@ doctor() {
         # not "absent" (#216): Claude Code cannot read settings from it, so
         # it is a fault, counted here once, switch or no switch.
         why="is not a regular file"
-        echo "  WARN    $settings is not a regular file (a directory or special file);"
+        echo "  BROKEN  $settings is not a regular file (a directory or special file);"
         echo "          Claude Code cannot read settings from it. Remove it and re-run the installer."
         broken=$((broken + 1))
       elif [[ ! -f "$settings" ]]; then

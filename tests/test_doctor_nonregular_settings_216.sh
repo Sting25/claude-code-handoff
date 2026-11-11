@@ -45,6 +45,8 @@ must mkdir "$P/.claude/settings.json"
 inst --doctor --scope project --project "$P"
 check "B: doctor exits non-zero"            1   "$RC"
 check "B: names it a non-regular file"      yes "$(has "$OUT" "settings.json is not a regular file")"
+check "B: labelled BROKEN"                  yes "$(has "$OUT" "BROKEN  $P/.claude/settings.json is not a regular file")"
+check "B: counted as an issue"              yes "$(has "$OUT" "1 issue(s) found")"
 
 # C. a genuinely absent file is still just absent (rc 0 with the local install).
 fresh_project

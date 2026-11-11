@@ -99,4 +99,24 @@ check "E: doctor exits non-zero"           yes "$(nz $RC)"
 check "E: doctor says cannot be read"      yes "$(has "$OUT" "cannot be read (check its permissions)")"
 check "E: not called 'does not exist'"     no  "$(has "$OUT" "settings.json does not exist")"
 
+# F/G. the project directory itself (F) or a higher ancestor (G) cannot be
+#      searched: the registered project's file is unknown, not a "stale" entry.
+#      User-scope doctor must exit non-zero and not offer to clear the entry.
+for case in F G; do
+  fresh_sandbox
+  if [[ $case == G ]]; then
+    C="$(mktemp -d)"; cleanup_on_exit "$C"; C="$(cd "$C" && pwd -P)"
+    P="$C/proj"; mkdir -p "$P/.claude"; LOCK="$C"
+  else
+    LOCK="$P"
+  fi
+  inst --scope project --project "$P"
+  chmod 000 "$LOCK"
+  OUT="$(cd "$H" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --doctor 2>&1 </dev/null)"; RC=$?
+  chmod 755 "$LOCK"
+  check "$case: user doctor exits non-zero"     yes "$(nz $RC)"
+  check "$case: says cannot be read"            yes "$(has "$OUT" "cannot be read (check its permissions)")"
+  check "$case: not a stale registry entry"     no  "$(has "$OUT" "stale project registry")"
+done
+
 finish
