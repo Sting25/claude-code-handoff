@@ -106,6 +106,16 @@ if [[ -n "$_self_src" ]]; then
     repo_root_err="cannot cd to $(dirname "$_self_src")"
   fi
 fi
+# The closing line of an --uninstall. A piped run (`bash -s -- --uninstall <
+# install.sh`) has no clone, and the plain line used to read "the repo at  is
+# untouched" with an empty path (#210).
+say_done_repo_untouched() {
+  if [[ -n "$repo_root" ]]; then
+    echo "done. the repo at $repo_root is untouched."
+  else
+    echo "done. no clone was used (install.sh ${repo_root_err:-was read from a pipe})."
+  fi
+}
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
 # The user-scope file, kept separately because project scope (issue #171)
@@ -308,6 +318,35 @@ if (( remove_secret )) && [[ "$mode" != uninstall ]]; then
   echo "warning: --remove-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
 fi
 
+# A project path with a control character in it is refused outright (#210).
+# Every `$(...)` that resolves the path (pwd -P, git rev-parse) strips
+# trailing newlines, so a directory named `my proj<LF>` resolved to a SIBLING
+# `my proj`: that one was wired and registered and the real project never
+# was. The registry is one line per project with a TAB separator, so a
+# newline or tab can never be recorded faithfully either. Preserving the
+# newline (the `printf x` trick, used below for the resolutions themselves)
+# would only move the breakage into the registry, so the path is refused
+# instead. LC_ALL=C keeps the class to ASCII controls (0x00-0x1f, 0x7f):
+# non-ASCII names such as `café` are not affected.
+refuse_ctrl_path() {  # <label> <path>; exits 2 when <path> holds a control character
+  local LC_ALL=C
+  [[ "$2" == *[[:cntrl:]]* ]] || return 0
+  echo "ERROR: $1 $(printf '%q' "$2") contains a control character (newline, tab, ...); refusing." >&2
+  echo "       Rename the directory so its path has no control characters, and re-run." >&2
+  exit 2
+}
+# `$(cd <dir> && pwd -P)` without losing a trailing newline: the x keeps the
+# substitution from stripping it, then the x and pwd's own newline go. The
+# result goes into PHYS_DIR, not stdout: a caller's own `$(phys_dir ...)`
+# would strip the newline all over again.
+PHYS_DIR=""
+phys_dir() {  # <dir>; sets PHYS_DIR; non-zero when <dir> cannot be entered
+  local p
+  p="$(cd "$1" 2>/dev/null && pwd -P && printf x)" || return 1
+  p="${p%x}"
+  PHYS_DIR="${p%$'\n'}"
+}
+
 # Resolve the install scope (issue #171). Every refusal here exits before
 # anything is created or patched.
 case "$scope_flag" in
@@ -338,7 +377,11 @@ if [[ "$scope" == project ]]; then
   if [[ -z "$project_dir" ]]; then
     _top=""
     if command -v git >/dev/null 2>&1; then
-      _top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+      # The x keeps a trailing newline in the toplevel's name (#210), so
+      # the control-character refusal below sees it instead of a sibling.
+      _top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null && printf x)" || _top=""
+      _top="${_top%x}"
+      _top="${_top%$'\n'}"
     fi
     if [[ -n "$_top" ]]; then
       project_dir="$_top"
@@ -348,6 +391,7 @@ if [[ "$scope" == project ]]; then
       echo "note: no --project given; using $project_dir (the current directory)." >&2
     fi
   fi
+  refuse_ctrl_path "project directory" "$project_dir"
   if [[ ! -d "$project_dir" && "$mode" == uninstall ]]; then
     # A project-scope uninstall of a directory that is gone (typically a
     # removed worktree the doctor listed as stale) only clears its registry
@@ -376,15 +420,16 @@ if [[ "$scope" == project ]]; then
     # An ancestor that cannot be entered (mode 000) has no knowable physical
     # path: say so and leave the registry line, rather than dying on a raw
     # `cd: Permission denied` under set -e or clearing a line that may not match.
-    if ! _gone_phys="$(cd "$_gone_head" 2>/dev/null && pwd -P)"; then
+    if ! phys_dir "$_gone_head"; then
       echo "  WARN    cannot enter $_gone_head (the nearest existing parent of $project_dir)," >&2
       echo "          so its physical path is unknown; the registry line and markers were left in place." >&2
       echo "          Make it enterable and re-run the --uninstall." >&2
       exit 1
     fi
-    _gone_head="$_gone_phys"
+    _gone_head="$PHYS_DIR"
     [[ "$_gone_head" == / ]] && _gone_head=""
     project_dir="$_gone_head$_gone_tail"
+    refuse_ctrl_path "project directory (resolved)" "$project_dir"
     project_gone=1
   elif [[ ! -d "$project_dir" ]]; then
     echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
@@ -394,7 +439,15 @@ fi
 if [[ "$scope" == project ]] && (( ! project_gone )); then
   # Absolute and physical, so the comparisons below and the paths printed
   # (and the backup location) never depend on how the flag was spelled.
-  project_dir="$(cd "$project_dir" && pwd -P)"
+  # phys_dir keeps a trailing newline the resolution would otherwise strip;
+  # the check after it catches a control character a symlink on the way
+  # brought in (#210).
+  if ! phys_dir "$project_dir"; then
+    echo "ERROR: cannot enter project directory '$project_dir'; refusing." >&2
+    exit 2
+  fi
+  project_dir="$PHYS_DIR"
+  refuse_ctrl_path "project directory (resolved)" "$project_dir"
   # Wiring the handoff clone, or any directory inside it, is almost
   # certainly a mistake: the usual cause is running `./install.sh --scope
   # project` from inside the clone without --project. Refuse instead of
