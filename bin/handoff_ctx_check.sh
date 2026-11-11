@@ -458,7 +458,7 @@ if [[ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]]; then
                                       and .message.stop_reason == "end_turn"
                                       and .message.model != "<synthetic>")
                    | (.message.id // .uuid // empty)) as $i
-                 ({}; .[$i] = 1; select(length >= $need) | length)) // 0' 2>/dev/null \
+                 ({}; .[$i|tostring] = 1; select(length >= $need) | length)) // 0' 2>/dev/null \
           || true)"
         [[ "$done_turns" =~ ^[0-9]+$ ]] || done_turns=0
       fi
