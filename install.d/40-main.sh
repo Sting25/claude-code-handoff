@@ -174,6 +174,7 @@ elif [[ "$scope" == project ]]; then
       own|legacy) rm -f "$(created_marker)" 2>/dev/null || true ;;
       foreign) project_key_warn_foreign ;;
     esac
+    project_key_release
     echo
     echo "done. the repo at $repo_root is untouched."
     exit 0
@@ -192,6 +193,7 @@ elif [[ "$scope" == project ]]; then
     exit 1
   fi
   registry_remove "$project_dir" "$settings_name"
+  project_key_release
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
   echo "      HMAC secret are shared by every project on this machine and were not"

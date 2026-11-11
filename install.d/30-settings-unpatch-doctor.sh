@@ -174,6 +174,24 @@ project_key_claim() {
   fi
   return 2
 }
+# Uninstall only (#212): drop this project's `path` record once nothing it
+# guards is left. The record keeps one project's markers from acting on
+# another's (two paths can share a cksum key); with no marker in the
+# directory and no other settings file of this project still registered,
+# it guards nothing. Backups (*.bak.*) and any file of the user's stay: they
+# do not depend on it. A record naming another project is never touched.
+project_key_release() {
+  project_key_check
+  [[ "$project_key_state" == own ]] || return 0
+  local other
+  for other in settings.json settings.local.json; do
+    [[ "$other" == "$settings_name" ]] && continue
+    registry_has "$project_dir" "$other" && return 0
+  done
+  [[ -z "$(find "$project_backup_dir" -maxdepth 1 -name '*.created' 2>/dev/null | head -n 1)" ]] || return 0
+  rm -f "$project_backup_dir/path" 2>/dev/null || true
+  rmdir "$project_backup_dir" 2>/dev/null || true
+}
 created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
 settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
   # -r first: a failed `<` redirect is reported before 2>/dev/null applies

@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: b30557ed031eeeb79b86ebcd3672f4bad70858a6abf55ad1d69acf35fc625660
+# SOURCE-SHA256: 993f3f2ee5ae1bb523508abeeceed23cdda578c40401c8e7416dfd641cb59083
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1341,6 +1341,24 @@ project_key_claim() {
   fi
   return 2
 }
+# Uninstall only (#212): drop this project's `path` record once nothing it
+# guards is left. The record keeps one project's markers from acting on
+# another's (two paths can share a cksum key); with no marker in the
+# directory and no other settings file of this project still registered,
+# it guards nothing. Backups (*.bak.*) and any file of the user's stay: they
+# do not depend on it. A record naming another project is never touched.
+project_key_release() {
+  project_key_check
+  [[ "$project_key_state" == own ]] || return 0
+  local other
+  for other in settings.json settings.local.json; do
+    [[ "$other" == "$settings_name" ]] && continue
+    registry_has "$project_dir" "$other" && return 0
+  done
+  [[ -z "$(find "$project_backup_dir" -maxdepth 1 -name '*.created' 2>/dev/null | head -n 1)" ]] || return 0
+  rm -f "$project_backup_dir/path" 2>/dev/null || true
+  rmdir "$project_backup_dir" 2>/dev/null || true
+}
 created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
 settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
   # -r first: a failed `<` redirect is reported before 2>/dev/null applies
@@ -2548,6 +2566,7 @@ elif [[ "$scope" == project ]]; then
       own|legacy) rm -f "$(created_marker)" 2>/dev/null || true ;;
       foreign) project_key_warn_foreign ;;
     esac
+    project_key_release
     echo
     echo "done. the repo at $repo_root is untouched."
     exit 0
@@ -2566,6 +2585,7 @@ elif [[ "$scope" == project ]]; then
     exit 1
   fi
   registry_remove "$project_dir" "$settings_name"
+  project_key_release
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
   echo "      HMAC secret are shared by every project on this machine and were not"
