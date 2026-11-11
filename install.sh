@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: f7fb1f11f794a66956921fd173e5ff4aa35915bc45d4a661b81ffb35d7f5ed66
+# SOURCE-SHA256: d6d04b0138eceb81b79d481586accdcb9f9732868642e48efa99b3198aecb927
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1790,6 +1790,79 @@ rerun_remedy() {
   fi
 }
 
+# other_project_settings: leave in OTHER_SETTINGS / OTHER_SETTINGS_NAME the
+# project settings file the flags did NOT name (settings.json under --local,
+# settings.local.json without it). One definition for the doctor's switch
+# (#190) and the uninstall refusal below (#209), so both look at the same file.
+OTHER_SETTINGS=""; OTHER_SETTINGS_NAME=""
+other_project_settings() {
+  if (( use_local )); then
+    OTHER_SETTINGS_NAME="settings.json"
+  else
+    OTHER_SETTINGS_NAME="settings.local.json"
+  fi
+  OTHER_SETTINGS="$project_dir/.claude/$OTHER_SETTINGS_NAME"
+}
+
+# The doctor's "statusLine unset" line. In user scope, when the user file
+# carries no hooks and rerun_cmd points at a project install (the hooks are
+# wired in a project file), re-running that command never writes the user
+# file's statusLine, so the old "re-run <cmd> to wire it" remedy changed
+# nothing and the next doctor run said the same (#209). Name the file that
+# was read instead and point at the doctor that checks the wired file.
+sl_unset_line() {
+  local cmd
+  cmd="$(rerun_cmd)"
+  if [[ "$scope" != project && "$cmd" != "./install.sh" ]]; then
+    echo "  info    statusLine unset in $settings (the user file). The hooks here are"
+    echo "          wired in project scope, which writes its statusLine to the project"
+    echo "          file instead; to check that one run: ./install.sh --doctor ${cmd#./install.sh }"
+  else
+    echo "  info    statusLine unset (re-run $cmd to wire it)"
+  fi
+}
+
+# Project-scope --uninstall whose flags name the project file that carries
+# none of the hooks while the other project file carries them (a --local
+# install uninstalled without --local, or the reverse). Unpatching the named
+# file would print "nothing to strip", exit 0, and drop nothing from the
+# registry while the hooks stay wired (#209). It refuses (exit 2, nothing
+# changed) and prints the command for the wired file rather than switching
+# to it: an uninstall edits a file the user may also edit by hand, and the
+# file it edits should be the one the user named. Detection is the doctor's
+# (#190): settings_has_our_hooks on both files. The named file must be known
+# to carry no hooks (absent, empty, or a JSON object without them); when it
+# is unreadable, unparseable or jq fails, unpatch_settings reports that as it
+# always did.
+refuse_uninstall_if_other_file_wired() {
+  local named="$settings" why rc=0 flag
+  if [[ -e "$named" ]]; then
+    [[ -f "$named" && -r "$named" ]] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    if [[ -s "$named" ]]; then
+      settings_usable "$named" || rc=$?
+      if (( rc == 1 )); then
+        jq empty "$named" >/dev/null 2>&1 || return 0   # invalid JSON: unpatch_settings refuses it
+      elif (( rc != 0 )); then
+        return 0
+      fi
+      settings_has_our_hooks "$named" && return 0
+      [[ "$sh_jq_failed_file" == "$named" ]] && return 0
+    fi
+    why="carries no handoff hooks"
+  else
+    why="does not exist"
+  fi
+  other_project_settings
+  settings_has_our_hooks "$OTHER_SETTINGS" || return 0
+  if [[ "$OTHER_SETTINGS_NAME" == settings.local.json ]]; then flag=" --local"; else flag=""; fi
+  echo "  ERROR   $named $why;" >&2
+  echo "          $OTHER_SETTINGS carries the handoff hooks." >&2
+  echo "          Nothing was changed. To remove them from $OTHER_SETTINGS_NAME run:" >&2
+  echo "            ./install.sh --uninstall --scope project --project $(shq "$project_dir")$flag" >&2
+  exit 2
+}
+
 # Single-quote a path for a printed, copy-pasteable command (a project path
 # with a space must survive the paste). Embedded single quotes become '\''.
 shq() {
@@ -2192,6 +2265,7 @@ report_plugin_leftover() {
 
 doctor() {
   local broken=0 dst tgt name mdl mdl_rc sl_rc secret smode sign_reason other hint parse_rc why usable_pre
+  local flag_settings="" proj f pf pu ps sib_rc
 
   if [[ "$scope" == project ]]; then
     echo "doctor: project scope, checking $settings"
@@ -2235,11 +2309,8 @@ doctor() {
       # The other project file may be the one that carries the wiring (a
       # --local install checked without --local, or the reverse): say so
       # instead of leaving the line above as the only file named (#190).
-      if (( use_local )); then
-        other="$project_dir/.claude/settings.json"; hint="settings.json"
-      else
-        other="$project_dir/.claude/settings.local.json"; hint="settings.local.json"
-      fi
+      other_project_settings
+      other="$OTHER_SETTINGS"; hint="$OTHER_SETTINGS_NAME"
       if settings_has_our_hooks "$other"; then
         # Switch to the detected file BEFORE the statusLine, model and remedy
         # checks run, so they read it and rerun_cmd carries --local exactly
@@ -2253,6 +2324,7 @@ doctor() {
         fi
         echo "  note    $settings $why; $other carries the handoff hooks,"
         echo "          so this doctor run checks $hint instead (the flag named the other file)."
+        flag_settings="$settings"
         settings="$other"; settings_name="$hint"
         if [[ "$hint" == settings.local.json ]]; then use_local=1; else use_local=0; fi
       fi
@@ -2361,7 +2433,7 @@ doctor() {
     settings_usable "$settings" || usable_rc=$?
   fi
   if command -v jq >/dev/null 2>&1 && [[ ! -f "$settings" ]]; then
-    echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
+    sl_unset_line
     echo
   elif command -v jq >/dev/null 2>&1 && [[ -f "$settings" ]] && [[ $usable_rc -eq 2 ]]; then
     # jq failed in the usability check itself (#187): nothing is known about
@@ -2396,7 +2468,7 @@ doctor() {
       sl_rc=0
       jq -e "$probe_sl_present" "$settings" >/dev/null 2>&1 || sl_rc=$?
       if [[ $sl_rc -eq 1 ]]; then
-        echo "  info    statusLine unset (re-run $(rerun_cmd) to wire it)"
+        sl_unset_line
       elif [[ $sl_rc -eq 0 ]]; then
         echo "  info    statusLine present (user's own; manual wiring documented in README)"
       fi
@@ -2434,6 +2506,37 @@ doctor() {
         ;;
     esac
     echo
+  fi
+  # A project settings file the checks above did not probe is otherwise
+  # never parsed by the doctor: report_wiring's read treats unparseable as
+  # "not wired", so a corrupt settings.json beside a --local install (or
+  # either project file under a user-scope doctor) was silent (#209). Skipped:
+  # the file probed above (the statusLine check names it), the flag-named
+  # file the doctor switched away from (named before the switch), and the
+  # user file. Counted like the flag-named case (#190 H), so the same files
+  # give the same exit code whichever flag the doctor was run with.
+  if command -v jq >/dev/null 2>&1; then
+    proj="$(wiring_project_root)"
+    pu="$(settings_phys_path "$user_settings")"
+    ps="$(settings_phys_path "$settings")"
+    for f in "$proj/.claude/settings.json" "$proj/.claude/settings.local.json"; do
+      pf="$(settings_phys_path "$f")"
+      [[ -n "$pf" && "$pf" != "$pu" && "$pf" != "$ps" ]] || continue
+      [[ -n "$flag_settings" && "$pf" == "$(settings_phys_path "$flag_settings")" ]] && continue
+      # Only a parse failure is new here: an unreadable file is already
+      # reported by report_wiring's read, and an empty file is not an error.
+      [[ -f "$pf" && -r "$pf" && -s "$pf" ]] || continue
+      sib_rc=0
+      settings_usable "$pf" || sib_rc=$?
+      (( sib_rc == 1 )) || continue
+      sib_rc=0
+      jq empty "$pf" >/dev/null 2>&1 || sib_rc=$?
+      (( sib_rc )) || continue
+      echo "  WARN    $f could not be parsed (jq exit $sib_rc); whether it carries"
+      echo "          handoff hooks is unknown. Fix or remove the file, then re-run this doctor."
+      broken=$((broken + 1))
+      echo
+    done
   fi
   report_wiring WARN
   if [[ "$scope" == user ]]; then
@@ -2636,6 +2739,8 @@ elif [[ "$scope" == project ]]; then
     exit 0
   fi
   echo "project settings ($project_dir):"
+  # Before anything is read for editing: a refusal changes nothing (#209).
+  refuse_uninstall_if_other_file_wired
   check_created_settings
   unpatch_settings
   # A refused or unfinished strip (invalid JSON, no jq, a failed skeleton

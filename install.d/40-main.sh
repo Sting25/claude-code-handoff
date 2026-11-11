@@ -180,6 +180,8 @@ elif [[ "$scope" == project ]]; then
     exit 0
   fi
   echo "project settings ($project_dir):"
+  # Before anything is read for editing: a refusal changes nothing (#209).
+  refuse_uninstall_if_other_file_wired
   check_created_settings
   unpatch_settings
   # A refused or unfinished strip (invalid JSON, no jq, a failed skeleton
