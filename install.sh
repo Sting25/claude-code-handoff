@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: ff88b7196a996dc3b9aea0f17d3a00fcebbe6fe8efba85a36040d0d4456a46a2
+# SOURCE-SHA256: 97c31521323a40e6ead841e9b6e8ea2f4b848a60c00c59e5b17d2b80190a99b7
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -611,11 +611,15 @@ case "$link_mode" in
   auto)
     if is_volatile_path "$repo_root" && [[ "${HANDOFF_FORCE_SYMLINK:-0}" != "1" ]]; then
       force_copy=1
-      echo "warning: installing from a volatile path ($repo_root)." >&2
-      echo "         Symlinks would dangle when it's cleaned up and the hooks would" >&2
-      echo "         then fail silently — using COPY mode instead (the copies survive)." >&2
-      echo "         Re-run from a persistent clone for auto-updating symlinks, or pass" >&2
-      echo "         --link / HANDOFF_FORCE_SYMLINK=1 to force symlinks anyway." >&2
+      # Only an install creates links, so only an install has anything to
+      # warn about; --doctor and --uninstall install nothing (#205).
+      if [[ "$mode" == install ]]; then
+        echo "warning: installing from a volatile path ($repo_root)." >&2
+        echo "         Symlinks would dangle when it's cleaned up and the hooks would" >&2
+        echo "         then fail silently — using COPY mode instead (the copies survive)." >&2
+        echo "         Re-run from a persistent clone for auto-updating symlinks, or pass" >&2
+        echo "         --link / HANDOFF_FORCE_SYMLINK=1 to force symlinks anyway." >&2
+      fi
     fi
     ;;
 esac
