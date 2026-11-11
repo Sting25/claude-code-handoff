@@ -611,11 +611,11 @@ fi
 current_is_symlink=0
 if [ -L "$repo/.claude" ]; then
   current_is_symlink=1
-  echo "⚠️  handoff: $(handoff_oneline "$repo")/.claude is a symlink — refusing to read through it (a cloned repo could point it at a directory outside the repo, so every file under it is attacker-chosen). Treating the handoff as absent; replace the symlink with a real directory to restore loading."
+  echo "⚠️  handoff: $(handoff_oneline "$repo")/.claude is a symlink; refusing to read through it (a cloned repo could point it at a directory outside the repo, so every file under it is attacker-chosen). Treating the handoff as absent; replace the symlink with a real directory to restore loading."
   echo
 elif [ -L "$current" ]; then
   current_is_symlink=1
-  echo "⚠️  handoff: $(handoff_oneline "$current") is a symlink — refusing to read through it (a cloned repo could point it at a file outside the repo, e.g. a key or dotfile). Treating the handoff as absent; replace the symlink with a regular file to restore loading."
+  echo "⚠️  handoff: $(handoff_oneline "$current") is a symlink; refusing to read through it (a cloned repo could point it at a file outside the repo, e.g. a key or dotfile). Treating the handoff as absent; replace the symlink with a regular file to restore loading."
   echo
 fi
 
@@ -1384,7 +1384,7 @@ if [ -n "$recorded_root" ]; then
     echo "ℹ️ handoff: this handoff was inherited from the main checkout ($(handoff_oneline "$inherit_main")); it was copied into this worktree"
     echo
   elif [ "$recorded_phys" != "$repo_phys" ]; then
-    echo "⚠️  handoff: this doc was written for '$(handoff_oneline "$recorded_root")' but is loading at '$(handoff_oneline "$repo")' — likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
+    echo "⚠️  handoff: this doc was written for '$(handoff_oneline "$recorded_root")' but is loading at '$(handoff_oneline "$repo")'; likely a moved or renamed project (or a copied .claude/). Its snapshot may describe the old location."
     echo
   fi
 fi
