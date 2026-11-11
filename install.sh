@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: bf97f97c01749de9020db09466a5d0605ea17e636681741608ca868d62dd3dc2
+# SOURCE-SHA256: 0fb8f143027f23b7b33179e04dee5bcd6fa15439e9302bc00be415f9d1969968
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1629,8 +1629,14 @@ report_wiring() {
   if [[ -n "$pl" && "$pl" != "$pu" && "$pl" != "$ps" ]] && settings_has_our_hooks "$pl"; then lw=1; fi
   if (( u )) && { [[ "$scope" == project ]] || (( sw || lw )); }; then user_issue=1; fi
   if (( sw && lw )); then dup_issue=1; fi
-  (( user_issue || dup_issue )) || return 0
   if [[ "$label" == NOTE ]]; then p1="NOTE: "; pc="      "; else p1="  WARN    "; pc="          "; fi
+  if (( ! user_issue && ! dup_issue )); then
+    # A clean layout. The install-time note stays quiet; --doctor still says
+    # which file carries the hooks (#190), so a --local install is not left
+    # looking like the settings.json it checked first.
+    [[ "$label" == WARN ]] && (( u + sw + lw )) || return 0
+    p1="  ok      "
+  fi
   echo "${p1}this installer's hooks are wired in these settings files for $proj:"
   if (( u ));  then echo "${pc}  $user_settings (user scope)"; fi
   if (( sw )); then echo "${pc}  $proj/.claude/settings.json (project)"; fi
@@ -1797,10 +1803,43 @@ report_plugin_leftover() {
 # it. (issue #21)
 
 doctor() {
-  local broken=0 dst tgt name mdl secret smode sign_reason
+  local broken=0 dst tgt name mdl secret smode sign_reason other hint parse_rc why
 
   if [[ "$scope" == project ]]; then
     echo "doctor: project scope, checking $settings"
+    if ! settings_has_our_hooks "$settings"; then
+      # settings_has_our_hooks answers 1 for "no hooks" and for a file jq
+      # cannot parse alike. Tell them apart before concluding the flag-named
+      # file is merely unwired: an unparseable file is named, and counts as a
+      # problem (non-zero exit), whether or not the doctor then switches files.
+      parse_rc=0
+      if [[ -f "$settings" ]] && command -v jq >/dev/null 2>&1; then
+        jq empty "$settings" >/dev/null 2>&1 || parse_rc=$?
+      fi
+      if (( parse_rc )); then
+        echo "  WARN    $settings could not be parsed (jq exit $parse_rc)"
+        broken=$((broken + 1))
+      fi
+      # The other project file may be the one that carries the wiring (a
+      # --local install checked without --local, or the reverse): say so
+      # instead of leaving the line above as the only file named (#190).
+      if (( use_local )); then
+        other="$project_dir/.claude/settings.json"; hint="settings.json"
+      else
+        other="$project_dir/.claude/settings.local.json"; hint="settings.local.json"
+      fi
+      if settings_has_our_hooks "$other"; then
+        # Switch to the detected file BEFORE the statusLine, model and remedy
+        # checks run, so they read it and rerun_cmd carries --local exactly
+        # when the wired file is settings.local.json (D1/D2 of the #190 review).
+        if [[ -f "$settings" ]]; then why="carries no handoff hooks"; else why="does not exist"; fi
+        if (( parse_rc )); then why="could not be parsed"; fi
+        echo "  note    $settings $why; $other carries the handoff hooks,"
+        echo "          so this doctor run checks $hint instead (the flag named the other file)."
+        settings="$other"; settings_name="$hint"
+        if [[ "$hint" == settings.local.json ]]; then use_local=1; else use_local=0; fi
+      fi
+    fi
     echo
   fi
   echo "doctor: checking runtime dependencies"
@@ -1919,8 +1958,8 @@ doctor() {
     mdl="$(jq -r '.model // ""' "$settings" 2>/dev/null)"
     case "$mdl" in
       opus|claude-opus-4-8)
-        echo "  WARN    model '$mdl' in settings.json is the 200k-context variant —"
-        echo "          for the 1M window set \"model\": \"${mdl}[1m]\" (edit settings.json"
+        echo "  WARN    model '$mdl' in $settings_name is the 200k-context variant:"
+        echo "          for the 1M window set \"model\": \"${mdl}[1m]\" (edit $settings_name"
         echo "          or run /model ${mdl}[1m] in a session)."
         ;;
     esac
