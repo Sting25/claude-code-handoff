@@ -84,7 +84,7 @@ umask 077
 # cannot tell the cases apart (Node hands hooks a socket pair too); what
 # differs is that a hook's writer has already written the JSON and closed its
 # end, so bytes or EOF arrive at once. So: wait a bounded time for the first
-# line, and only after something arrived drain to EOF (then guaranteed to
+# byte, and only after something arrived drain to EOF (then guaranteed to
 # terminate). HANDOFF_STDIN_TIMEOUT is whole seconds (bash 3.2 has no
 # fractional -t), default 2, minimum 1. A timeout, EOF, a bad value, no jq,
 # or no parseable reason all degrade to the always-write behavior: the skill
@@ -101,6 +101,11 @@ read_hook_payload() {
   # line is bounded in total, and bash 3.2 reads a pipe byte by byte, so a big
   # one-line payload (8 MB) timed out and came back empty. Once a byte has
   # arrived the writer is live, so the rest ends at EOF.
+  # Trade-off: once any byte arrives we wait for EOF, so a writer that sends a
+  # partial newline-less payload and keeps the pipe open is no longer cut off
+  # at the timeout (old code: 2 s; new: until EOF). Claude Code closes stdin
+  # after writing the payload, and the old code already waited for EOF after a
+  # complete first line.
   if IFS= read -r -t "$timeout" -n 1 first; then
     printf '%s%s' "$first" "$(cat 2>/dev/null || true)"
   else

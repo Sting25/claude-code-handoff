@@ -6,7 +6,7 @@
 # Claude Code writes the JSON and closes stdin, so this only bites hand runs,
 # the Bash tool and test runners (hardening, not a hook fix). Each reader now
 # carries a copy of read_hook_payload() from write_handoff.sh (the canonical
-# one): wait HANDOFF_STDIN_TIMEOUT whole seconds for a first line, then drain.
+# one): wait HANDOFF_STDIN_TIMEOUT whole seconds for a first byte, then drain.
 #
 # Proves, per reader: (a) an open FIFO that never delivers returns within
 # HANDOFF_STDIN_TIMEOUT+1 s, (b) a real payload is still read with and without
@@ -161,7 +161,9 @@ done
 # `read -t` bounded the WHOLE first line; bash 3.2 reads a pipe byte by byte,
 # so an 8 MB one-line payload hit the 2 s timeout and came back empty. The
 # timeout must cover the first byte only. Run the canonical function under the
-# system /bin/bash (3.2 on macOS) and count the bytes it returns.
+# system /bin/bash (3.2 on macOS) and count the bytes it returns. Note: the
+# path is hardcoded, so on Linux CI (bash 5) this section may be unable to
+# fail; it only proves the regression on macOS bash 3.2.
 extract_fn() { awk '/^read_hook_payload\(\) \{/ {p=1} p {print} p && /^}$/ {exit}' "$BIN/write_handoff.sh"; }
 fn_src="$(extract_fn)"
 got="$(perl -e 'print "x" x 8000000' | /bin/bash -c "$fn_src"$'\n''read_hook_payload | wc -c' | tr -d ' ')"

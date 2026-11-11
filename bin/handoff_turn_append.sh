@@ -37,7 +37,7 @@ umask 077
 # diffs this copy against it. Duplicated, not sourced, so each hook stays a
 # single self-contained file in $HOME/.claude/bin with nothing to source
 # and this hook must stay dependency-light. Waits HANDOFF_STDIN_TIMEOUT whole
-# seconds (default 2, min 1) for a first line, then drains to EOF; a closed
+# seconds (default 2, min 1) for a first byte, then drains to EOF; a closed
 # pipe returns EOF at once.
 read_hook_payload() {
   local first="" timeout="${HANDOFF_STDIN_TIMEOUT:-2}"
@@ -49,6 +49,11 @@ read_hook_payload() {
   # line is bounded in total, and bash 3.2 reads a pipe byte by byte, so a big
   # one-line payload (8 MB) timed out and came back empty. Once a byte has
   # arrived the writer is live, so the rest ends at EOF.
+  # Trade-off: once any byte arrives we wait for EOF, so a writer that sends a
+  # partial newline-less payload and keeps the pipe open is no longer cut off
+  # at the timeout (old code: 2 s; new: until EOF). Claude Code closes stdin
+  # after writing the payload, and the old code already waited for EOF after a
+  # complete first line.
   if IFS= read -r -t "$timeout" -n 1 first; then
     printf '%s%s' "$first" "$(cat 2>/dev/null || true)"
   else
