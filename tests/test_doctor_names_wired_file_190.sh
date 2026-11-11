@@ -206,6 +206,71 @@ check "H: names the unparseable file" yes "$(has "$OUT" "$P/.claude/settings.jso
 check "H: still switches to the wired file" yes "$(has "$OUT" "this doctor run checks settings.local.json instead")"
 check "H: not reported as merely unwired" no "$(has "$OUT" "carries no handoff hooks")"
 
+# --- H2. corrupt flag-named file, no other file wired: one fault, counted once ------------------
+# The doctor does not switch, so the statusLine check names the file (BROKEN);
+# the pre-check must not name and count it a second time (#187 + #190 merge).
+fresh_sandbox
+inst --scope project --project "$P"
+printf '{"hooks":{' > "$P/.claude/settings.json"
+inst --doctor --scope project --project "$P"
+check "H2: doctor exits non-zero" 1 "$RC"
+check "H2: BROKEN names the file as not valid JSON" yes "$(has "$OUT" "BROKEN  $P/.claude/settings.json is not valid JSON")"
+check "H2: no second WARN for the same file" no "$(has "$OUT" "could not be parsed")"
+check "H2: counted once" yes "$(has "$OUT" "doctor: 1 issue(s) found.")"
+
+# --- H3. unreadable flag-named file: "cannot be read", never "could not be parsed" --------------
+# Skipped as root, where mode 000 is still readable.
+fresh_sandbox
+inst --scope project --project "$P" --local
+echo '{}' > "$P/.claude/settings.json"
+chmod 000 "$P/.claude/settings.json"
+if [[ -r "$P/.claude/settings.json" ]]; then
+  chmod 600 "$P/.claude/settings.json"
+  skip "H3: mode 000 is readable here (running as root)"
+else
+  inst --doctor --scope project --project "$P"
+  chmod 600 "$P/.claude/settings.json"
+  check "H3: doctor exits non-zero" 1 "$RC"
+  check "H3: note says cannot be read" yes "$(has "$OUT" "$P/.claude/settings.json cannot be read; ")"
+  check "H3: not mislabelled as a parse failure" no "$(has "$OUT" "could not be parsed")"
+  check "H3: still switches to the wired file" yes "$(has "$OUT" "this doctor run checks settings.local.json instead")"
+  check "H3: closing line names the cause" yes "$(has "$OUT" "doctor: permission denied while reading settings")"
+fi
+
+# --- H4. empty / non-object / multi-document flag-named file next to a wired one ----------------
+# Unusable like invalid JSON (settings_usable, #187): named and counted once
+# when the doctor switches away from it, never "carries no handoff hooks".
+for content in '' '[]' '42' '{}{}'; do
+  fresh_sandbox
+  inst --scope project --project "$P" --local
+  printf '%s' "$content" > "$P/.claude/settings.json"
+  inst --doctor --scope project --project "$P"
+  check "H4 <$content>: doctor exits non-zero" 1 "$RC"
+  check "H4 <$content>: names the file as unusable" yes "$(has "$OUT" "WARN    $P/.claude/settings.json is empty or not a JSON object")"
+  check "H4 <$content>: not reported as merely unwired" no "$(has "$OUT" "carries no handoff hooks")"
+  check "H4 <$content>: counted once" yes "$(has "$OUT" "doctor: 1 issue(s) found.")"
+done
+
+# --- H5. jq fails on the wiring read of the flag-named file: unknown, not "no hooks" ------------
+fresh_sandbox
+inst --scope project --project "$P" --local
+echo '{}' > "$P/.claude/settings.json"
+SHIM="$(mktemp -d)"; cleanup_on_exit "$SHIM"
+REAL_JQ="$(command -v jq)"
+cat > "$SHIM/jq" <<EOF
+#!/usr/bin/env bash
+# Fail (exit 3) only the wiring read of settings.json; every other call is real jq.
+for a in "\$@"; do case "\$a" in *'def wired'*) w=1 ;; esac; done
+if [[ -n "\${w:-}" && "\${*: -1}" == */settings.json ]]; then exit 3; fi
+exec "$REAL_JQ" "\$@"
+EOF
+chmod +x "$SHIM/jq"
+OUT="$(cd "$P" && HOME="$H" CLAUDE_HOME="$H/.claude" PATH="$SHIM:$PATH" bash "$SRC/install.sh" --doctor --scope project --project "$P" 2>&1 </dev/null)"; RC=$?
+check "H5: doctor exits non-zero" 1 "$RC"
+check "H5: note names the jq failure" yes "$(has "$OUT" "$P/.claude/settings.json could not be checked (jq failed); ")"
+check "H5: not reported as merely unwired" no "$(has "$OUT" "carries no handoff hooks")"
+check "H5: closing line names the jq failure" yes "$(has "$OUT" "doctor: jq failed while reading settings")"
+
 # --- M. model WARN names the checked file ------------------------------------------------------
 fresh_sandbox
 inst --scope project --project "$P" --local --model opus
