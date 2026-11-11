@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Tests install.sh --model / HANDOFF_MODEL pin + the doctor 200k warning:
+# Tests install.sh --model / HANDOFF_MODEL pin + the doctor 200k warning (4.6 ids only):
 #   A. --model writes the key when absent, records it, settings stay intact
 #   B. idempotent re-run; --uninstall removes only our unchanged pin
 #   C. an existing differing "model" is preserved (never overwritten)
 #   D. env fallback works and the --model flag beats it
 #   E. plain install prints the one-line NOTE only when no model is set
 #   F. uninstall preserves a value the user changed after we pinned it
-#   G. doctor WARNs on bare 'opus'/'claude-opus-4-8', quiet otherwise
+#   G. doctor WARNs on bare 'claude-opus-4-6'/'claude-sonnet-4-6', quiet otherwise
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 echo "install.sh model pin"
@@ -103,21 +103,29 @@ check "user-edit: record gone"   no        "$(record)"
 rm -rf "$HOME_DIR"
 
 # --- G. doctor context-window warning ---
-run_install '{"model":"opus"}'
+# Only ids whose window depends on the picked variant warn (Opus 4.6, Sonnet
+# 4.6). Opus 4.7 and later default to 1M (bin/handoff_ctx_check.sh's table),
+# so they are quiet; a bare alias is not detected at all (#194).
+run_install '{"model":"claude-opus-4-6"}'
 run_again --doctor
-check "doctor: WARN bare opus"   yes       "$(saw '200k-context')"
+check "doctor: WARN bare claude-opus-4-6"   yes "$(saw 'may run at a 200k context window')"
+check "doctor: WARN suggests the [1m] id"   yes "$(saw 'claude-opus-4-6\[1m\]')"
 rm -rf "$HOME_DIR"
-run_install '{"model":"claude-opus-4-8"}'
+run_install '{"model":"claude-sonnet-4-6"}'
 run_again --doctor
-check "doctor: WARN bare full id" yes      "$(saw '200k-context')"
+check "doctor: WARN bare claude-sonnet-4-6" yes "$(saw 'may run at a 200k context window')"
 rm -rf "$HOME_DIR"
-run_install '{"model":"opus[1m]"}'
-run_again --doctor
-check "doctor: quiet for [1m]"   no        "$(saw '200k-context')"
-rm -rf "$HOME_DIR"
+# claude-opus-4-6[1m] names its variant, so it is quiet too. Bare aliases are
+# simply not detected (they may resolve to 4.6 on some providers).
+for m in opus claude-opus-4-8 'opus[1m]' 'claude-opus-4-6[1m]'; do
+  run_install "{\"model\":\"$m\"}"
+  run_again --doctor
+  check "doctor: quiet for $m"   no        "$(saw '200k context window')"
+  rm -rf "$HOME_DIR"
+done
 run_install ""
 run_again --doctor
-check "doctor: quiet when absent" no       "$(saw '200k-context')"
+check "doctor: quiet when absent" no       "$(saw '200k context window')"
 rm -rf "$HOME_DIR"
 
 finish

@@ -1082,7 +1082,9 @@ path with a space can be pasted as is. When the user file is unwired but
 the project (or a registered project) is, the doctor's "re-run" remedy
 names the project-scope command rather than a bare `./install.sh`. When
 several registered projects are wired and the scripts are missing, the
-closing remedy prints one command per wired project.
+closing remedy prints one command and then lists every wired project (once
+each, even when both of its settings files are wired) that the run also
+repairs, since the scripts are shared.
 
 `--uninstall --scope project [--project <dir>] [--local]` strips only
 that project file (hooks, permissions, our `statusLine`, and a model pin
@@ -1103,7 +1105,18 @@ git tracks it, in the project's repository or in any other one (a dotfiles
 repo the `.claude/` directory or the file links into). A file that existed
 before the install, one you rewrote or added to since, and a tracked one
 are kept, the last as the empty skeleton. If the record cannot be written,
-the install warns and the uninstall leaves the skeleton.
+the install warns and the uninstall leaves the skeleton. The
+`<project>/.claude/` directory itself is never removed, even when the
+install created it and it is empty: on some filesystems (FAT32) a
+directory's identity cannot tell it from one you removed and recreated.
+The record is trusted when the backup directory's `path` file names the
+project, or when that file is absent (an install from before it existed);
+a `path` file naming another project is left alone, since two paths can
+share a cksum key. An install refuses a
+dangling `.claude` link, or a settings file linked into a directory that
+does not exist, before copying anything. An uninstall that cannot finish
+(invalid JSON in the settings file, no jq) keeps the records and the
+registry line and exits 1, so a re-run after the fix can complete.
 
 `--doctor --scope project` checks the project file. Claude Code runs an
 identical hook handler once even when several settings files define it,
@@ -1159,18 +1172,24 @@ symlinks.
 ```
 
 **Model pin (new machines).** Claude Code's model choice lives in the
-settings files on each machine, so a fresh install defaults wrong:
-notably, a bare `opus` runs at a **200k** context window (the 1M variant
-is `opus[1m]`). `--model` pins the value during install, but **never
-overwrites** a model you already set — a differing request is reported
-and skipped. A plain install with no model configured prints a one-line
-NOTE instead of leaving the gap silent, and `--doctor` warns whenever the
-pinned model is a bare 200k variant. The one-liner for a new machine:
-`./install.sh --model 'opus[1m]'`. `--model` writes the `model` key into
+settings files on each machine, so a fresh install may default to a
+model you did not pick. The window matters because the context nudge
+measures against it: Opus 4.7 and later run at 1M, while Opus 4.6 and
+Sonnet 4.6 run at 200k unless you pick the `[1m]` variant, which the bare
+id does not record. The `--doctor` warning below names only the two ids it
+can detect; a bare alias such as `opus` or `sonnet` may resolve to a 4.6
+model on some providers (for example Microsoft Foundry for `opus`, the
+Claude Platform on AWS for `sonnet`) and is not detected. `--model` pins the value
+during install, but **never overwrites** a model you already set: a
+differing request is reported and skipped. A plain install with no model
+configured prints a one-line NOTE instead of leaving the gap silent, and
+`--doctor` warns when the pinned model is a bare `claude-opus-4-6` or
+`claude-sonnet-4-6` (it may be running at 200k). The one-liner for a new
+machine: `./install.sh --model 'opus[1m]'`. `--model` writes the `model` key into
 whichever settings file the scope selects (`~/.claude/settings.json`, or the
 project's `.claude/settings.json` or `.claude/settings.local.json`).
-`--uninstall` removes the key only if
-this installer set it and you never changed it since.
+`--uninstall` removes the key only if this installer set it and you never
+changed it since.
 
 If a path the installer manages already holds a symlink of **yours**
 pointing somewhere else (a customized fork, a second clone, a dotfiles

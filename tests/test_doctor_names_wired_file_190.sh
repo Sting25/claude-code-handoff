@@ -273,9 +273,9 @@ check "H5: closing line names the jq failure" yes "$(has "$OUT" "doctor: jq fail
 
 # --- M. model WARN names the checked file ------------------------------------------------------
 fresh_sandbox
-inst --scope project --project "$P" --local --model opus
+inst --scope project --project "$P" --local --model claude-opus-4-6
 inst --doctor --scope project --project "$P"
-check "M: WARN names settings.local.json" yes "$(has "$OUT" "model 'opus' in settings.local.json")"
-check "M: WARN does not name settings.json" no "$(has "$OUT" "model 'opus' in settings.json")"
+check "M: WARN names settings.local.json" yes "$(has "$OUT" "model 'claude-opus-4-6' in settings.local.json")"
+check "M: WARN does not name settings.json" no "$(has "$OUT" "model 'claude-opus-4-6' in settings.json")"
 
 finish

@@ -6,7 +6,7 @@
 #      pre-existing file still gets its backup)
 #   3. `bash -s -- --help < install.sh` prints nothing on stderr
 #   4. several wired projects + missing scripts: the doctor's closing remedy
-#      prints one command per wired project
+#      prints one command and lists the other wired projects (#194)
 #   5. a project rooted at $HOME is refused with a --project hint
 #   7. a project-scope --uninstall removes a settings file the installer
 #      created once only the empty skeleton is left; a pre-existing file, and
@@ -74,7 +74,7 @@ err="$(bash -s -- --help < "$REPO_ROOT/install.sh" 2>&1 >/dev/null)"
 check "3: piped --help writes nothing to stderr" "" "$err"
 check "3: piped --help still exits 0" 0 "$(bash -s -- --help < "$REPO_ROOT/install.sh" >/dev/null 2>&1; echo $?)"
 
-# --- 4. closing remedy: one command per wired project ------------------------------------
+# --- 4. closing remedy: one command, the other projects listed ------------------------------------
 fresh_sandbox
 P2="$(mktemp -d)"; NEUTRAL="$(mktemp -d)"
 cleanup_on_exit "$P2" "$NEUTRAL"
@@ -84,9 +84,13 @@ rm -rf "$H/.claude/bin"
 RUN_DIR="$NEUTRAL" inst --doctor
 RUN_DIR=""
 check "4: doctor reports the missing scripts" 1 "$RC"
-check "4: remedy names the first project" yes "$(has "$OUT" "./install.sh --scope project --project '$(cd "$P" && pwd -P)'")"
-check "4: remedy names the second project" yes "$(has "$OUT" "./install.sh --scope project --project '$(cd "$P2" && pwd -P)'")"
-check "4: remedy says one per project" yes "$(has "$OUT" "Re-run one command per wired project")"
+# #194: the scripts are shared, so ONE command repairs every wired project;
+# the other projects are listed as paths, not as further commands.
+check "4: remedy prints one command for a wired project" yes "$(has "$OUT" "./install.sh --scope project --project '")"
+check "4: remedy prints exactly one install command" 1 "$(printf '%s\n' "$OUT" | grep -c 'Re-run ./install.sh --scope project')"
+check "4: remedy lists the first project" yes "$(has "$OUT" "          $(cd "$P" && pwd -P)")"
+check "4: remedy lists the second project" yes "$(has "$OUT" "          $(cd "$P2" && pwd -P)")"
+check "4: remedy says one run repairs all" yes "$(has "$OUT" "that one run repairs all 2")"
 # One wired project keeps the single-line form.
 fresh_sandbox
 inst --project "$P"
@@ -94,6 +98,20 @@ rm -rf "$H/.claude/bin"
 RUN_DIR="$NEUTRAL" inst --doctor
 RUN_DIR=""
 check "4: single project keeps the one-line remedy" yes "$(has "$OUT" "Re-run ./install.sh --scope project --project '$(cd "$P" && pwd -P)' from")"
+
+# #194 review: a project wired in BOTH files counts once. Three registry lines,
+# two projects: the remedy says "all 2" and lists each path exactly once.
+fresh_sandbox
+P2="$(mktemp -d)"; cleanup_on_exit "$P2"
+inst --project "$P"
+inst --project "$P" --local
+inst --project "$P2"
+rm -rf "$H/.claude/bin"
+RUN_DIR="$NEUTRAL" inst --doctor
+RUN_DIR=""
+check "4 dedupe: says all 2 (not 3)" yes "$(has "$OUT" "that one run repairs all 2:")"
+check "4 dedupe: the doubly wired project is listed once" 1 "$(printf '%s\n' "$OUT" | grep -c -x "          $(cd "$P" && pwd -P)")"
+check "4 dedupe: the other project is listed once" 1 "$(printf '%s\n' "$OUT" | grep -c -x "          $(cd "$P2" && pwd -P)")"
 
 # S11: run from INSIDE a wired project while a second wired project is registered.
 fresh_sandbox
@@ -103,9 +121,10 @@ inst --project "$P2"
 rm -rf "$H/.claude/bin"
 RUN_DIR="$P" inst --doctor
 RUN_DIR=""
-check "4 S11: lists the project it runs in" yes "$(has "$OUT" "./install.sh --scope project --project '$(cd "$P" && pwd -P)'")"
-check "4 S11: lists the other wired project" yes "$(has "$OUT" "./install.sh --scope project --project '$(cd "$P2" && pwd -P)'")"
-check "4 S11: says one per project" yes "$(has "$OUT" "Re-run one command per wired project")"
+check "4 S11: lists the project it runs in" yes "$(has "$OUT" "          $(cd "$P" && pwd -P)")"
+check "4 S11: lists the other wired project" yes "$(has "$OUT" "          $(cd "$P2" && pwd -P)")"
+check "4 S11: one install command, first is the one it runs in" yes "$(has "$OUT" "Re-run ./install.sh --scope project --project '$(cd "$P" && pwd -P)' from")"
+check "4 S11: says one run repairs all" yes "$(has "$OUT" "that one run repairs all 2")"
 
 # --- 5. a project rooted at $HOME gets a --project hint ----------------------------------
 fresh_sandbox

@@ -99,8 +99,12 @@ umask 077
 # and would silently turn the caller's cwd into the repo root.)
 _self_src="${BASH_SOURCE[0]:-}"
 repo_root=""
+repo_root_err=""   # why repo_root is empty: "" (no source path, piped) or "cannot cd to <dir>"
 if [[ -n "$_self_src" ]]; then
   repo_root="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || repo_root=""
+  if [[ -z "$repo_root" ]]; then
+    repo_root_err="cannot cd to $(dirname "$_self_src")"
+  fi
 fi
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
@@ -354,6 +358,33 @@ if [[ "$scope" == project ]]; then
       *) project_dir="$PWD/$project_dir" ;;
     esac
     while [[ "$project_dir" == */ && "$project_dir" != / ]]; do project_dir="${project_dir%/}"; done
+    # The install recorded the PHYSICAL path (registry line, backup key). A
+    # path reached through a symlink (a dangling link to the removed project,
+    # or a link above it) must be made physical the same way a missing path
+    # allows: follow a dangling final link, then resolve the parent (#194).
+    project_dir="$(resolve_symlink "$project_dir")"
+    # Walk up to the nearest existing ancestor, make THAT physical, and put the
+    # missing tail back: a removed worktree whose parent is gone too (under a
+    # symlinked ancestor such as macOS /tmp -> /private/tmp) must still match
+    # the physical path the install registered.
+    _gone_tail=""
+    _gone_head="$project_dir"
+    while [[ ! -d "$_gone_head" && "$_gone_head" != / && -n "$_gone_head" ]]; do
+      _gone_tail="/$(basename "$_gone_head")$_gone_tail"
+      _gone_head="$(dirname "$_gone_head")"
+    done
+    # An ancestor that cannot be entered (mode 000) has no knowable physical
+    # path: say so and leave the registry line, rather than dying on a raw
+    # `cd: Permission denied` under set -e or clearing a line that may not match.
+    if ! _gone_phys="$(cd "$_gone_head" 2>/dev/null && pwd -P)"; then
+      echo "  WARN    cannot enter $_gone_head (the nearest existing parent of $project_dir)," >&2
+      echo "          so its physical path is unknown; the registry line and markers were left in place." >&2
+      echo "          Make it enterable and re-run the --uninstall." >&2
+      exit 1
+    fi
+    _gone_head="$_gone_phys"
+    [[ "$_gone_head" == / ]] && _gone_head=""
+    project_dir="$_gone_head$_gone_tail"
     project_gone=1
   elif [[ ! -d "$project_dir" ]]; then
     echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
@@ -405,10 +436,7 @@ if [[ "$scope" == project ]]; then
   # A vanished project (--uninstall of a removed worktree) cannot be
   # resolved with pwd -P, so its parent is: the key must match the one the
   # install used (issue #178), or the created-file marker would be orphaned.
-  _key_dir="$project_dir"
-  if (( project_gone )) && [[ -d "$(dirname "$project_dir")" ]]; then
-    _key_dir="$(cd "$(dirname "$project_dir")" && pwd -P)/$(basename "$project_dir")"
-  fi
+  _key_dir="$project_dir"   # already physical on both paths (a gone one was resolved above)
   project_backup_dir="$claude_home/handoff_settings_backups/$(printf '%s' "$_key_dir" | cksum | awk '{print $1}')"
   # A project-scope --uninstall never touches the secret (see 40-main.sh),
   # so --keep-secret is a no-op there too; say so, same as issue #82.
@@ -440,7 +468,10 @@ fi
 # LINK with a plain file, silently disconnecting the user's source of truth.
 # Resolving to the real path keeps tmp+mv atomic AND leaves the symlink intact
 # (Claude Code follows it to read). Applies to a project file the same way.
+# settings_link keeps the path the user named, so a refusal can name the link.
+settings_link=""
 if [[ -L "$settings" ]]; then
+  settings_link="$settings"
   settings_resolved="$(resolve_symlink "$settings")"
   echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
   settings="$settings_resolved"

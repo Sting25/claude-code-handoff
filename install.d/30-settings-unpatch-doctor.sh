@@ -108,6 +108,7 @@ ensure_settings_json() {
 take_settings_backup() {
   if [[ "$scope" == project ]]; then
     mkdir -p "$project_backup_dir"
+    [[ "$mode" == install ]] && { project_key_claim || true; }
     settings_backup="$project_backup_dir/$settings_name.bak.$ts"
   else
     settings_backup="$settings.bak.$ts"
@@ -126,6 +127,53 @@ take_settings_backup() {
 # still byte-identical to what the marker was written for, and otherwise
 # drops it. Writing the marker is best effort: failing to write it must not
 # fail an install whose wiring is already in place.
+# The backup directory is keyed by a cksum of the project path, and CRC
+# collisions are constructible (two paths, one key). So the install writes the
+# project's physical path into a `path` file there, and every marker is
+# trusted only when that file names THIS project (#194). project_key_check
+# sets project_key_state: own (path matches), foreign (another project's),
+# legacy (directory exists without a path file: an install from before this
+# check; trusted for the created-file marker it could have written), or none.
+project_key_state=""
+project_key_warned=0
+project_key_check() {
+  local f="$project_backup_dir/path"
+  if [[ -L "$f" ]]; then
+    project_key_state=foreign
+  elif [[ -f "$f" ]]; then
+    if printf '%s\n' "$project_dir" | cmp -s - "$f"; then
+      project_key_state=own
+    else
+      project_key_state=foreign
+    fi
+  elif [[ -d "$project_backup_dir" ]]; then
+    project_key_state=legacy
+  else
+    project_key_state=none
+  fi
+}
+project_key_warn_foreign() {
+  (( project_key_warned )) && return 0
+  project_key_warned=1
+  echo "  WARN    $project_backup_dir is keyed to another project"
+  echo "          ($(head -n 1 "$project_backup_dir/path" 2>/dev/null || true)); its markers are left alone and none are"
+  echo "          recorded for $project_dir, so --uninstall will leave what this install created."
+}
+# Install only: make the key directory this project's. 0 = ours, 1 = another
+# project's (WARN printed once), 2 = the path file could not be written (the
+# caller's own marker write fails the same way and says so).
+project_key_claim() {
+  project_key_check
+  case "$project_key_state" in
+    own) return 0 ;;
+    foreign) project_key_warn_foreign; return 1 ;;
+  esac
+  if ( mkdir -p "$project_backup_dir" && printf '%s\n' "$project_dir" > "$project_backup_dir/path" ) 2>/dev/null; then
+    project_key_state=own
+    return 0
+  fi
+  return 2
+}
 created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
 settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
   # -r first: a failed `<` redirect is reported before 2>/dev/null applies
@@ -138,8 +186,10 @@ settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
 pre_patch_fp=""
 record_created_settings() {
   [[ "$scope" == project ]] || return 0
-  local m stored
+  local m stored krc=0
   m="$(created_marker)"
+  project_key_claim || krc=$?
+  (( krc == 1 )) && return 0
   if [[ "$settings_seed_state" == absent ]]; then
     if ! ( mkdir -p "$project_backup_dir" && settings_fp "$settings" > "$m" ) 2>/dev/null; then
       echo "  WARN    cannot record the created-file marker in $project_backup_dir;"
@@ -158,6 +208,7 @@ record_created_settings() {
 
 # jq test: the file holds nothing but the empty hooks/permissions skeleton
 # (exact: $1 = exact) or that skeleton plus nothing (loose, after a strip).
+# Returns jq's own status: 0 skeleton, 1 not, 2 or more = jq failed.
 settings_is_skeleton() {  # <file> <exact|loose>
   [[ -f "$1" && ! -L "$1" ]] && command -v jq >/dev/null 2>&1 || return 1
   if [[ "$2" == exact ]]; then
@@ -180,6 +231,8 @@ check_created_settings() {
   local m stored cur
   m="$(created_marker)"
   [[ -f "$m" && ! -L "$m" ]] || return 0
+  project_key_check
+  [[ "$project_key_state" == foreign ]] && return 0
   stored="$(cat "$m" 2>/dev/null || true)"
   cur="$(settings_fp "$settings")"
   if [[ -n "$cur" && "$cur" == "$stored" ]]; then
@@ -207,16 +260,36 @@ git_tracks_file() {
 # Step 2 (after the strip): delete the file only when the marker matched, the
 # strip left nothing but the empty skeleton, and no git repository tracks it
 # (a tracked file would show up as a deletion). The marker is consumed either way.
+# A jq failure in the skeleton test is not "not a skeleton": the marker stays
+# and uninstall_incomplete is set, so the caller keeps the registry line and
+# exits non-zero, and a re-run can finish.
 remove_created_settings_if_empty() {
-  local m
+  local m src=0
   m="$(created_marker)"
   [[ -f "$m" && ! -L "$m" ]] || return 0
-  if (( created_pre_ok )) && settings_is_skeleton "$settings" loose; then
-    if git_tracks_file "$settings"; then
-      echo "  keep    $settings (tracked by git; left as the empty skeleton)"
-    else
-      rm -f "$settings"
-      echo "  remove  $settings (this installer created it; nothing else was ever written to it)"
+  project_key_check
+  if [[ "$project_key_state" == foreign ]]; then
+    project_key_warn_foreign
+    return 0
+  fi
+  if (( created_pre_ok )); then
+    settings_is_skeleton "$settings" loose || src=$?
+    if (( src > 1 )); then
+      echo "  ERROR   jq failed (exit $src) while checking whether $settings is the empty skeleton;"
+      echo "          $settings and its created-file marker were left in place."
+      # The strip above was ours, so re-bind the marker to the stripped file:
+      # a re-run then finds it unchanged and can finish the removal.
+      settings_fp "$settings" > "$m" 2>/dev/null || true
+      uninstall_incomplete=1
+      return 0
+    fi
+    if (( src == 0 )); then
+      if git_tracks_file "$settings"; then
+        echo "  keep    $settings (tracked by git; left as the empty skeleton)"
+      else
+        rm -f "$settings"
+        echo "  remove  $settings (this installer created it; nothing else was ever written to it)"
+      fi
     fi
   fi
   rm -f "$m"
@@ -235,7 +308,11 @@ patch_settings() {
     # Neither scope backs up a file this run just seeded as {}: there is
     # nothing to keep, and cleanup() undoes the seed itself on abort.
     settings_backup=""
-    echo "  ok      no backup needed ($settings was just created; an abort undoes that)"
+    if [[ "$settings_seed_state" == absent ]]; then
+      echo "  ok      no backup needed ($settings was just created; an abort undoes that)"
+    else
+      echo "  ok      no backup needed ($settings was empty; an abort empties it again)"
+    fi
   else
     take_settings_backup
   fi
@@ -270,6 +347,10 @@ patch_settings() {
   fi
 }
 
+# Set when unpatch_settings (or a step after it) returned without finishing:
+# the project-scope uninstall then keeps the markers and the registry line and
+# exits non-zero, so a re-run can still clean up.
+uninstall_incomplete=0
 unpatch_settings() {
   if ! command -v jq >/dev/null 2>&1; then
     echo
@@ -293,6 +374,7 @@ unpatch_settings() {
     echo "  - $perm_wr"
     echo "and, if you used --model, the top-level \"model\" key (the value this"
     echo "installer wrote, if any, is recorded in $model_pin_record)."
+    uninstall_incomplete=1
     return
   fi
   if [[ ! -f "$settings" ]]; then
@@ -328,6 +410,7 @@ unpatch_settings() {
       echo "  ok      $settings is empty or not a JSON object; nothing to strip"
     else
       echo "  ERROR   $settings is not valid JSON; refusing to edit (left untouched)."
+      uninstall_incomplete=1
     fi
     return
   fi
@@ -451,11 +534,11 @@ rerun_cmd() {
 }
 
 # The doctor's closing remedy. When the user file is unwired and the only
-# wiring is in several registered projects, a single command would leave the
-# others broken, so it prints one command per wired project (issue #178).
+# wiring is in several registered projects it names one command (any of them
+# restores the shared scripts) and lists the projects it repairs (#178, #194).
 # Every other case keeps the one-line form.
 rerun_remedy() {
-  local list n rp rn flag proj tab nl line
+  local list plist n rp rn flag proj tab nl line
   list=""
   if [[ "$scope" != project ]] && ! settings_has_our_hooks "$user_settings"; then
     proj="$(wiring_project_root)"
@@ -472,15 +555,26 @@ rerun_remedy() {
       fi
     done
   fi
+  # One entry per project path: a project wired in both settings.json and
+  # settings.local.json is still one project to repair.
+  plist=""
+  if [[ -n "$list" ]]; then
+    plist="$(printf '%s\n' "$list" | awk -F'\t' '!seen[$1]++')"
+  fi
   n=0
-  if [[ -n "$list" ]]; then n="$(printf '%s\n' "$list" | wc -l | tr -d ' ')"; fi
+  if [[ -n "$plist" ]]; then n="$(printf '%s\n' "$plist" | wc -l | tr -d ' ')"; fi
   if (( n > 1 )); then
-    echo "        Re-run one command per wired project, from a persistent clone (not a /tmp checkout):"
+    # The scripts are shared under $claude_home/bin, so one re-run restores
+    # them for every wired project: print one command, then list all n
+    # projects (the first one is the one in the command) (#194).
+    IFS=$'\t' read -r rp rn <<< "$(printf '%s\n' "$plist" | head -n 1)"
+    flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
+    echo "        Re-run ./install.sh --scope project --project $(shq "$rp")$flag from a persistent clone (not a /tmp checkout)."
+    echo "        The scripts are shared by every wired project, so that one run repairs all $n:"
     while IFS=$'\t' read -r rp rn; do
       [[ -n "$rp" ]] || continue
-      flag=""; [[ "$rn" == settings.local.json ]] && flag=" --local"
-      echo "          ./install.sh --scope project --project $(shq "$rp")$flag"
-    done <<< "$list"
+      echo "          $rp"
+    done <<< "$plist"
   else
     echo "        Re-run $(rerun_cmd) from a persistent clone (not a /tmp checkout)."
   fi
@@ -694,6 +788,11 @@ registry_add() {  # <project dir> <settings file name>
   mkdir -p "$claude_home"
   printf '%s\n' "$line" >> "$project_registry"
   echo "  add     registry: $1 ($2) in $project_registry"
+}
+
+registry_has() {  # <project dir> <settings file name>: 0 when that line is registered
+  [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 1
+  grep -Fxq -- "$1"$'\t'"$2" "$project_registry"
 }
 
 registry_remove() {  # <project dir> <settings file name>
@@ -1039,10 +1138,16 @@ doctor() {
       echo "          its state is unknown. Fix jq and re-run ./install.sh --doctor."
       sh_jq_failed=1
     fi
-    # Model context-window check — advisory only, never counts toward broken:
-    # a bare 'opus'/'claude-opus-4-8' pin silently runs at a 200k context
-    # window; the 1M variant needs the [1m] suffix. Any other value (including
-    # absent) is a legitimate choice we stay quiet about.
+    # Model context-window check: advisory only, never counts toward broken.
+    # Only an id whose window depends on the variant picked is worth a WARN:
+    # Opus 4.6 and Sonnet 4.6 run at 200k unless the [1m] variant is chosen,
+    # which the bare id does not record. Only these two ids are detected.
+    # Opus 4.7 and later default to 1M (bin/handoff_ctx_check.sh's model
+    # table), so those ids stay quiet. A bare alias (`opus`, `sonnet`) is not
+    # detected: on some providers it resolves to a 4.6 model (Microsoft
+    # Foundry for `opus`, the Claude Platform on AWS for `sonnet`), which this
+    # check cannot see. Any other value (including absent) is a legitimate
+    # choice we stay quiet about.
     mdl=""
     mdl_rc=0
     mdl="$(jq -r "$probe_model_read" "$settings" 2>/dev/null)" || mdl_rc=$?
@@ -1053,10 +1158,11 @@ doctor() {
       sh_jq_failed=1
     fi
     case "$mdl" in
-      opus|claude-opus-4-8)
-        echo "  WARN    model '$mdl' in $settings_name is the 200k-context variant:"
-        echo "          for the 1M window set \"model\": \"${mdl}[1m]\" (edit $settings_name"
-        echo "          or run /model ${mdl}[1m] in a session)."
+      claude-opus-4-6|claude-sonnet-4-6)
+        echo "  WARN    model '$mdl' in $settings_name may run at a 200k context window"
+        echo "          (the id does not say which variant is picked); for the 1M window"
+        echo "          set \"model\": \"${mdl}[1m]\" (edit $settings_name or run"
+        echo "          /model ${mdl}[1m] in a session)."
         ;;
     esac
     echo
