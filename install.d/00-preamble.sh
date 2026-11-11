@@ -204,16 +204,41 @@ fi
 # path keeps tmp+mv atomic AND leaves the symlink intact (Claude Code follows it
 # to read). Portable manual resolve (readlink -f is GNU-only), capped against
 # loops, falling back to the link path itself.
-resolve_symlink() {  # <path> -> physical path on stdout
-  local p="$1" n=0 t
+#
+# The result goes into RESOLVED with every trailing newline kept (#210): the
+# `printf x` trick on readlink, and phys_dir (below) for the parent, so a
+# link whose target ends in a newline resolves to that target and not to a
+# sibling without it. resolve_symlink prints it for callers that do not care.
+# `readlink -n` (GNU, BSD, busybox) prints the target bytes exactly. Plain
+# readlink cannot be trusted for this: macOS adds its newline only when the
+# target does not already end in one, so stripping one would drop the
+# target's own. The plain form is the fallback for a readlink without -n.
+RESOLVED=""
+resolve_symlink_into() {  # <path>; sets RESOLVED
+  local p="$1" n=0 t d
   while [[ -L "$p" ]] && (( n++ < 40 )); do
-    t="$(readlink "$p")" || break
+    if t="$(readlink -n "$p" 2>/dev/null && printf x)"; then
+      t="${t%x}"
+    elif t="$(readlink "$p" && printf x)"; then
+      t="${t%x}"
+      t="${t%$'\n'}"
+    else
+      break
+    fi
     case "$t" in
       /*) p="$t" ;;
-      *)  p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/$t" ;;
+      *)
+        case "$p" in */*) d="${p%/*}" ;; *) d=. ;; esac
+        [[ -n "$d" ]] || d=/
+        phys_dir "$d" || PHYS_DIR=""
+        p="$PHYS_DIR/$t" ;;
     esac
   done
-  printf '%s\n' "$p"
+  RESOLVED="$p"
+}
+resolve_symlink() {  # <path> -> physical path on stdout
+  resolve_symlink_into "$1"
+  printf '%s\n' "$RESOLVED"
 }
 # (The symlink check itself runs after argument parsing, below, because
 # --scope project repoints $settings at a project file first.)
@@ -406,16 +431,25 @@ if [[ "$scope" == project ]]; then
     # path reached through a symlink (a dangling link to the removed project,
     # or a link above it) must be made physical the same way a missing path
     # allows: follow a dangling final link, then resolve the parent (#194).
-    project_dir="$(resolve_symlink "$project_dir")"
+    # resolve_symlink_into keeps a trailing newline in the link target, so
+    # the refusal after the walk below sees a control character that
+    # arrived that way (#210): `$(resolve_symlink ...)` used to strip it and
+    # then matched, and cleared, a sibling project's registry line.
+    resolve_symlink_into "$project_dir"
+    project_dir="$RESOLVED"
+    while [[ "$project_dir" == */ && "$project_dir" != / ]]; do project_dir="${project_dir%/}"; done
     # Walk up to the nearest existing ancestor, make THAT physical, and put the
     # missing tail back: a removed worktree whose parent is gone too (under a
     # symlinked ancestor such as macOS /tmp -> /private/tmp) must still match
     # the physical path the install registered.
     _gone_tail=""
     _gone_head="$project_dir"
+    # Parameter expansion, not `$(dirname ...)`/`$(basename ...)`, which
+    # strip a trailing newline from each component (#210).
     while [[ ! -d "$_gone_head" && "$_gone_head" != / && -n "$_gone_head" ]]; do
-      _gone_tail="/$(basename "$_gone_head")$_gone_tail"
-      _gone_head="$(dirname "$_gone_head")"
+      _gone_tail="/${_gone_head##*/}$_gone_tail"
+      _gone_head="${_gone_head%/*}"
+      [[ -n "$_gone_head" ]] || _gone_head=/
     done
     # An ancestor that cannot be entered (mode 000) has no knowable physical
     # path: say so and leave the registry line, rather than dying on a raw

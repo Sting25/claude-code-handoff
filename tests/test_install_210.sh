@@ -13,7 +13,15 @@
 #      copied into CLAUDE_HOME (already true on main when #210 was fixed;
 #      pinned here because the issue reported a copy-then-die)
 #   C. `bash -s -- --uninstall < install.sh` (no clone) closes with a line
-#      that names no empty repo path
+#      that names no empty repo path, also for a gone project
+#   D. (review of the first fix) a project-scope --uninstall that reaches a
+#      control character through a symlink is refused too: a dangling link
+#      (absolute or relative) to `my proj<LF>`, a dangling link to a gone
+#      child of `x<LF>`, a live link to `my proj<LF>`, and a gone child under
+#      a link to an existing `my proj<LF>`. Each used to exit 0 or clear a
+#      sibling's registry line. Also: --doctor refuses, DEL (0x7f) is a
+#      control character, and under a UTF-8 locale a name with U+0085 or
+#      U+009F (not ASCII controls) still installs.
 # Every run sandboxes HOME and CLAUDE_HOME, so nothing touches ~/.claude.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -159,5 +167,98 @@ check "C2: says no clone was used" yes "$(has "$OUT" "done. no clone was used (i
 # A clone run still names its repo.
 inst "$P" --uninstall
 check "C3: clone uninstall still names the repo" yes "$(has "$OUT" "done. the repo at $SRC is untouched.")"
+# C4: a piped project-scope uninstall of a GONE project (the early-exit branch).
+fresh_sandbox
+OUT="$(cd "$P" && HOME="$H" CLAUDE_HOME="$H/.claude" bash -s -- --uninstall --project "$P/gone" < "$SRC/install.sh" 2>&1)"
+RC=$?
+check "C4: piped gone-project uninstall exits 0" 0 "$RC"
+check "C4: no empty repo path" no "$(has "$OUT" "the repo at  is")"
+check "C4: says no clone was used" yes "$(has "$OUT" "done. no clone was used (install.sh was read from a pipe).")"
+
+# --- D. control characters reached through a symlink on --uninstall, and the class itself -------
+REG=""
+# Two installed projects, 'my proj' and 'other'; REG is the registry before the case runs.
+setup_two() {
+  fresh_sandbox
+  must mkdir "$P/my proj" "$P/other"
+  inst "$P" --project "$P/my proj"
+  inst "$P" --project "$P/other"
+  REG="$(cat "$H/.claude/handoff_projects" 2>/dev/null)"
+}
+reg_now() { cat "$H/.claude/handoff_projects" 2>/dev/null; }
+wired() { [[ -f "$1/.claude/settings.json" ]] && grep -q handoff "$1/.claude/settings.json" && echo yes || echo no; }
+# d_case <label>: asserts the refusal left both projects as they were.
+d_case() {
+  check "$1: refused (exit 2)" 2 "$RC"
+  check "$1: ERROR line" yes "$(has "$OUT" "$CTRL_ERR")"
+  check "$1: registry unchanged" "$REG" "$(reg_now)"
+  check "$1: 'my proj' still wired" yes "$(wired "$P/my proj")"
+}
+setup_two
+check "D0: both projects registered" 2 "$(printf '%s\n' "$REG" | grep -c .)"
+# D1: dangling absolute link to 'my proj<LF>' (the target does not exist).
+must ln -s "$P/my proj$NL" "$P/dl"
+inst "$P" --uninstall --project "$P/dl"
+d_case "D1 (dangling link -> 'my proj<LF>')"
+# D2: the same with a relative link target.
+setup_two
+must ln -s "my proj$NL" "$P/dl"
+inst "$P" --uninstall --project "$P/dl"
+d_case "D2 (dangling relative link -> 'my proj<LF>')"
+# D3: a registered project 'x/wt' that is gone, and a dangling link to 'x<LF>/wt'.
+fresh_sandbox
+must mkdir -p "$P/x/wt"
+inst "$P" --project "$P/x/wt"
+must rm -r "$P/x/wt"
+REG="$(reg_now)"
+check "D3: gone child registered" yes "$(has "$REG" "$P/x/wt")"
+must ln -s "$P/x$NL/wt" "$P/dl"
+inst "$P" --uninstall --project "$P/dl"
+check "D3 (dangling link -> 'x<LF>/wt'): refused (exit 2)" 2 "$RC"
+check "D3: ERROR line" yes "$(has "$OUT" "$CTRL_ERR")"
+check "D3: registry unchanged" "$REG" "$(reg_now)"
+# D4: a live link to an existing 'my proj<LF>', on --uninstall.
+setup_two
+must mkdir "$P/my proj$NL"
+must ln -s "$P/my proj$NL" "$P/l"
+inst "$P" --uninstall --project "$P/l"
+d_case "D4 (uninstall through a live link -> 'my proj<LF>')"
+# D5: a gone child under a live link to an existing 'my proj<LF>'.
+setup_two
+must mkdir "$P/my proj$NL"
+must ln -s "$P/my proj$NL" "$P/l"
+inst "$P" --uninstall --project "$P/l/gone"
+d_case "D5 (gone child under a link -> 'my proj<LF>')"
+# D6: --doctor refuses the same path.
+fresh_sandbox
+must mkdir "$P/my proj$NL"
+inst "$P" --doctor --project "$P/my proj$NL"
+check "D6: --doctor refused (exit 2)" 2 "$RC"
+check "D6: ERROR line" yes "$(has "$OUT" "$CTRL_ERR")"
+# D7: DEL (0x7f) is a control character.
+fresh_sandbox
+DELP="$P/my"$'\x7f'"proj"; must mkdir "$DELP"
+inst "$P" --project "$DELP"
+check "D7: DEL refused (exit 2)" 2 "$RC"
+check "D7: ERROR line" yes "$(has "$OUT" "$CTRL_ERR")"
+check "D7: not wired" no "$(exists "$DELP/.claude")"
+# D8: under a UTF-8 locale, bash classes U+0085 and U+009F as cntrl; they are
+# not ASCII controls, so names holding them still install.
+UTF8_LC=""
+for _lc in en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8; do
+  if LC_ALL="$_lc" bash -c '[[ $'"'"'\xc2\x85'"'"' == *[[:cntrl:]]* ]]' 2>/dev/null; then UTF8_LC="$_lc"; break; fi
+done
+if [[ -n "$UTF8_LC" ]]; then
+  for _cp in 85 9F; do
+    fresh_sandbox
+    C1P="$P/my"$(printf "\\xc2\\x$_cp")"proj"; must mkdir "$C1P"
+    OUT="$(cd "$P" && LC_ALL="$UTF8_LC" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --project "$C1P" 2>&1 </dev/null)"
+    RC=$?
+    check "D8 (U+00$_cp under $UTF8_LC): installs (exit 0)" 0 "$RC"
+    check "D8 (U+00$_cp): wired" yes "$(wired "$C1P")"
+  done
+else
+  skip "D8: no UTF-8 locale that classes U+0085 as cntrl"
+fi
 
 finish
