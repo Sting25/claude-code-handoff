@@ -77,7 +77,26 @@ ensure_settings_json() {
     echo "  init    $settings was empty; set to {}"
     return 0
   fi
-  if ! jq -e . "$settings" >/dev/null 2>&1; then
+  # Say which of the failures it is (settings_usable, #187/#213): an
+  # unreadable file, jq itself failing, and unparseable content are three
+  # different causes, and a `null` root is valid JSON that is not an object.
+  local usable_rc=0
+  settings_usable "$settings" || usable_rc=$?
+  if [[ $usable_rc -eq 2 ]]; then
+    echo
+    echo "  ERROR   jq failed (exit $settings_usable_rc) while reading $settings; refusing to auto-patch (left untouched)."
+    echo "          Fix jq and re-run, or patch settings.json by hand:"
+    print_manual_snippet
+    return 1
+  fi
+  if [[ $usable_rc -eq 1 && ! -r "$settings" ]]; then
+    echo
+    echo "  ERROR   $settings cannot be read (check its permissions); refusing to auto-patch (left untouched)."
+    echo "          Fix the file's permissions and re-run, or patch settings.json by hand:"
+    print_manual_snippet
+    return 1
+  fi
+  if ! jq empty "$settings" >/dev/null 2>&1; then
     echo
     echo "  ERROR   $settings is not valid JSON — refusing to auto-patch (left untouched)."
     echo "          Fix or remove it and re-run, or patch settings.json by hand:"
@@ -89,9 +108,9 @@ ensure_settings_json() {
   # otherwise sail past the check above and hit a raw jq runtime error mid-patch
   # (caught by the rollback trap, but ugly and confusing). Refuse it cleanly up
   # front instead. (settings#3)
-  if ! jq -e 'type == "object"' "$settings" >/dev/null 2>&1; then
+  if [[ $usable_rc -ne 0 ]]; then
     echo
-    echo "  ERROR   $settings is valid JSON but not a JSON object (got: $(jq -r 'type' "$settings" 2>/dev/null))."
+    echo "  ERROR   $settings is valid JSON but not a JSON object (got: $(jq -rs 'if length == 1 then (.[0] | type) else "\(length) documents" end' "$settings" 2>/dev/null))."
     echo "          settings.json must be an object — refusing to auto-patch (left untouched)."
     echo "          Fix or remove it and re-run, or patch settings.json by hand:"
     print_manual_snippet
@@ -647,18 +666,49 @@ settings_usable() {
 sh_jq_failed=0
 sh_jq_failed_file=""
 sh_jq_failed_why=""   # "jq failed" or "permission denied": what the WARN said
+# sh_warn_once <file> <why> <line1> <line2>: print the two-line WARN to
+# stderr unless this run already printed it for <file> with the same <why>
+# (#214): one unreadable file is read by several checks (the doctor's
+# pre-check, the wired-files listing) and must not be reported by each.
+# sh_jq_failed is set by the callers either way, so the exit code is
+# unchanged. Must run in the caller's shell, not a command substitution.
+sh_warned=""
+sh_warn_once() {
+  local key="$2|$1"$'\n'
+  case "$sh_warned" in *"$key"*) return 0 ;; esac
+  sh_warned="$sh_warned$key"
+  echo "$3" >&2
+  echo "$4" >&2
+}
 settings_has_our_hooks() {
   local f="$1" rc=0
-  [[ -f "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
+  # A directory this process cannot search hides the file: `-f` is false for
+  # it exactly as for an absent file. Unknown, not "does not exist" (#213);
+  # same report as the unreadable file below.
+  local d
+  d="$(dirname "$f")"
+  # Walk up to the nearest ancestor that can be stat'ed: when the project
+  # directory, or any directory above it, cannot be searched, everything
+  # below it is hidden and the first stat-able one is the unsearchable one.
+  while [[ ! -e "$d" && "$d" != "/" && "$d" != "." ]]; do d="$(dirname "$d")"; done
+  if [[ -d "$d" && ! -x "$d" ]]; then
+    sh_warn_once "$f" "permission denied" "  WARN    $f cannot be read (check its permissions);" \
+      "          treating its wiring as unknown. Fix the file and re-run."
+    sh_jq_failed=1
+    sh_jq_failed_file="$f"
+    sh_jq_failed_why="permission denied"
+    return 1
+  fi
+  [[ -f "$f" ]] || return 1
   # A file this process cannot read is unknown, not "not wired": this is the
   # read the user-scope --uninstall registry scan relies on before it deletes
   # the shared secret, and a mode-000 project file may well still be wired.
   # Reported through sh_jq_failed like a jq failure, so every caller that
   # acts on "not wired" stops the same way (the WARN names the real cause).
   if [[ ! -r "$f" ]]; then
-    echo "  WARN    $f cannot be read (check its permissions);" >&2
-    echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+    sh_warn_once "$f" "permission denied" "  WARN    $f cannot be read (check its permissions);" \
+      "          treating its wiring as unknown. Fix the file and re-run."
     sh_jq_failed=1
     sh_jq_failed_file="$f"
     sh_jq_failed_why="permission denied"
@@ -670,8 +720,8 @@ settings_has_our_hooks() {
   # reason: "unknown" must never collapse into "not wired".
   settings_usable "$f" || rc=$?
   if [[ $rc -eq 2 ]]; then
-    echo "  WARN    jq failed (exit $settings_usable_rc) while checking whether $f is a JSON object;" >&2
-    echo "          treating its wiring as unknown. Fix jq and re-run." >&2
+    sh_warn_once "$f" "jq failed" "  WARN    jq failed (exit $settings_usable_rc) while checking whether $f is a JSON object;" \
+      "          treating its wiring as unknown. Fix jq and re-run."
     sh_jq_failed=1
     sh_jq_failed_file="$f"
     sh_jq_failed_why="jq failed"
@@ -693,8 +743,8 @@ settings_has_our_hooks() {
     # A jq failure on parseable JSON is not "not wired" (#187). The callers
     # take 0/1, so say it loudly here and record it: doctor exits non-zero,
     # install aborts before registering.
-    echo "  WARN    jq failed (exit $rc) while checking whether $f wires handoff hooks;" >&2
-    echo "          treating it as unknown. Fix jq and re-run." >&2
+    sh_warn_once "$f" "jq failed" "  WARN    jq failed (exit $rc) while checking whether $f wires handoff hooks;" \
+      "          treating it as unknown. Fix jq and re-run."
     sh_jq_failed=1
     sh_jq_failed_file="$f"
     sh_jq_failed_why="jq failed"
@@ -988,7 +1038,15 @@ doctor() {
       #   below; otherwise the statusLine check names it as BROKEN and counts
       #   it, so it is counted exactly once either way.
       parse_rc=0; usable_pre=0; why="carries no handoff hooks"
-      if [[ ! -f "$settings" ]]; then
+      if [[ -e "$settings" && ! -f "$settings" ]]; then
+        # A directory (or other non-regular file) at the settings path is
+        # not "absent" (#216): Claude Code cannot read settings from it, so
+        # it is a fault, counted here once, switch or no switch.
+        why="is not a regular file"
+        echo "  BROKEN  $settings is not a regular file (a directory or special file);"
+        echo "          Claude Code cannot read settings from it. Remove it and re-run the installer."
+        broken=$((broken + 1))
+      elif [[ ! -f "$settings" ]]; then
         why="does not exist"
       elif [[ "$sh_jq_failed_file" == "$settings" ]]; then
         if [[ "$sh_jq_failed_why" == "permission denied" ]]; then
