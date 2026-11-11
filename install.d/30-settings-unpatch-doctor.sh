@@ -817,8 +817,14 @@ registry_remove() {  # <project dir> <settings file name>
 # a removal command for a project it just called unknown. An empty or
 # non-object file is a plain stale entry (settings_usable), not a failure.
 REGISTRY_OUT=""
+# Opt-in (#208): the user-scope --uninstall sets it, because it deletes the
+# shared secret on the strength of this scan. With it set, a non-empty file
+# that is not valid JSON counts as unknown (sh_jq_failed, like a jq failure),
+# not stale: its wiring cannot be read, and it may well still be wired once
+# the user fixes it. Left 0 for the doctor, which reports such a file stale.
+registry_unparseable_unknown=0
 registry_collect() {
-  local want="$1" rp rn has nl=$'\n' before failed=0
+  local want="$1" rp rn has nl=$'\n' before failed=0 uf urc
   REGISTRY_OUT=""
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
   # The flag is cleared per entry and folded back after the loop, so a
@@ -831,6 +837,19 @@ registry_collect() {
     has=stale
     sh_jq_failed=0
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
+    uf="$rp/.claude/$rn"
+    if (( registry_unparseable_unknown && ! sh_jq_failed )) && [[ -s "$uf" && -r "$uf" ]] \
+       && command -v jq >/dev/null 2>&1; then
+      urc=0
+      settings_usable "$uf" || urc=$?
+      if [[ $urc -eq 1 ]] && ! jq empty "$uf" >/dev/null 2>&1; then
+        echo "  WARN    $uf is not valid JSON;" >&2
+        echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+        sh_jq_failed=1
+        sh_jq_failed_file="$uf"
+        sh_jq_failed_why="not valid JSON"
+      fi
+    fi
     if (( sh_jq_failed )); then failed=1; continue; fi
     if [[ "$has" == "$want" ]]; then
       REGISTRY_OUT="${REGISTRY_OUT:+$REGISTRY_OUT$nl}$rp"$'\t'"$rn"

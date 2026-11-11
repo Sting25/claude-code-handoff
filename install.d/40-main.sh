@@ -233,7 +233,9 @@ else
   # the scan.
   scan_prev_failed=$sh_jq_failed
   sh_jq_failed=0
+  registry_unparseable_unknown=1
   registry_collect wired
+  registry_unparseable_unknown=0
   orphan_list="$REGISTRY_OUT"
   if (( sh_jq_failed )); then
     # The re-run repeats the secret flag the user passed, so it does the
