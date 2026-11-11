@@ -10,6 +10,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CC="$REPO_ROOT/bin/handoff_ctx_check.sh"
 command -v jq >/dev/null 2>&1 || { echo "health detector bounded scan"; skip "jq missing"; finish; exit; }
+command -v perl >/dev/null 2>&1 || { echo "health detector bounded scan"; skip "perl missing"; finish; exit; }
 echo "handoff_ctx_check.sh: health detector A bounded transcript scan (#179)"
 
 repo="$(mk_repo)"; cleanup_on_exit "$repo"
@@ -31,7 +32,13 @@ SH
 chmod +x "$repo/shim/jq"
 printf '2\n' > "$repo/.claude/handoff_backups/.ctx_prompts_$sid"
 
-out="$( cd "$repo" && PATH="$repo/shim:$PATH" bash "$CC" \
+# CI runners start jobs with SIGPIPE ignored, and a shell cannot undo a
+# signal ignored on entry. tee then gets EPIPE instead of dying, keeps copying
+# the whole input to its file, and every run reads "unbounded". Under Claude
+# Code, children get SIGPIPE at its default (measured 2026-11-11: a broken pipe
+# kills grep with 141 in its Bash tool), so restore that here (perl can reset
+# it; bash cannot) to measure the pipeline as it runs there.
+out="$( cd "$repo" && PATH="$repo/shim:$PATH" perl -e '$SIG{PIPE}="DEFAULT"; exec @ARGV' bash "$CC" \
   <<<"{\"session_id\":\"$sid\",\"transcript_path\":\"$tp\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"continue\"}" 2>/dev/null )"
 case "$out" in *"does not appear to be running"*) w=yes ;; *) w=no ;; esac
 check "still warns when the Stop hook ledger is absent" yes "$w"
