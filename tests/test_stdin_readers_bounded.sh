@@ -157,4 +157,16 @@ for n in $NAMES; do
   check "4 $n: copy matches write_handoff.sh" "$canon" "$(extract "$BIN/handoff_$n.sh" | cksum)"
 done
 
+# --- 5. a large single-line payload survives on bash 3.2 (issue #169) -------
+# `read -t` bounded the WHOLE first line; bash 3.2 reads a pipe byte by byte,
+# so an 8 MB one-line payload hit the 2 s timeout and came back empty. The
+# timeout must cover the first byte only. Run the canonical function under the
+# system /bin/bash (3.2 on macOS) and count the bytes it returns.
+extract_fn() { awk '/^read_hook_payload\(\) \{/ {p=1} p {print} p && /^}$/ {exit}' "$BIN/write_handoff.sh"; }
+fn_src="$(extract_fn)"
+got="$(perl -e 'print "x" x 8000000' | /bin/bash -c "$fn_src"$'\n''read_hook_payload | wc -c' | tr -d ' ')"
+check "5 8 MB single-line payload fully read (/bin/bash)" 8000000 "$got"
+got="$(printf '{"a":1}\nrest\n' | /bin/bash -c "$fn_src"$'\n''read_hook_payload' | cksum)"
+check "5 multi-line payload unchanged (/bin/bash)" "$(printf '{"a":1}\nrest' | cksum)" "$got"
+
 finish

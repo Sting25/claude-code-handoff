@@ -97,15 +97,14 @@ read_hook_payload() {
   # rejects it ("invalid timeout specification") and the payload would be lost.
   [[ "$timeout" =~ ^[0-9]{1,4}$ ]] || timeout=2
   (( timeout < 1 )) && timeout=1
-  if IFS= read -r -t "$timeout" first; then
-    # A newline-terminated first line arrived: the rest ends at EOF.
-    printf '%s\n%s' "$first" "$(cat 2>/dev/null || true)"
+  # The timeout bounds the FIRST BYTE only (issue #169): `read -t` on a whole
+  # line is bounded in total, and bash 3.2 reads a pipe byte by byte, so a big
+  # one-line payload (8 MB) timed out and came back empty. Once a byte has
+  # arrived the writer is live, so the rest ends at EOF.
+  if IFS= read -r -t "$timeout" -n 1 first; then
+    printf '%s%s' "$first" "$(cat 2>/dev/null || true)"
   else
-    # EOF, or timeout (first stays empty). bash 4+ keeps an unterminated
-    # last line in first (a payload printed without a trailing newline). On
-    # bash 3.2 a timeout that fires before any newline discards the partial
-    # data, so only a complete first line or an EOF-terminated one survives
-    # there (see the issue filed from #158/#160). Nothing more is read.
+    # EOF or timeout before any byte: first is empty. Nothing more is read.
     printf '%s' "$first"
   fi
 }
