@@ -57,9 +57,12 @@
 #      replaced and B warns once (an mv shim modelling BSD `mv -n`'s
 #      check-then-rename parks at the same point, so the rejected rename-back
 #      goes red here); (c) the holder releases before B's create: the lock
-#      is gone, B says nothing; (d) an empty capture that stays empty is not
-#      handed back (owner stays absent, a third acquirer still misses, the
-#      holder's release frees the lock), and one filled during the pause is.
+#      is gone, B says nothing; (e, #211) the same release followed by a new
+#      acquirer's mkdir, still before B's create: the copy must not land in
+#      the new dir, whose claim must succeed; (d) an empty capture that
+#      stays empty is not handed back (owner stays absent, a third acquirer
+#      still misses, the holder's release frees the lock), and one filled
+#      during the pause is.
 #  16. (#188) Group 1's barrier race with the ln stub on every racer and a
 #      `date` that sleeps a random 0 to 190 ms, so unordered racers go through
 #      the fallback (HANDOFF_RACE_N / 4, at least 10 iterations per site; the
@@ -105,6 +108,9 @@ race_dbg() {
   while [[ ! -e "$RACE_DBG_HOLD" ]] && (( n < 1000 )); do
     sleep 0.01 2>/dev/null || sleep 1; n=$((n + 1))
   done
+  # Giving up is recorded: a racer that went on by itself was not ordered by
+  # the test, so the case that relies on the park must fail, not pass by luck.
+  [[ -e "$RACE_DBG_HOLD" ]] || : >| "$RACE_DBG_HOLD.timedout"
   : >| "$RACE_DBG_HOLD.passed"
 }
 if [[ -n "${RACE_DBG_HOLD:-}" ]]; then set -T; trap race_dbg DEBUG; fi
@@ -641,6 +647,30 @@ for site in wh ta; do
   check "$site fallback lock gone: lock dir not re-created" no \
     "$([[ -e "$lock" ]] && echo yes || echo no)"
   check "$site fallback lock gone: B printed nothing" "" "$(cat "$d/eb")"
+
+  # (e) #211: as (c), and a new acquirer makes the dir again (not yet
+  # claimed) before B's create. B is parked at the create itself, after
+  # every check it makes, so the order is forced, not timed. A create by
+  # path lands the holder's old pid in the new dir: the new acquirer's
+  # claim fails and the lock is held by a token nobody releases.
+  d="$work/fb_newdir.$site"; mkdir -p "$d"; lock="$d/the.lock"
+  fb_start "$d" "$lock" "printf '%s\n' \"\$tok\""; : > "$d/b_go"
+  parked=no; wait_for "$d/b_dbg.parked" && parked=yes
+  check "$site fallback new dir: B parked at its create" yes "$parked"
+  : > "$d/a_rel"; wait "$pa"
+  gone=no; [[ -e "$lock" ]] || gone=yes
+  check "$site fallback new dir: A's release removed B's capture and the dir" yes "$gone"
+  mkdir "$lock"                                  # a new acquirer, not yet claimed
+  : > "$d/b_dbg"; wait "$pb"
+  read -r rcb _ < "$d/ob"
+  check "$site fallback new dir: B's park was released by the test, not by its timeout" no \
+    "$([[ -e "$d/b_dbg.timedout" ]] && echo yes || echo no)"
+  check "$site fallback new dir: B misses" 1 "$rcb"
+  check "$site fallback new dir: no stray token in the new dir" "" "$(entries "$lock")"
+  if [[ "$site" == wh ]]; then claimfn=claim_mkdir_lock; else claimfn=ta_claim_lock; fi
+  bash -c 'source "$1"; "$2" "$3"' _ "$funcs" "$claimfn" "$lock" </dev/null; rcn=$?
+  check "$site fallback new dir: the new acquirer's claim succeeds" 0 "$rcn"
+  check "$site fallback new dir: B printed nothing" "" "$(cat "$d/eb")"
 
   # (d) an empty capture (a claim captured between its create and its
   # write) that stays empty: not handed back, owner stays absent.

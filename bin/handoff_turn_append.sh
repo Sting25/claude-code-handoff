@@ -337,15 +337,24 @@ ta_reclaim_stale_lock() {  # <lock_dir>
       # for owner and then renames over it, so an owner created in between
       # would be replaced and two processes would own the lock (GNU mv may
       # use renameat2 with RENAME_NOREPLACE; O_EXCL is the portable choice).
-      # The capture is checked again right before the create: the holder's
-      # release removes it, then the dir, and a copy written after that
-      # would land in whatever dir is there by then. Residual: if the
-      # holder releases between that check and the create, and a new
-      # acquirer has made the dir but not yet claimed it, the copy lands
-      # in that dir and holds it until the staleness window. That is a
-      # lock held too long, never a lock with two owners. A create that
-      # fails because the dir is gone means the holder released: the lock
-      # is free and there is nothing to report. An empty read is a claim
+      # The create must land in the dir our capture is in and in no other:
+      # the holder's release removes the capture, then the dir, and a new
+      # acquirer can make a dir at the same path before we write. A copy
+      # written by path could then land in that new dir, fail the new
+      # acquirer's claim and hold the lock until the staleness window
+      # (#211). A path cannot tell the two dirs apart and an inode compare
+      # is unreliable on FAT, so the subshell below takes the one handle a
+      # shell has on a directory, its working directory: it enters the
+      # dir, checks that the capture is in THAT dir (so it is the
+      # holder's), and creates owner relative to it. A dir removed after
+      # the cd takes no new entries (POSIX rmdir), so a late create fails
+      # instead of reaching the new dir. Measured on macOS: APFS and FAT32
+      # fail the create; exFAT lets it succeed inside the removed dir, out
+      # of reach of the new one (0 of 100 landed there), and fsck_exfat
+      # then reports leaked space. A create that fails with the capture
+      # gone means the holder released: the lock is free and there is
+      # nothing to report. With the capture still there an owner exists or
+      # the create failed, and that is the warning. An empty read is a claim
       # captured between its create and its write; its write lands in the
       # capture, so it is read once more after a short pause. Still empty,
       # nothing is handed back and owner stays absent. That is safe: a
@@ -364,9 +373,12 @@ ta_reclaim_stale_lock() {  # <lock_dir>
           if [[ -e "$reap" ]]; then
             echo "lock reclaim: captured an empty token in $lock_dir; not handing it back." >&2
           fi
-        elif [[ -e "$reap" ]] \
-             && ! ( set -o noclobber; printf '%s\n' "$tok" > "$lock_dir/owner" ) 2>/dev/null \
-             && [[ -d "$lock_dir" ]]; then
+        elif ! (
+               CDPATH='' cd -- "$lock_dir" || { [[ ! -d "$lock_dir" ]]; exit; }
+               [[ -e "./${reap##*/}" ]] || exit 0
+               set -o noclobber
+               printf '%s\n' "$tok" > ./owner || [[ ! -e "./${reap##*/}" ]]
+             ) 2>/dev/null; then
           echo "lock reclaim: could not hand a live holder's token back to $lock_dir (another process claimed it meanwhile, or the create failed)." >&2
         fi
       fi
