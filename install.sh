@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 5beef32a2a3744ecdf6f4a73af37e6c4458b4c52b8a82f83eb7ebe8e42c883f8
+# SOURCE-SHA256: ff88b7196a996dc3b9aea0f17d3a00fcebbe6fe8efba85a36040d0d4456a46a2
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -2162,7 +2162,15 @@ doctor() {
       #   below; otherwise the statusLine check names it as BROKEN and counts
       #   it, so it is counted exactly once either way.
       parse_rc=0; usable_pre=0; why="carries no handoff hooks"
-      if [[ ! -f "$settings" ]]; then
+      if [[ -e "$settings" && ! -f "$settings" ]]; then
+        # A directory (or other non-regular file) at the settings path is
+        # not "absent" (#216): Claude Code cannot read settings from it, so
+        # it is a fault, counted here once, switch or no switch.
+        why="is not a regular file"
+        echo "  WARN    $settings is not a regular file (a directory or special file);"
+        echo "          Claude Code cannot read settings from it. Remove it and re-run the installer."
+        broken=$((broken + 1))
+      elif [[ ! -f "$settings" ]]; then
         why="does not exist"
       elif [[ "$sh_jq_failed_file" == "$settings" ]]; then
         if [[ "$sh_jq_failed_why" == "permission denied" ]]; then

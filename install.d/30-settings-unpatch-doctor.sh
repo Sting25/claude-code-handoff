@@ -995,7 +995,15 @@ doctor() {
       #   below; otherwise the statusLine check names it as BROKEN and counts
       #   it, so it is counted exactly once either way.
       parse_rc=0; usable_pre=0; why="carries no handoff hooks"
-      if [[ ! -f "$settings" ]]; then
+      if [[ -e "$settings" && ! -f "$settings" ]]; then
+        # A directory (or other non-regular file) at the settings path is
+        # not "absent" (#216): Claude Code cannot read settings from it, so
+        # it is a fault, counted here once, switch or no switch.
+        why="is not a regular file"
+        echo "  WARN    $settings is not a regular file (a directory or special file);"
+        echo "          Claude Code cannot read settings from it. Remove it and re-run the installer."
+        broken=$((broken + 1))
+      elif [[ ! -f "$settings" ]]; then
         why="does not exist"
       elif [[ "$sh_jq_failed_file" == "$settings" ]]; then
         if [[ "$sh_jq_failed_why" == "permission denied" ]]; then
