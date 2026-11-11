@@ -77,7 +77,26 @@ ensure_settings_json() {
     echo "  init    $settings was empty; set to {}"
     return 0
   fi
-  if ! jq -e . "$settings" >/dev/null 2>&1; then
+  # Say which of the failures it is (settings_usable, #187/#213): an
+  # unreadable file, jq itself failing, and unparseable content are three
+  # different causes, and a `null` root is valid JSON that is not an object.
+  local usable_rc=0
+  settings_usable "$settings" || usable_rc=$?
+  if [[ $usable_rc -eq 2 ]]; then
+    echo
+    echo "  ERROR   jq failed (exit $settings_usable_rc) while reading $settings; refusing to auto-patch (left untouched)."
+    echo "          Fix jq and re-run, or patch settings.json by hand:"
+    print_manual_snippet
+    return 1
+  fi
+  if [[ $usable_rc -eq 1 && ! -r "$settings" ]]; then
+    echo
+    echo "  ERROR   $settings cannot be read (check its permissions) — refusing to auto-patch (left untouched)."
+    echo "          Fix the file's permissions and re-run, or patch settings.json by hand:"
+    print_manual_snippet
+    return 1
+  fi
+  if ! jq empty "$settings" >/dev/null 2>&1; then
     echo
     echo "  ERROR   $settings is not valid JSON — refusing to auto-patch (left untouched)."
     echo "          Fix or remove it and re-run, or patch settings.json by hand:"
@@ -89,9 +108,9 @@ ensure_settings_json() {
   # otherwise sail past the check above and hit a raw jq runtime error mid-patch
   # (caught by the rollback trap, but ugly and confusing). Refuse it cleanly up
   # front instead. (settings#3)
-  if ! jq -e 'type == "object"' "$settings" >/dev/null 2>&1; then
+  if [[ $usable_rc -ne 0 ]]; then
     echo
-    echo "  ERROR   $settings is valid JSON but not a JSON object (got: $(jq -r 'type' "$settings" 2>/dev/null))."
+    echo "  ERROR   $settings is valid JSON but not a JSON object (got: $(jq -rs 'if length == 1 then (.[0] | type) else "\(length) documents" end' "$settings" 2>/dev/null))."
     echo "          settings.json must be an object — refusing to auto-patch (left untouched)."
     echo "          Fix or remove it and re-run, or patch settings.json by hand:"
     print_manual_snippet
@@ -629,8 +648,21 @@ sh_jq_failed_file=""
 sh_jq_failed_why=""   # "jq failed" or "permission denied": what the WARN said
 settings_has_our_hooks() {
   local f="$1" rc=0
-  [[ -f "$f" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
+  # A directory this process cannot search hides the file: `-f` is false for
+  # it exactly as for an absent file. Unknown, not "does not exist" (#213);
+  # same report as the unreadable file below.
+  local d
+  d="$(dirname "$f")"
+  if [[ -d "$d" && ! -x "$d" ]]; then
+    echo "  WARN    $f cannot be read (check its permissions);" >&2
+    echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+    sh_jq_failed=1
+    sh_jq_failed_file="$f"
+    sh_jq_failed_why="permission denied"
+    return 1
+  fi
+  [[ -f "$f" ]] || return 1
   # A file this process cannot read is unknown, not "not wired": this is the
   # read the user-scope --uninstall registry scan relies on before it deletes
   # the shared secret, and a mode-000 project file may well still be wired.
