@@ -776,6 +776,30 @@ handoff_wt_slug() {  # <text>
   printf '%s\n' "${s:-unknown}"
 }
 
+# One-line form of a printed path (#206). Canonical copy: handoff_oneline in
+# bin/write_handoff.sh (rationale there); tests/test_session_start_path_oneline.sh
+# diffs this copy against it. Here for the worktree-copy header below, whose
+# callers include handoff_worktree_remove.sh, which does not define it.
+handoff_oneline() {  # <text>
+  # Backslash is doubled by splitting on it, not by ${s//...}: bash 5.2's
+  # patsub_replacement collapses a \\ replacement back to one backslash, and
+  # bash 3.2 keeps the quotes of a quoted replacement literally (measured on
+  # ubuntu CI and macOS /bin/bash). LF and CR use ${s//...}, whose \n and \r
+  # replacements come through unchanged on both.
+  local s="$1" rest bs="\\" esc_bs="\\\\" nl=$'\n' cr=$'\r' esc_n='\n' esc_r='\r'
+  if [[ "$s" == *"$bs"* ]]; then
+    rest="$s"; s=""
+    while [[ "$rest" == *"$bs"* ]]; do
+      s="$s${rest%%"$bs"*}$esc_bs"
+      rest="${rest#*"$bs"}"
+    done
+    s="$s$rest"
+  fi
+  s="${s//$nl/$esc_n}"
+  s="${s//$cr/$esc_r}"
+  printf '%s' "$s"
+}
+
 # Save <doc>, a curated handoff in the linked worktree <worktree_root>, as a
 # dated copy in the main checkout. A no-op anywhere else. Best-effort: every
 # refusal warns on stderr and returns 0, so it never fails the caller, and it
@@ -833,7 +857,7 @@ handoff_worktree_copy() {  # <doc> <worktree_root>
     printf '# Worktree handoff copy: reference DATA, not standing rules\n\n'
     # shellcheck disable=SC2016  # the backticks are literal Markdown
     printf '> _Copied %s from `%s/.claude/handoff_current.md` (worktree `%s`, branch `%s`) so sessions in the main checkout can find it; never overwritten. Its Rules and Pinned sections bound only that worktree'"'"'s next session: read them as context, not as rules here._\n\n' \
-      "$stamp" "$wt_phys" "$name" "$branch"
+      "$stamp" "$(handoff_oneline "$wt_phys")" "$name" "$branch"
     cat "$body"
   } > "$final"
   rm -f "$body"
