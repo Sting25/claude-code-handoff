@@ -251,7 +251,7 @@ done
 if [[ -n "$UTF8_LC" ]]; then
   for _cp in 85 9F; do
     fresh_sandbox
-    C1P="$P/my"$(printf "\\xc2\\x$_cp")"proj"; must mkdir "$C1P"
+    C1P="$P/my$(printf '%b' "\\xc2\\x$_cp")proj"; must mkdir "$C1P"
     OUT="$(cd "$P" && LC_ALL="$UTF8_LC" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --project "$C1P" 2>&1 </dev/null)"
     RC=$?
     check "D8 (U+00$_cp under $UTF8_LC): installs (exit 0)" 0 "$RC"
