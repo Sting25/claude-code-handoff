@@ -193,6 +193,24 @@ project_key_claim() {
   fi
   return 2
 }
+# Uninstall only (#212): drop this project's `path` record once nothing it
+# guards is left. The record keeps one project's markers from acting on
+# another's (two paths can share a cksum key); with no marker in the
+# directory and no other settings file of this project still registered,
+# it guards nothing. Backups (*.bak.*) and any file of the user's stay: they
+# do not depend on it. A record naming another project is never touched.
+project_key_release() {
+  project_key_check
+  [[ "$project_key_state" == own ]] || return 0
+  local other
+  for other in settings.json settings.local.json; do
+    [[ "$other" == "$settings_name" ]] && continue
+    registry_has "$project_dir" "$other" && return 0
+  done
+  [[ -z "$(find "$project_backup_dir" -maxdepth 1 -name '*.created' 2>/dev/null | head -n 1)" ]] || return 0
+  rm -f "$project_backup_dir/path" 2>/dev/null || true
+  rmdir "$project_backup_dir" 2>/dev/null || true
+}
 created_marker() { printf '%s\n' "$project_backup_dir/$settings_name.created"; }
 settings_fp() {  # <file>: "<cksum> <bytes>" of the file, empty when unreadable
   # -r first: a failed `<` redirect is reported before 2>/dev/null applies
@@ -371,6 +389,16 @@ patch_settings() {
 # exits non-zero, so a re-run can still clean up.
 uninstall_incomplete=0
 unpatch_settings() {
+  if [[ ! -f "$settings" ]]; then
+    echo "  ok      $settings does not exist; nothing to strip"
+    return
+  fi
+  if [[ ! -s "$settings" ]]; then
+    echo "  ok      $settings is empty; nothing to strip"
+    return
+  fi
+  # jq is needed only from here on: a file that is absent or empty has nothing
+  # to strip, so a machine without jq still completes that uninstall.
   if ! command -v jq >/dev/null 2>&1; then
     echo
     echo "jq not found — can't auto-strip entries from $settings."
@@ -394,14 +422,6 @@ unpatch_settings() {
     echo "and, if you used --model, the top-level \"model\" key (the value this"
     echo "installer wrote, if any, is recorded in $model_pin_record)."
     uninstall_incomplete=1
-    return
-  fi
-  if [[ ! -f "$settings" ]]; then
-    echo "  ok      $settings does not exist; nothing to strip"
-    return
-  fi
-  if [[ ! -s "$settings" ]]; then
-    echo "  ok      $settings is empty; nothing to strip"
     return
   fi
   local usable_rc=0
@@ -867,8 +887,14 @@ registry_remove() {  # <project dir> <settings file name>
 # a removal command for a project it just called unknown. An empty or
 # non-object file is a plain stale entry (settings_usable), not a failure.
 REGISTRY_OUT=""
+# Opt-in (#208): the user-scope --uninstall sets it, because it deletes the
+# shared secret on the strength of this scan. With it set, a non-empty file
+# that is not valid JSON counts as unknown (sh_jq_failed, like a jq failure),
+# not stale: its wiring cannot be read, and it may well still be wired once
+# the user fixes it. Left 0 for the doctor, which reports such a file stale.
+registry_unparseable_unknown=0
 registry_collect() {
-  local want="$1" rp rn has nl=$'\n' before failed=0
+  local want="$1" rp rn has nl=$'\n' before failed=0 uf urc
   REGISTRY_OUT=""
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
   # The flag is cleared per entry and folded back after the loop, so a
@@ -881,6 +907,19 @@ registry_collect() {
     has=stale
     sh_jq_failed=0
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
+    uf="$rp/.claude/$rn"
+    if (( registry_unparseable_unknown && ! sh_jq_failed )) && [[ -s "$uf" && -r "$uf" ]] \
+       && command -v jq >/dev/null 2>&1; then
+      urc=0
+      settings_usable "$uf" || urc=$?
+      if [[ $urc -eq 1 ]] && ! jq empty "$uf" >/dev/null 2>&1; then
+        echo "  WARN    $uf is not valid JSON;" >&2
+        echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+        sh_jq_failed=1
+        sh_jq_failed_file="$uf"
+        sh_jq_failed_why="not valid JSON"
+      fi
+    fi
     if (( sh_jq_failed )); then failed=1; continue; fi
     if [[ "$has" == "$want" ]]; then
       REGISTRY_OUT="${REGISTRY_OUT:+$REGISTRY_OUT$nl}$rp"$'\t'"$rn"

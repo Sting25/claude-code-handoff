@@ -174,6 +174,7 @@ elif [[ "$scope" == project ]]; then
       own|legacy) rm -f "$(created_marker)" 2>/dev/null || true ;;
       foreign) project_key_warn_foreign ;;
     esac
+    project_key_release
     echo
     echo "done. the repo at $repo_root is untouched."
     exit 0
@@ -192,6 +193,7 @@ elif [[ "$scope" == project ]]; then
     exit 1
   fi
   registry_remove "$project_dir" "$settings_name"
+  project_key_release
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
   echo "      HMAC secret are shared by every project on this machine and were not"
@@ -206,6 +208,18 @@ else
   # place, so a re-run of --uninstall finds everything it needs.
   echo "settings.json:"
   unpatch_settings
+  # A refused or unfinished strip (invalid JSON, no jq, #215/#208) leaves the
+  # hooks wired. Removing the bin/ links now would leave every one of them
+  # dangling and the exit code would call that success: stop before anything
+  # is removed, so a re-run after the fix can finish.
+  if (( uninstall_incomplete )); then
+    echo
+    command -v jq >/dev/null 2>&1 || echo "jq is required to strip $settings and was not found on PATH."
+    echo "NOT done: $settings was not fully unpatched (see above). The bin/ links,"
+    echo "      skills and HMAC secret were kept so the hooks still wired there keep"
+    echo "      working; fix it and re-run ./install.sh --uninstall."
+    exit 1
+  fi
   echo
   echo "symlinks:"
   uninstall_symlinks
@@ -222,7 +236,9 @@ else
   # the scan.
   scan_prev_failed=$sh_jq_failed
   sh_jq_failed=0
+  registry_unparseable_unknown=1
   registry_collect wired
+  registry_unparseable_unknown=0
   orphan_list="$REGISTRY_OUT"
   if (( sh_jq_failed )); then
     # The re-run repeats the secret flag the user passed, so it does the
