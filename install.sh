@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 459f7ae957baffc6de153a043f51a948a936806518a0daa1d0ab2f09cc598bd2
+# SOURCE-SHA256: 4d45da921b382e6991923ac70404fde505ea90340cc462cff08f4995c930ee45
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -616,7 +616,7 @@ case "$link_mode" in
       if [[ "$mode" == install ]]; then
         echo "warning: installing from a volatile path ($repo_root)." >&2
         echo "         Symlinks would dangle when it's cleaned up and the hooks would" >&2
-        echo "         then fail silently — using COPY mode instead (the copies survive)." >&2
+        echo "         then fail silently, so using COPY mode instead (the copies survive)." >&2
         echo "         Re-run from a persistent clone for auto-updating symlinks, or pass" >&2
         echo "         --link / HANDOFF_FORCE_SYMLINK=1 to force symlinks anyway." >&2
       fi
@@ -1262,7 +1262,7 @@ ensure_settings_json() {
   fi
   if [[ $usable_rc -eq 1 && ! -r "$settings" ]]; then
     echo
-    echo "  ERROR   $settings cannot be read (check its permissions) — refusing to auto-patch (left untouched)."
+    echo "  ERROR   $settings cannot be read (check its permissions); refusing to auto-patch (left untouched)."
     echo "          Fix the file's permissions and re-run, or patch settings.json by hand:"
     print_manual_snippet
     return 1

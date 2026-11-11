@@ -91,7 +91,7 @@ ensure_settings_json() {
   fi
   if [[ $usable_rc -eq 1 && ! -r "$settings" ]]; then
     echo
-    echo "  ERROR   $settings cannot be read (check its permissions) — refusing to auto-patch (left untouched)."
+    echo "  ERROR   $settings cannot be read (check its permissions); refusing to auto-patch (left untouched)."
     echo "          Fix the file's permissions and re-run, or patch settings.json by hand:"
     print_manual_snippet
     return 1

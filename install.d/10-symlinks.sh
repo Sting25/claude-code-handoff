@@ -61,7 +61,7 @@ case "$link_mode" in
       if [[ "$mode" == install ]]; then
         echo "warning: installing from a volatile path ($repo_root)." >&2
         echo "         Symlinks would dangle when it's cleaned up and the hooks would" >&2
-        echo "         then fail silently — using COPY mode instead (the copies survive)." >&2
+        echo "         then fail silently, so using COPY mode instead (the copies survive)." >&2
         echo "         Re-run from a persistent clone for auto-updating symlinks, or pass" >&2
         echo "         --link / HANDOFF_FORCE_SYMLINK=1 to force symlinks anyway." >&2
       fi

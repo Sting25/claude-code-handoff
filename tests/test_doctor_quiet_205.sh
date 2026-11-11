@@ -40,7 +40,7 @@ has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 
 # Install four project-scope wirings (registers them), user file stays unwired.
 PROJS=()
-for i in 1 2 3 4; do
+for _ in 1 2 3 4; do
   p="$(mktemp -d)"; cleanup_on_exit "$p"; p="$(cd "$p" && pwd -P)"; PROJS+=("$p")
   run --scope project --project "$p"
 done
