@@ -31,7 +31,7 @@ fresh_sandbox() {
   mkdir -p "$H/.claude"
 }
 inst() {
-  OUT="$(cd "$P" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" "$@" 2>&1 </dev/null)"
+  ( cd "$P" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" "$@" ) >/dev/null 2>&1 </dev/null
   RC=$?
 }
 B() { echo "$H/.claude/handoff_settings_backups"; }
@@ -52,7 +52,7 @@ check "A: the settings backup is kept" 1 "$(find "$(B)" -type f -name '*.bak.*' 
 fresh_sandbox
 inst --scope project --project "$P"
 rm -rf "$P"
-OUT="$(cd "$H" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --uninstall --scope project --project "$P" 2>&1 </dev/null)"; RC=$?
+( cd "$H" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --uninstall --scope project --project "$P" ) >/dev/null 2>&1 </dev/null; RC=$?
 : --scope project --project "$P"
 check "B: gone project: exit 0" 0 "$RC"
 check "B: gone project: no file left" 0 "$(nfiles)"
