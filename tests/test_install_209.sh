@@ -10,9 +10,15 @@
 #      user file its statusLine line read and points at the project doctor
 #      (which then reports the statusLine as ours) instead of printing a
 #      re-run remedy that changes nothing
+#      (U7-U13, review round: a named file with handoff-owned leftovers is
+#      stripped as usual with a note naming the other wired file; `[]`, 0-byte,
+#      dangling-link and directory named paths are refused; an unreadable
+#      other file stops with exit 1)
 #   P. the doctor reports a project settings file that fails to parse even
 #      when it is not the file being probed, counted once, with the same
-#      exit code whichever flag the doctor was run with
+#      exit code whichever flag the doctor was run with; a user-scope doctor
+#      does so only for a registered or wired project, and a valid non-object,
+#      empty or whitespace-only sibling is not reported
 # Every run sandboxes HOME and CLAUDE_HOME, so nothing touches ~/.claude.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -38,8 +44,9 @@ fresh_sandbox() {
   P="$(cd "$P" && pwd -P)"   # the installer prints physical paths
   mkdir -p "$H/.claude"
 }
+RUN_DIR=""
 inst() {
-  OUT="$(cd "$P" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" "$@" 2>&1 </dev/null)"
+  OUT="$(cd "${RUN_DIR:-$P}" && HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" "$@" 2>&1 </dev/null)"
   RC=$?
 }
 has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
@@ -201,5 +208,123 @@ printf '{not json' > "$P/.claude/settings.json"
 inst --doctor --scope project --project "$P"
 check "P6: BROKEN not valid JSON"                   yes "$(has "$OUT" "BROKEN  $P/.claude/settings.json is not valid JSON")"
 check "P6: no second report from the sibling check" no  "$(has "$OUT" "$PARSE")"
+
+# --- U7. named file with leftovers but no hooks: strip as before, note the other file -----------
+fresh_sandbox
+inst --scope project --project "$P"
+inst --scope project --project "$P" --local
+must jq 'del(.hooks)' "$P/.claude/settings.json" > "$P/.claude/settings.json.new"
+must mv "$P/.claude/settings.json.new" "$P/.claude/settings.json"
+n_local="$(nhooks "$P/.claude/settings.local.json")"
+inst --uninstall --scope project --project "$P"
+check "U7: leftovers are stripped (exit 0)"         0   "$RC"
+check "U7: statusLine removed"                      no  "$(jq -e 'has("statusLine")' "$P/.claude/settings.json" >/dev/null 2>&1 && echo yes || echo no)"
+check "U7: our permissions removed"                 0   "$(jq '[(.permissions.allow // [])[] | select(contains(".claude/bin/"))] | length' "$P/.claude/settings.json" 2>/dev/null || echo gone)"
+check "U7: registry line for settings.json cleared" no  "$(reg_has "$P" settings.json)"
+check "U7: settings.local.json untouched"           "$n_local" "$(nhooks "$P/.claude/settings.local.json")"
+check "U7: note names the other wired file"         yes "$(has "$OUT" "note: $P/.claude/settings.local.json still carries the handoff hooks")"
+check "U7: note carries the --local command"        yes "$(has_line "$OUT" "./install.sh --uninstall --scope project --project '$P' --local")"
+
+# --- U8. named file deleted, its registry line and created marker left: cleared as before --------
+fresh_sandbox
+inst --scope project --project "$P"
+inst --scope project --project "$P" --local
+must rm "$P/.claude/settings.json"
+mk="$(find "$H/.claude/handoff_settings_backups" -name settings.json.created | head -n 1)"
+check "U8: fixture has the settings.json marker"    yes "$([[ -n "$mk" && -e "$mk" ]] && echo yes || echo no)"
+inst --uninstall --scope project --project "$P"
+check "U8: exit 0"                                  0   "$RC"
+check "U8: registry line for settings.json cleared" no  "$(reg_has "$P" settings.json)"
+check "U8: created marker cleared"                  no  "$([[ -n "$mk" && -e "$mk" ]] && echo yes || echo no)"
+check "U8: settings.local.json registry line kept"  yes "$(reg_has "$P" settings.local.json)"
+check "U8: note names the other wired file"         yes "$(has "$OUT" "note: $P/.claude/settings.local.json still carries the handoff hooks")"
+
+# --- U9/U10. named file `[]` (valid JSON, not an object) or 0 bytes: refused ----------------------
+for shape in '[]' ''; do
+  fresh_sandbox
+  inst --scope project --project "$P" --local
+  printf '%s' "$shape" > "$P/.claude/settings.json"
+  before="$(state)"
+  inst --uninstall --scope project --project "$P"
+  check "U9: named file '$shape' refused with exit 2" 2 "$RC"
+  check "U9: named file '$shape' left as it was"      "$before" "$(state)"
+done
+
+# --- U11. named file a dangling symlink: the message names the project path ----------------------
+fresh_sandbox
+inst --scope project --project "$P" --local
+must ln -s "$P/nonexistent/x" "$P/.claude/settings.json"
+inst --uninstall --scope project --project "$P"
+check "U11: dangling link refused with exit 2"      2   "$RC"
+check "U11: names the project path"                 yes "$(has "$OUT" "ERROR   $P/.claude/settings.json is a dangling symlink;")"
+check "U11: does not name the link target as the file" no "$(has "$OUT" "ERROR   $P/nonexistent/x")"
+
+# --- U12. other file unreadable, named file absent: exit 1, not "nothing to strip" --------------
+if [[ "$(id -u)" -eq 0 ]]; then
+  skip "U12: running as root, mode 000 does not block reads"
+else
+  fresh_sandbox
+  inst --scope project --project "$P" --local
+  must chmod 000 "$P/.claude/settings.local.json"
+  inst --uninstall --scope project --project "$P"
+  chmod 600 "$P/.claude/settings.local.json"
+  check "U12: exit 1"                               1   "$RC"
+  check "U12: says the other file's wiring is unknown" yes "$(has "$OUT" "carries the handoff hooks is unknown")"
+  check "U12: no 'nothing to strip'"                no  "$(has "$OUT" "nothing to strip")"
+  check "U12: the other file still wired"           yes "$([[ "$(nhooks "$P/.claude/settings.local.json")" -gt 0 ]] && echo yes || echo no)"
+fi
+
+# --- U13. named path is a directory beside a wired other: refused -------------------------------
+fresh_sandbox
+inst --scope project --project "$P" --local
+must mkdir "$P/.claude/settings.json"
+inst --uninstall --scope project --project "$P"
+check "U13: directory named path refused with exit 2" 2 "$RC"
+check "U13: says it is not a regular file"          yes "$(has "$OUT" "$P/.claude/settings.json is not a regular file;")"
+
+# --- S4. project scope keeps the plain statusLine remedy -----------------------------------------
+fresh_sandbox
+mkdir -p "$P/.claude"
+printf '%s' '{}' > "$P/.claude/settings.json"
+inst --doctor --scope project --project "$P"
+check "S4: plain project remedy"                    yes "$(has "$OUT" "statusLine unset (re-run ./install.sh --scope project --project '$P' to wire it)")"
+check "S4: no user-file wording in project scope"   no  "$(has "$OUT" "(the user file)")"
+
+# --- S5. user doctor outside the project, wiring found through the registry ----------------------
+fresh_sandbox
+inst --scope project --project "$P" --local
+OTHER_DIR="$(mktemp -d)"; cleanup_on_exit "$OTHER_DIR"
+RUN_DIR="$OTHER_DIR" inst --doctor
+check "S5: user-file wording"                       yes "$(has "$OUT" "statusLine unset in $H/.claude/settings.json (the user file). The hooks are")"
+check "S5: no 'The hooks here'"                     no  "$(has "$OUT" "The hooks here")"
+check "S5: points at the registered project"        yes "$(has "$OUT" "./install.sh --doctor --scope project --project '$P' --local")"
+
+# --- P7-P9. valid non-object, empty and whitespace-only siblings are not reported ----------------
+for shape in '[]' '' '   '; do
+  fresh_sandbox
+  inst --scope project --project "$P" --local
+  printf '%s' "$shape" > "$P/.claude/settings.json"
+  inst --doctor --scope project --project "$P" --local
+  check "P7: sibling '$shape': exit 0"              0   "$RC"
+  check "P7: sibling '$shape': no parse WARN"       no  "$(has "$OUT" "$PARSE")"
+done
+
+# --- P10. user doctor in a directory with no handoff install: a corrupt file there is not ours ---
+fresh_sandbox
+inst --scope project --project "$P" --local
+OTHER_DIR="$(mktemp -d)"; cleanup_on_exit "$OTHER_DIR"
+OTHER_DIR="$(cd "$OTHER_DIR" && pwd -P)"
+mkdir -p "$OTHER_DIR/.claude"
+printf '{not json' > "$OTHER_DIR/.claude/settings.local.json"
+RUN_DIR="$OTHER_DIR" inst --doctor
+check "P10: unrelated directory: exit 0"            0   "$RC"
+check "P10: unrelated directory: no parse WARN"     no  "$(has "$OUT" "$PARSE")"
+# P11: a registered project whose only file is corrupt is still checked.
+fresh_sandbox
+inst --scope project --project "$P"
+printf '{not json' > "$P/.claude/settings.json"
+inst --doctor
+check "P11: registered project: exit 1"             1   "$RC"
+check "P11: registered project: parse WARN"         yes "$(has "$OUT" "WARN    $P/.claude/settings.json $PARSE")"
 
 finish

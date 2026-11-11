@@ -196,6 +196,10 @@ elif [[ "$scope" == project ]]; then
   fi
   registry_remove "$project_dir" "$settings_name"
   project_key_release
+  if [[ -n "$other_wired_note" ]]; then
+    echo
+    printf '%s\n' "$other_wired_note"
+  fi
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
   echo "      HMAC secret are shared by every project on this machine and were not"

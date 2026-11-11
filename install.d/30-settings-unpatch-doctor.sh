@@ -643,7 +643,7 @@ sl_unset_line() {
   local cmd
   cmd="$(rerun_cmd)"
   if [[ "$scope" != project && "$cmd" != "./install.sh" ]]; then
-    echo "  info    statusLine unset in $settings (the user file). The hooks here are"
+    echo "  info    statusLine unset in $settings (the user file). The hooks are"
     echo "          wired in project scope, which writes its statusLine to the project"
     echo "          file instead; to check that one run: ./install.sh --doctor ${cmd#./install.sh }"
   else
@@ -651,44 +651,103 @@ sl_unset_line() {
   fi
 }
 
-# Project-scope --uninstall whose flags name the project file that carries
-# none of the hooks while the other project file carries them (a --local
-# install uninstalled without --local, or the reverse). Unpatching the named
-# file would print "nothing to strip", exit 0, and drop nothing from the
-# registry while the hooks stay wired (#209). It refuses (exit 2, nothing
-# changed) and prints the command for the wired file rather than switching
-# to it: an uninstall edits a file the user may also edit by hand, and the
-# file it edits should be the one the user named. Detection is the doctor's
-# (#190): settings_has_our_hooks on both files. The named file must be known
-# to carry no hooks (absent, empty, or a JSON object without them); when it
-# is unreadable, unparseable or jq fails, unpatch_settings reports that as it
-# always did.
+# Project-scope --uninstall whose flags name the project file that holds
+# nothing of this installer's while the other project file carries the hooks
+# (a --local install uninstalled without --local, or the reverse). Unpatching
+# the named file printed "nothing to strip" and exited 0 with the hooks still
+# wired (#209). In that case it refuses (exit 2, nothing changed) and prints
+# the command for the wired file rather than switching to it: an uninstall
+# edits a file the user may also edit by hand, so it edits only the file the
+# user named. Detection of the wired file is the doctor's (#190,
+# settings_has_our_hooks).
+# "Nothing of this installer's" means nothing the uninstall would clean up:
+# no matching hook (the legacy SessionStart form included), no statusLine or
+# permission of ours, no registry line, no created-file marker, no model-pin
+# record for the named file. When any of those is left (hooks deleted by
+# hand, or the file deleted with its registry line and marker kept), the
+# normal strip runs and other_wired_note names the other file at the end, so
+# the doctor's stale-registry remedy still works. A named file that is
+# unreadable, not valid JSON, or hits a jq failure is left to
+# unpatch_settings, which refuses it as before. When the other file's wiring
+# cannot be read (mode 000, a jq failure) and the named file holds nothing,
+# it stops with exit 1 instead of "nothing to strip".
+# shellcheck disable=SC2016  # jq variables, bound by --arg
+probe_any_ours='
+  [(.hooks? | objects | .[]?) // empty | .. | objects | .command? | strings] as $c
+  | [$ss, $ssl, $se, $post, $wr, $st, $up] as $ms
+  | [$p1, $p2, $p3, $p4, $p5, $p6, $p7] as $ps
+  | (((.permissions? | objects | .allow?) // []) | if type == "array" then . else [] end) as $al
+  | any($c[]; . as $x | any($ms[]; . as $m | $x | contains($m)))
+    or (((.statusLine? | objects | .command?) // "") | type == "string" and contains($sl))
+    or any($al[]; . as $a | any($ps[]; . == $a))'
+other_wired_note=""
 refuse_uninstall_if_other_file_wired() {
-  local named="$settings" why rc=0 flag
-  if [[ -e "$named" ]]; then
-    [[ -f "$named" && -r "$named" ]] || return 0
-    command -v jq >/dev/null 2>&1 || return 0
-    if [[ -s "$named" ]]; then
-      settings_usable "$named" || rc=$?
-      if (( rc == 1 )); then
-        jq empty "$named" >/dev/null 2>&1 || return 0   # invalid JSON: unpatch_settings refuses it
-      elif (( rc != 0 )); then
-        return 0
-      fi
-      settings_has_our_hooks "$named" && return 0
-      [[ "$sh_jq_failed_file" == "$named" ]] && return 0
-    fi
-    why="carries no handoff hooks"
-  else
+  local named="$settings" shown="$project_dir/.claude/$settings_name" why rc=0 flag cmd
+  local leftovers=0 other_state
+  if [[ -L "$shown" && ! -e "$shown" ]]; then
+    why="is a dangling symlink"
+  elif [[ ! -e "$named" ]]; then
     why="does not exist"
+  elif [[ ! -f "$named" ]]; then
+    why="is not a regular file"
+  elif [[ ! -s "$named" ]]; then
+    why="is empty"
+  else
+    [[ -r "$named" ]] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    settings_usable "$named" || rc=$?
+    if (( rc == 1 )); then
+      jq empty "$named" >/dev/null 2>&1 || return 0   # invalid JSON: unpatch_settings refuses it
+      why="is empty or not a JSON object"
+    elif (( rc != 0 )); then
+      return 0
+    else
+      rc=0
+      jq -e --arg ss "$ss_marker" --arg ssl "$ss_legacy_marker" --arg se "$se_marker" \
+        --arg post "$post_marker" --arg wr "$wr_marker" --arg st "$st_marker" --arg up "$up_marker" \
+        --arg sl "$sl_marker" --arg p1 "$perm_write" --arg p2 "$perm_stop" --arg p3 "$perm_ctx" \
+        --arg p4 "$perm_ss" --arg p5 "$perm_sl" --arg p6 "$perm_reset" --arg p7 "$perm_wr" \
+        "$probe_any_ours" "$named" >/dev/null 2>&1 || rc=$?
+      (( rc <= 1 )) || return 0   # jq failure: unpatch_settings reports it
+      (( rc == 0 )) && leftovers=1
+      why="carries no handoff hooks"
+    fi
+  fi
+  if registry_has "$project_dir" "$settings_name" || [[ -e "$(created_marker)" || -f "$model_pin_record" ]]; then
+    leftovers=1
   fi
   other_project_settings
-  settings_has_our_hooks "$OTHER_SETTINGS" || return 0
+  sh_jq_failed_file=""
+  if settings_has_our_hooks "$OTHER_SETTINGS"; then
+    other_state=wired
+  elif [[ "$sh_jq_failed_file" == "$OTHER_SETTINGS" ]]; then
+    other_state=unknown
+  else
+    return 0
+  fi
   if [[ "$OTHER_SETTINGS_NAME" == settings.local.json ]]; then flag=" --local"; else flag=""; fi
-  echo "  ERROR   $named $why;" >&2
+  cmd="./install.sh --uninstall --scope project --project $(shq "$project_dir")$flag"
+  if (( leftovers )); then
+    # Strip what is left of the named file's install as usual; say at the end
+    # that the other file is still wired and how to remove it.
+    if [[ "$other_state" == wired ]]; then
+      other_wired_note="note: $OTHER_SETTINGS still carries the handoff hooks (this uninstall
+      stripped $settings_name only). To remove them from $OTHER_SETTINGS_NAME too run:
+        $cmd"
+    fi
+    return 0
+  fi
+  if [[ "$other_state" == unknown ]]; then
+    echo "  ERROR   $shown $why, and whether $OTHER_SETTINGS" >&2
+    echo "          carries the handoff hooks is unknown (see the WARN above). Nothing was changed." >&2
+    echo "          Fix that file and re-run; if it is the wired one, the command for it is:" >&2
+    echo "            $cmd" >&2
+    exit 1
+  fi
+  echo "  ERROR   $shown $why;" >&2
   echo "          $OTHER_SETTINGS carries the handoff hooks." >&2
   echo "          Nothing was changed. To remove them from $OTHER_SETTINGS_NAME run:" >&2
-  echo "            ./install.sh --uninstall --scope project --project $(shq "$project_dir")$flag" >&2
+  echo "            $cmd" >&2
   exit 2
 }
 
@@ -938,6 +997,11 @@ registry_has() {  # <project dir> <settings file name>: 0 when that line is regi
   grep -Fxq -- "$1"$'\t'"$2" "$project_registry"
 }
 
+registry_has_dir() {  # <project dir>: 0 when any line registers that directory
+  [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 1
+  D="$1" awk -F'\t' '$1 == ENVIRON["D"] { found = 1 } END { exit !found }' "$project_registry"
+}
+
 registry_remove() {  # <project dir> <settings file name>
   local line="$1"$'\t'"$2"
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
@@ -1094,7 +1158,7 @@ report_plugin_leftover() {
 
 doctor() {
   local broken=0 dst tgt name mdl mdl_rc sl_rc secret smode sign_reason other hint parse_rc why usable_pre
-  local flag_settings="" proj f pf pu ps sib_rc
+  local flag_settings="" proj f pf pu ps sib_rc sib_check
 
   if [[ "$scope" == project ]]; then
     echo "doctor: project scope, checking $settings"
@@ -1344,8 +1408,20 @@ doctor() {
   # file the doctor switched away from (named before the switch), and the
   # user file. Counted like the flag-named case (#190 H), so the same files
   # give the same exit code whichever flag the doctor was run with.
+  # A user-scope doctor checks only a project with a handoff install (a
+  # registry line, or a project file carrying the hooks): run from any other
+  # directory, a broken settings file there is not this installer's concern
+  # and must not fail the doctor.
+  sib_check=0
   if command -v jq >/dev/null 2>&1; then
     proj="$(wiring_project_root)"
+    if [[ "$scope" == project ]] || registry_has_dir "$proj" \
+       || settings_has_our_hooks "$proj/.claude/settings.json" \
+       || settings_has_our_hooks "$proj/.claude/settings.local.json"; then
+      sib_check=1
+    fi
+  fi
+  if (( sib_check )); then
     pu="$(settings_phys_path "$user_settings")"
     ps="$(settings_phys_path "$settings")"
     for f in "$proj/.claude/settings.json" "$proj/.claude/settings.local.json"; do
