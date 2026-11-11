@@ -181,8 +181,8 @@ installer's, so both sets would run on every event.
 ## How it works
 
 Seven hooks drive it, written by the installer into the project's
-`.claude/settings.json` (or `~/.claude/settings.json` for a user-scope
-install):
+`.claude/settings.json` (or `.claude/settings.local.json` with `--local`,
+or `~/.claude/settings.json` for a user-scope install):
 `SessionStart` loads the latest handoff into a new session,
 `SessionEnd` and `PreCompact` write a mechanical git-state safety net
 before an ending or a compaction, `Stop` appends each turn to a
@@ -227,7 +227,7 @@ resolves (add `--scope project --project <dir>` to check a project's
 wiring; it also warns when the user file and a project file both carry
 the hooks). `./install.sh --uninstall`
 removes the symlinks, strips only the entries it can prove are its own
-from settings.json (backup first), and deletes the per-machine HMAC
+from the settings file for that scope (backup first), and deletes the per-machine HMAC
 secret — details in
 [docs/reference.md](docs/reference.md#uninstall-details).
 

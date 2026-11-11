@@ -17,7 +17,8 @@ kind — the shipped scripts contain no `curl`, `wget`, or socket calls.
   per-turn backups — under the project's own `.claude/` directory.
 - Installed scripts and skills under `~/.claude/`, and the hook
   configuration in the project's `.claude/settings.json` (or
-  `~/.claude/settings.json` for a user-scope install).
+  `.claude/settings.local.json` with `--local`, or `~/.claude/settings.json`
+  for a user-scope install).
 - The per-machine signing secret at `~/.claude/handoff_secret`
   (file mode 600). It is generated locally, never transmitted, and
   never written into any repository.

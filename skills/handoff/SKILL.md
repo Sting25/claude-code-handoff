@@ -8,7 +8,8 @@ description: Snapshot session state to .claude/handoff_current.md and tell the u
 > **Prerequisite:** this skill drives scripts and hooks from
 > https://github.com/Sting25/claude-code-handoff: `write_handoff.sh`
 > under `~/.claude/bin/` and the Stop / SessionStart / SessionEnd hooks
-> in the project's `.claude/settings.json` (or `~/.claude/settings.json`)
+> in the project's `.claude/settings.json` (or `.claude/settings.local.json`
+> with `--local`, or `~/.claude/settings.json`)
 > are NOT part of this file. Run
 > `./install.sh --scope project --project <dir>` from that repo before
 > first use.
@@ -268,8 +269,10 @@ nothing gets lost across the restart boundary.
             or resume this conversation — that reopens the saturated
             context the handoff exists to retire.
 
-   (Either way, the SessionStart hook in ~/.claude/settings.json
-   auto-loads the handoff into the fresh session.)
+   (Either way, the SessionStart hook in the settings file the installer
+   patched (~/.claude/settings.json, or the project's .claude/settings.json
+   or .claude/settings.local.json) auto-loads the handoff into the fresh
+   session.)
 
    -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-
    ```
