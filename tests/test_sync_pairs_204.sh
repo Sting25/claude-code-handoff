@@ -133,7 +133,7 @@ check "canary: a namespaced tag is defanged" yes \
 check "canary: a near miss is left alone" yes \
   "$(printf '%s\n' "$out" | grep -qF '<b>bold</b> <system-reminders>near' && echo yes || echo no)"
 check "canary: invalid UTF-8 does not abort the filter" yes \
-  "$(printf '%s\n' "$out" | grep -q 'bad utf8: .*«system-reminder»y«/system-reminder»' && echo yes || echo no)"
+  "$(printf '%s\n' "$out" | LC_ALL=C grep -q 'bad utf8: .*«system-reminder»y«/system-reminder»' && echo yes || echo no)"
 
 # ======================== pair 2: try_mkdir_lock ============================
 echo "try_mkdir_lock and the inline lock in handoff_turn_append.sh agree (#204)"
