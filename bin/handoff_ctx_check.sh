@@ -444,14 +444,22 @@ if [[ "${HANDOFF_NO_HEALTH_WARN:-0}" != "1" ]]; then
         # (uuid as fallback), never lines. A resumed or forked session's
         # transcript also carries earlier sessions' lines with their own
         # sessionId; only this session's lines count (absent sessionId counts).
+        # Issue #179: only "at least HEALTH_PROMPTS distinct turns" matters, so
+        # the jq pass stops reading (first/foreach/inputs) the moment it has
+        # that many; grep then dies on SIGPIPE. A dead Stop hook leaves many
+        # end_turn lines, so this is cheap on exactly the transcripts that were
+        # slow to scan whole. done_turns is thus HEALTH_PROMPTS or 0, not a
+        # full count (the warning text reports the threshold).
         done_turns="$(grep -F '"end_turn"' "$health_tp" 2>/dev/null \
-          | jq -R --arg sid "$session_id" 'fromjson?
-                   | select(.type == "assistant" and .isSidechain != true
+          | jq -nR --arg sid "$session_id" --argjson need "$HEALTH_PROMPTS" '
+              first(foreach (inputs | fromjson?
+                   | select(type == "object" and .type == "assistant" and .isSidechain != true
                                       and (.sessionId // $sid) == $sid
                                       and .message.stop_reason == "end_turn"
                                       and .message.model != "<synthetic>")
-                   | (.message.id // .uuid // empty)' 2>/dev/null \
-          | sort -u | grep -c . || true)"
+                   | (.message.id // .uuid // empty)) as $i
+                 ({}; .[$i|tostring] = 1; select(length >= $need) | length)) // 0' 2>/dev/null \
+          || true)"
         [[ "$done_turns" =~ ^[0-9]+$ ]] || done_turns=0
       fi
     fi
