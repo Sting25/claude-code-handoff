@@ -108,6 +108,9 @@ race_dbg() {
   while [[ ! -e "$RACE_DBG_HOLD" ]] && (( n < 1000 )); do
     sleep 0.01 2>/dev/null || sleep 1; n=$((n + 1))
   done
+  # Giving up is recorded: a racer that went on by itself was not ordered by
+  # the test, so the case that relies on the park must fail, not pass by luck.
+  [[ -e "$RACE_DBG_HOLD" ]] || : >| "$RACE_DBG_HOLD.timedout"
   : >| "$RACE_DBG_HOLD.passed"
 }
 if [[ -n "${RACE_DBG_HOLD:-}" ]]; then set -T; trap race_dbg DEBUG; fi
@@ -660,6 +663,8 @@ for site in wh ta; do
   mkdir "$lock"                                  # a new acquirer, not yet claimed
   : > "$d/b_dbg"; wait "$pb"
   read -r rcb _ < "$d/ob"
+  check "$site fallback new dir: B's park was released by the test, not by its timeout" no \
+    "$([[ -e "$d/b_dbg.timedout" ]] && echo yes || echo no)"
   check "$site fallback new dir: B misses" 1 "$rcb"
   check "$site fallback new dir: no stray token in the new dir" "" "$(entries "$lock")"
   if [[ "$site" == wh ]]; then claimfn=claim_mkdir_lock; else claimfn=ta_claim_lock; fi
