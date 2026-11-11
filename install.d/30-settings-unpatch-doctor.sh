@@ -646,6 +646,20 @@ settings_usable() {
 sh_jq_failed=0
 sh_jq_failed_file=""
 sh_jq_failed_why=""   # "jq failed" or "permission denied": what the WARN said
+# sh_warn_once <file> <why> <line1> <line2>: print the two-line WARN to
+# stderr unless this run already printed it for <file> with the same <why>
+# (#214): one unreadable file is read by several checks (the doctor's
+# pre-check, the wired-files listing) and must not be reported by each.
+# sh_jq_failed is set by the callers either way, so the exit code is
+# unchanged. Must run in the caller's shell, not a command substitution.
+sh_warned=""
+sh_warn_once() {
+  local key="$2|$1"$'\n'
+  case "$sh_warned" in *"$key"*) return 0 ;; esac
+  sh_warned="$sh_warned$key"
+  echo "$3" >&2
+  echo "$4" >&2
+}
 settings_has_our_hooks() {
   local f="$1" rc=0
   command -v jq >/dev/null 2>&1 || return 1
@@ -655,8 +669,8 @@ settings_has_our_hooks() {
   local d
   d="$(dirname "$f")"
   if [[ -d "$d" && ! -x "$d" ]]; then
-    echo "  WARN    $f cannot be read (check its permissions);" >&2
-    echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+    sh_warn_once "$f" "permission denied" "  WARN    $f cannot be read (check its permissions);" \
+      "          treating its wiring as unknown. Fix the file and re-run."
     sh_jq_failed=1
     sh_jq_failed_file="$f"
     sh_jq_failed_why="permission denied"
@@ -669,8 +683,8 @@ settings_has_our_hooks() {
   # Reported through sh_jq_failed like a jq failure, so every caller that
   # acts on "not wired" stops the same way (the WARN names the real cause).
   if [[ ! -r "$f" ]]; then
-    echo "  WARN    $f cannot be read (check its permissions);" >&2
-    echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+    sh_warn_once "$f" "permission denied" "  WARN    $f cannot be read (check its permissions);" \
+      "          treating its wiring as unknown. Fix the file and re-run."
     sh_jq_failed=1
     sh_jq_failed_file="$f"
     sh_jq_failed_why="permission denied"
@@ -682,8 +696,8 @@ settings_has_our_hooks() {
   # reason: "unknown" must never collapse into "not wired".
   settings_usable "$f" || rc=$?
   if [[ $rc -eq 2 ]]; then
-    echo "  WARN    jq failed (exit $settings_usable_rc) while checking whether $f is a JSON object;" >&2
-    echo "          treating its wiring as unknown. Fix jq and re-run." >&2
+    sh_warn_once "$f" "jq failed" "  WARN    jq failed (exit $settings_usable_rc) while checking whether $f is a JSON object;" \
+      "          treating its wiring as unknown. Fix jq and re-run."
     sh_jq_failed=1
     sh_jq_failed_file="$f"
     sh_jq_failed_why="jq failed"
@@ -705,8 +719,8 @@ settings_has_our_hooks() {
     # A jq failure on parseable JSON is not "not wired" (#187). The callers
     # take 0/1, so say it loudly here and record it: doctor exits non-zero,
     # install aborts before registering.
-    echo "  WARN    jq failed (exit $rc) while checking whether $f wires handoff hooks;" >&2
-    echo "          treating it as unknown. Fix jq and re-run." >&2
+    sh_warn_once "$f" "jq failed" "  WARN    jq failed (exit $rc) while checking whether $f wires handoff hooks;" \
+      "          treating it as unknown. Fix jq and re-run."
     sh_jq_failed=1
     sh_jq_failed_file="$f"
     sh_jq_failed_why="jq failed"
