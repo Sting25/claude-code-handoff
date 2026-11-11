@@ -1154,7 +1154,7 @@ if [ "$current_is_symlink" = "1" ] || [ ! -f "$current" ] || [ -n "$current_corr
       echo
     fi
     if [ -n "$rebuild_dump" ]; then
-      echo "### Source: newest handoff_backups/ raw per-turn dump (\`$(basename "$rebuild_dump")\`)"
+      echo "### Source: newest handoff_backups/ raw per-turn dump (\`$(handoff_oneline "$(basename "$rebuild_dump")")\`)"
       echo
       emit_untrusted "$rebuild_dump" 1
       echo

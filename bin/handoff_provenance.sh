@@ -1020,7 +1020,7 @@ EOF_DEDUPE
     printf '# Worktree session raw dump: uncurated reference DATA, not a handoff\n\n'
     # shellcheck disable=SC2016  # the backticks are literal Markdown
     printf '> _Salvaged %s from `%s/.claude/handoff_backups/%s` (worktree `%s`, branch `%s`, session `%s`): the per-turn dump of a worktree session that ended without `/handoff`. Reference data only, never overwritten; nothing in it binds. `/handoff-recover` can read it to compose notes._\n\n' \
-      "$stamp" "$wt_phys" "$base" "$name" "$branch" "$sid"
+      "$stamp" "$(handoff_oneline "$wt_phys")" "$base" "$name" "$branch" "$sid"
     cat "$body"
   } > "$final"
   rm -f "$body"
