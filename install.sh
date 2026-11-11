@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 993f3f2ee5ae1bb523508abeeceed23cdda578c40401c8e7416dfd641cb59083
+# SOURCE-SHA256: 66530865dc680e7f9941310c5697baccb2ac5db40e17659a2184cf2c0557e1a8
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -1537,6 +1537,16 @@ patch_settings() {
 # exits non-zero, so a re-run can still clean up.
 uninstall_incomplete=0
 unpatch_settings() {
+  if [[ ! -f "$settings" ]]; then
+    echo "  ok      $settings does not exist; nothing to strip"
+    return
+  fi
+  if [[ ! -s "$settings" ]]; then
+    echo "  ok      $settings is empty; nothing to strip"
+    return
+  fi
+  # jq is needed only from here on: a file that is absent or empty has nothing
+  # to strip, so a machine without jq still completes that uninstall.
   if ! command -v jq >/dev/null 2>&1; then
     echo
     echo "jq not found — can't auto-strip entries from $settings."
@@ -1560,14 +1570,6 @@ unpatch_settings() {
     echo "and, if you used --model, the top-level \"model\" key (the value this"
     echo "installer wrote, if any, is recorded in $model_pin_record)."
     uninstall_incomplete=1
-    return
-  fi
-  if [[ ! -f "$settings" ]]; then
-    echo "  ok      $settings does not exist; nothing to strip"
-    return
-  fi
-  if [[ ! -s "$settings" ]]; then
-    echo "  ok      $settings is empty; nothing to strip"
     return
   fi
   local usable_rc=0
@@ -2606,6 +2608,7 @@ else
   # is removed, so a re-run after the fix can finish.
   if (( uninstall_incomplete )); then
     echo
+    command -v jq >/dev/null 2>&1 || echo "jq is required to strip $settings and was not found on PATH."
     echo "NOT done: $settings was not fully unpatched (see above). The bin/ links,"
     echo "      skills and HMAC secret were kept so the hooks still wired there keep"
     echo "      working; fix it and re-run ./install.sh --uninstall."

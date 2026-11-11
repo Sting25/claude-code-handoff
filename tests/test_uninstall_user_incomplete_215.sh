@@ -65,4 +65,19 @@ check "B: no jq: bin/ links kept" "$n0" "$(nlinks)"
 check "B: no jq: hooks still wired (nothing half-uninstalled)" 7 \
   "$(jq '.hooks | length' "$H/.claude/settings.json" 2>/dev/null)"
 
+check "B: no jq: NOT done text names jq" yes "$(has "$OUT" "jq is required")"
+
+# --- C. jq absent but nothing to strip: completes, exit 0 --------------------------
+for seed in absent empty; do
+  fresh_sandbox
+  inst
+  case "$seed" in absent) rm -f "$H/.claude/settings.json" ;; empty) : > "$H/.claude/settings.json" ;; esac
+  nojq="$(path_without jq)"; cleanup_on_exit "$nojq"
+  OUT="$(cd "$P" && PATH="$nojq" HOME="$H" CLAUDE_HOME="$H/.claude" bash "$SRC/install.sh" --uninstall 2>&1 </dev/null)"
+  RC=$?
+  check "C ($seed settings): no jq: exit 0" 0 "$RC"
+  check "C ($seed settings): no jq: links removed" 0 "$(nlinks)"
+  check "C ($seed settings): no jq: not 'NOT done'" no "$(has "$OUT" "NOT done")"
+done
+
 finish

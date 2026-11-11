@@ -370,6 +370,16 @@ patch_settings() {
 # exits non-zero, so a re-run can still clean up.
 uninstall_incomplete=0
 unpatch_settings() {
+  if [[ ! -f "$settings" ]]; then
+    echo "  ok      $settings does not exist; nothing to strip"
+    return
+  fi
+  if [[ ! -s "$settings" ]]; then
+    echo "  ok      $settings is empty; nothing to strip"
+    return
+  fi
+  # jq is needed only from here on: a file that is absent or empty has nothing
+  # to strip, so a machine without jq still completes that uninstall.
   if ! command -v jq >/dev/null 2>&1; then
     echo
     echo "jq not found — can't auto-strip entries from $settings."
@@ -393,14 +403,6 @@ unpatch_settings() {
     echo "and, if you used --model, the top-level \"model\" key (the value this"
     echo "installer wrote, if any, is recorded in $model_pin_record)."
     uninstall_incomplete=1
-    return
-  fi
-  if [[ ! -f "$settings" ]]; then
-    echo "  ok      $settings does not exist; nothing to strip"
-    return
-  fi
-  if [[ ! -s "$settings" ]]; then
-    echo "  ok      $settings is empty; nothing to strip"
     return
   fi
   local usable_rc=0

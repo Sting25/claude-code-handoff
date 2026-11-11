@@ -214,6 +214,7 @@ else
   # is removed, so a re-run after the fix can finish.
   if (( uninstall_incomplete )); then
     echo
+    command -v jq >/dev/null 2>&1 || echo "jq is required to strip $settings and was not found on PATH."
     echo "NOT done: $settings was not fully unpatched (see above). The bin/ links,"
     echo "      skills and HMAC secret were kept so the hooks still wired there keep"
     echo "      working; fix it and re-run ./install.sh --uninstall."

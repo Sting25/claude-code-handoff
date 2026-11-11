@@ -1257,7 +1257,21 @@ point; fix jq or the named file and re-run the same `--uninstall` command.
 A registered file that is empty or not a JSON object is not a jq failure:
 it counts as a project that is no longer wired. jq failing while it makes
 that distinction is one, and keeps the secret; so does a registered file
-this process cannot read.
+this process cannot read, and so does one that holds text that is not valid
+JSON (its wiring is unknown until you fix it). All of these exit 1 and name
+the file.
+
+If the user-level settings file itself could not be stripped (invalid JSON,
+or jq missing while the file has content), a user-scope `--uninstall` stops
+before removing anything else: it prints `NOT done`, keeps the `bin/` links,
+the skills and the secret so the hooks still wired there keep working, and
+exits 1. Fix the file (or install jq) and re-run the same command. A missing
+or empty settings file needs no jq and completes normally.
+
+A completed project-scope `--uninstall` also removes the `path` record in
+`~/.claude/handoff_settings_backups/<key>/` once no created-file marker is
+left and the project's other settings file is not still registered. The
+backups in that directory are kept.
 
 Pass `--keep-secret` to skip that deletion entirely:
 
