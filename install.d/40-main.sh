@@ -176,7 +176,7 @@ elif [[ "$scope" == project ]]; then
     esac
     project_key_release
     echo
-    echo "done. the repo at $repo_root is untouched."
+    say_done_repo_untouched
     exit 0
   fi
   echo "project settings ($project_dir):"
@@ -205,7 +205,7 @@ elif [[ "$scope" == project ]]; then
   echo "      HMAC secret are shared by every project on this machine and were not"
   echo "      removed. Run ./install.sh --uninstall (user scope) to remove them."
   echo
-  echo "done. the repo at $repo_root is untouched."
+  say_done_repo_untouched
 else
   echo "uninstalling handoff skill from $claude_home"
   echo
@@ -277,6 +277,6 @@ else
   fi
   report_registry_orphans "$orphan_list" "$secret_note"
   echo
-  echo "done. the repo at $repo_root is untouched."
+  say_done_repo_untouched
 fi
 }

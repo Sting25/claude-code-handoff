@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: a5b8bccb5b29a8d136cc3d3434b3007a7d6b93214b2344ff9a9bc4222ebcc57f
+# SOURCE-SHA256: e614cd5cf56b6489f3e0ef4777819c032e00ae59498d0143f3b987288051daec
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -118,6 +118,16 @@ if [[ -n "$_self_src" ]]; then
     repo_root_err="cannot cd to $(dirname "$_self_src")"
   fi
 fi
+# The closing line of an --uninstall. A piped run (`bash -s -- --uninstall <
+# install.sh`) has no clone, and the plain line used to read "the repo at  is
+# untouched" with an empty path (#210).
+say_done_repo_untouched() {
+  if [[ -n "$repo_root" ]]; then
+    echo "done. the repo at $repo_root is untouched."
+  else
+    echo "done. no clone was used (install.sh ${repo_root_err:-was read from a pipe})."
+  fi
+}
 claude_home="${CLAUDE_HOME:-$HOME/.claude}"
 settings="$claude_home/settings.json"
 # The user-scope file, kept separately because project scope (issue #171)
@@ -206,16 +216,41 @@ fi
 # path keeps tmp+mv atomic AND leaves the symlink intact (Claude Code follows it
 # to read). Portable manual resolve (readlink -f is GNU-only), capped against
 # loops, falling back to the link path itself.
-resolve_symlink() {  # <path> -> physical path on stdout
-  local p="$1" n=0 t
+#
+# The result goes into RESOLVED with every trailing newline kept (#210): the
+# `printf x` trick on readlink, and phys_dir (below) for the parent, so a
+# link whose target ends in a newline resolves to that target and not to a
+# sibling without it. resolve_symlink prints it for callers that do not care.
+# `readlink -n` (GNU, BSD, busybox) prints the target bytes exactly. Plain
+# readlink cannot be trusted for this: macOS adds its newline only when the
+# target does not already end in one, so stripping one would drop the
+# target's own. The plain form is the fallback for a readlink without -n.
+RESOLVED=""
+resolve_symlink_into() {  # <path>; sets RESOLVED
+  local p="$1" n=0 t d
   while [[ -L "$p" ]] && (( n++ < 40 )); do
-    t="$(readlink "$p")" || break
+    if t="$(readlink -n "$p" 2>/dev/null && printf x)"; then
+      t="${t%x}"
+    elif t="$(readlink "$p" && printf x)"; then
+      t="${t%x}"
+      t="${t%$'\n'}"
+    else
+      break
+    fi
     case "$t" in
       /*) p="$t" ;;
-      *)  p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/$t" ;;
+      *)
+        case "$p" in */*) d="${p%/*}" ;; *) d=. ;; esac
+        [[ -n "$d" ]] || d=/
+        phys_dir "$d" || PHYS_DIR=""
+        p="$PHYS_DIR/$t" ;;
     esac
   done
-  printf '%s\n' "$p"
+  RESOLVED="$p"
+}
+resolve_symlink() {  # <path> -> physical path on stdout
+  resolve_symlink_into "$1"
+  printf '%s\n' "$RESOLVED"
 }
 # (The symlink check itself runs after argument parsing, below, because
 # --scope project repoints $settings at a project file first.)
@@ -320,6 +355,35 @@ if (( remove_secret )) && [[ "$mode" != uninstall ]]; then
   echo "warning: --remove-secret has no effect in $mode mode; it only changes what --uninstall does." >&2
 fi
 
+# A project path with a control character in it is refused outright (#210).
+# Every `$(...)` that resolves the path (pwd -P, git rev-parse) strips
+# trailing newlines, so a directory named `my proj<LF>` resolved to a SIBLING
+# `my proj`: that one was wired and registered and the real project never
+# was. The registry is one line per project with a TAB separator, so a
+# newline or tab can never be recorded faithfully either. Preserving the
+# newline (the `printf x` trick, used below for the resolutions themselves)
+# would only move the breakage into the registry, so the path is refused
+# instead. LC_ALL=C keeps the class to ASCII controls (0x00-0x1f, 0x7f):
+# non-ASCII names such as `café` are not affected.
+refuse_ctrl_path() {  # <label> <path>; exits 2 when <path> holds a control character
+  local LC_ALL=C
+  [[ "$2" == *[[:cntrl:]]* ]] || return 0
+  echo "ERROR: $1 $(printf '%q' "$2") contains a control character (newline, tab, ...); refusing." >&2
+  echo "       Rename the directory so its path has no control characters, and re-run." >&2
+  exit 2
+}
+# `$(cd <dir> && pwd -P)` without losing a trailing newline: the x keeps the
+# substitution from stripping it, then the x and pwd's own newline go. The
+# result goes into PHYS_DIR, not stdout: a caller's own `$(phys_dir ...)`
+# would strip the newline all over again.
+PHYS_DIR=""
+phys_dir() {  # <dir>; sets PHYS_DIR; non-zero when <dir> cannot be entered
+  local p
+  p="$(cd "$1" 2>/dev/null && pwd -P && printf x)" || return 1
+  p="${p%x}"
+  PHYS_DIR="${p%$'\n'}"
+}
+
 # Resolve the install scope (issue #171). Every refusal here exits before
 # anything is created or patched.
 case "$scope_flag" in
@@ -350,7 +414,11 @@ if [[ "$scope" == project ]]; then
   if [[ -z "$project_dir" ]]; then
     _top=""
     if command -v git >/dev/null 2>&1; then
-      _top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+      # The x keeps a trailing newline in the toplevel's name (#210), so
+      # the control-character refusal below sees it instead of a sibling.
+      _top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null && printf x)" || _top=""
+      _top="${_top%x}"
+      _top="${_top%$'\n'}"
     fi
     if [[ -n "$_top" ]]; then
       project_dir="$_top"
@@ -360,6 +428,7 @@ if [[ "$scope" == project ]]; then
       echo "note: no --project given; using $project_dir (the current directory)." >&2
     fi
   fi
+  refuse_ctrl_path "project directory" "$project_dir"
   if [[ ! -d "$project_dir" && "$mode" == uninstall ]]; then
     # A project-scope uninstall of a directory that is gone (typically a
     # removed worktree the doctor listed as stale) only clears its registry
@@ -374,29 +443,45 @@ if [[ "$scope" == project ]]; then
     # path reached through a symlink (a dangling link to the removed project,
     # or a link above it) must be made physical the same way a missing path
     # allows: follow a dangling final link, then resolve the parent (#194).
-    project_dir="$(resolve_symlink "$project_dir")"
+    # resolve_symlink_into keeps a trailing newline in the link target, so
+    # the refusal after the walk below sees a control character that
+    # arrived that way (#210): `$(resolve_symlink ...)` used to strip it and
+    # then matched, and cleared, a sibling project's registry line.
+    resolve_symlink_into "$project_dir"
+    project_dir="$RESOLVED"
+    while [[ "$project_dir" == */ && "$project_dir" != / ]]; do project_dir="${project_dir%/}"; done
     # Walk up to the nearest existing ancestor, make THAT physical, and put the
     # missing tail back: a removed worktree whose parent is gone too (under a
     # symlinked ancestor such as macOS /tmp -> /private/tmp) must still match
     # the physical path the install registered.
     _gone_tail=""
     _gone_head="$project_dir"
+    # Parameter expansion, not `$(dirname ...)`/`$(basename ...)`, which
+    # strip a trailing newline from each component (#210). Like dirname, it
+    # collapses repeated slashes (`a//wt` is `a/wt`); a `.` component is
+    # dropped too, so `a/./wt/` matches the line registered for `a/wt`. The
+    # existing head is made physical below, which normalizes its own part.
     while [[ ! -d "$_gone_head" && "$_gone_head" != / && -n "$_gone_head" ]]; do
-      _gone_tail="/$(basename "$_gone_head")$_gone_tail"
-      _gone_head="$(dirname "$_gone_head")"
+      while [[ "$_gone_head" == */ && "$_gone_head" != / ]]; do _gone_head="${_gone_head%/}"; done
+      [[ "$_gone_head" == / || "$_gone_head" != */* ]] && break
+      _gone_comp="${_gone_head##*/}"
+      [[ "$_gone_comp" == . ]] || _gone_tail="/$_gone_comp$_gone_tail"
+      _gone_head="${_gone_head%/*}"
+      [[ -n "$_gone_head" ]] || _gone_head=/
     done
     # An ancestor that cannot be entered (mode 000) has no knowable physical
     # path: say so and leave the registry line, rather than dying on a raw
     # `cd: Permission denied` under set -e or clearing a line that may not match.
-    if ! _gone_phys="$(cd "$_gone_head" 2>/dev/null && pwd -P)"; then
+    if ! phys_dir "$_gone_head"; then
       echo "  WARN    cannot enter $_gone_head (the nearest existing parent of $project_dir)," >&2
       echo "          so its physical path is unknown; the registry line and markers were left in place." >&2
       echo "          Make it enterable and re-run the --uninstall." >&2
       exit 1
     fi
-    _gone_head="$_gone_phys"
+    _gone_head="$PHYS_DIR"
     [[ "$_gone_head" == / ]] && _gone_head=""
     project_dir="$_gone_head$_gone_tail"
+    refuse_ctrl_path "project directory (resolved)" "$project_dir"
     project_gone=1
   elif [[ ! -d "$project_dir" ]]; then
     echo "ERROR: project directory '$project_dir' does not exist or is not a directory; refusing." >&2
@@ -406,7 +491,15 @@ fi
 if [[ "$scope" == project ]] && (( ! project_gone )); then
   # Absolute and physical, so the comparisons below and the paths printed
   # (and the backup location) never depend on how the flag was spelled.
-  project_dir="$(cd "$project_dir" && pwd -P)"
+  # phys_dir keeps a trailing newline the resolution would otherwise strip;
+  # the check after it catches a control character a symlink on the way
+  # brought in (#210).
+  if ! phys_dir "$project_dir"; then
+    echo "ERROR: cannot enter project directory '$project_dir'; refusing." >&2
+    exit 2
+  fi
+  project_dir="$PHYS_DIR"
+  refuse_ctrl_path "project directory (resolved)" "$project_dir"
   # Wiring the handoff clone, or any directory inside it, is almost
   # certainly a mistake: the usual cause is running `./install.sh --scope
   # project` from inside the clone without --project. Refuse instead of
@@ -2811,7 +2904,7 @@ elif [[ "$scope" == project ]]; then
     esac
     project_key_release
     echo
-    echo "done. the repo at $repo_root is untouched."
+    say_done_repo_untouched
     exit 0
   fi
   echo "project settings ($project_dir):"
@@ -2840,7 +2933,7 @@ elif [[ "$scope" == project ]]; then
   echo "      HMAC secret are shared by every project on this machine and were not"
   echo "      removed. Run ./install.sh --uninstall (user scope) to remove them."
   echo
-  echo "done. the repo at $repo_root is untouched."
+  say_done_repo_untouched
 else
   echo "uninstalling handoff skill from $claude_home"
   echo
@@ -2912,6 +3005,6 @@ else
   fi
   report_registry_orphans "$orphan_list" "$secret_note"
   echo
-  echo "done. the repo at $repo_root is untouched."
+  say_done_repo_untouched
 fi
 }
