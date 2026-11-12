@@ -180,6 +180,8 @@ elif [[ "$scope" == project ]]; then
     exit 0
   fi
   echo "project settings ($project_dir):"
+  # Before anything is read for editing: a refusal changes nothing (#209).
+  refuse_uninstall_if_other_file_wired
   check_created_settings
   unpatch_settings
   # A refused or unfinished strip (invalid JSON, no jq, a failed skeleton
@@ -194,6 +196,10 @@ elif [[ "$scope" == project ]]; then
   fi
   registry_remove "$project_dir" "$settings_name"
   project_key_release
+  if [[ -n "$other_wired_note" ]]; then
+    echo
+    printf '%s\n' "$other_wired_note"
+  fi
   echo
   echo "kept (project scope): $claude_home/bin scripts, $claude_home/skills, and the"
   echo "      HMAC secret are shared by every project on this machine and were not"
