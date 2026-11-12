@@ -445,9 +445,15 @@ if [[ "$scope" == project ]]; then
     _gone_tail=""
     _gone_head="$project_dir"
     # Parameter expansion, not `$(dirname ...)`/`$(basename ...)`, which
-    # strip a trailing newline from each component (#210).
+    # strip a trailing newline from each component (#210). Like dirname, it
+    # collapses repeated slashes (`a//wt` is `a/wt`); a `.` component is
+    # dropped too, so `a/./wt/` matches the line registered for `a/wt`. The
+    # existing head is made physical below, which normalizes its own part.
     while [[ ! -d "$_gone_head" && "$_gone_head" != / && -n "$_gone_head" ]]; do
-      _gone_tail="/${_gone_head##*/}$_gone_tail"
+      while [[ "$_gone_head" == */ && "$_gone_head" != / ]]; do _gone_head="${_gone_head%/}"; done
+      [[ "$_gone_head" == / || "$_gone_head" != */* ]] && break
+      _gone_comp="${_gone_head##*/}"
+      [[ "$_gone_comp" == . ]] || _gone_tail="/$_gone_comp$_gone_tail"
       _gone_head="${_gone_head%/*}"
       [[ -n "$_gone_head" ]] || _gone_head=/
     done

@@ -22,6 +22,10 @@
 #      sibling's registry line. Also: --doctor refuses, DEL (0x7f) is a
 #      control character, and under a UTF-8 locale a name with U+0085 or
 #      U+009F (not ASCII controls) still installs.
+#   E. (second review) the newline-safe walk up a gone project path still
+#      collapses repeated slashes and drops `.` components, as dirname did:
+#      `--uninstall --project <p>/a//wt` with <p>/a gone clears the line
+#      registered for <p>/a/wt, and so do `<p>/a/./wt/` and `<p>/a//./wt//`.
 # Every run sandboxes HOME and CLAUDE_HOME, so nothing touches ~/.claude.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -260,5 +264,24 @@ if [[ -n "$UTF8_LC" ]]; then
 else
   skip "D8: no UTF-8 locale that classes U+0085 as cntrl"
 fi
+
+# --- E. a gone path spelled with repeated slashes, `./` or a trailing slash ----------------------
+# e_case <label> <rm path> <uninstall path>: both relative to the fresh <p>.
+# Install <p>/a/wt, remove <p>/<rm path>, uninstall <p>/<uninstall path>.
+e_case() {
+  fresh_sandbox
+  must mkdir -p "$P/a/wt"
+  inst "$P" --project "$P/a/wt"
+  check "$1: registered" yes "$(has "$(reg_now)" "$P/a/wt")"
+  must rm -r "${P:?}/$2"
+  inst "$P" --uninstall --project "$P/$3"
+  check "$1: uninstall exits 0" 0 "$RC"
+  check "$1: registry line cleared" "" "$(reg_now)"
+  check "$1: no 'no registry line' WARN" no "$(has "$OUT" "no registry line")"
+}
+e_case "E1 (a//wt, parent gone)" a "a//wt"
+e_case "E2 (a//wt, parent exists)" a/wt "a//wt"
+e_case "E3 (a/./wt/, parent gone)" a "a/./wt/"
+e_case "E4 (a//./wt//, parent gone)" a "a//./wt//"
 
 finish

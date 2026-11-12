@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: c3d5a376a89bb6b8abd7dbf3f8900d4bd398cbf083c0f7d8893814c7411e0465
+# SOURCE-SHA256: f136c58b819f1be30c7c6e095f6a7c9d045869875b8d6acaaad5f24b3a27bf53
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -457,9 +457,15 @@ if [[ "$scope" == project ]]; then
     _gone_tail=""
     _gone_head="$project_dir"
     # Parameter expansion, not `$(dirname ...)`/`$(basename ...)`, which
-    # strip a trailing newline from each component (#210).
+    # strip a trailing newline from each component (#210). Like dirname, it
+    # collapses repeated slashes (`a//wt` is `a/wt`); a `.` component is
+    # dropped too, so `a/./wt/` matches the line registered for `a/wt`. The
+    # existing head is made physical below, which normalizes its own part.
     while [[ ! -d "$_gone_head" && "$_gone_head" != / && -n "$_gone_head" ]]; do
-      _gone_tail="/${_gone_head##*/}$_gone_tail"
+      while [[ "$_gone_head" == */ && "$_gone_head" != / ]]; do _gone_head="${_gone_head%/}"; done
+      [[ "$_gone_head" == / || "$_gone_head" != */* ]] && break
+      _gone_comp="${_gone_head##*/}"
+      [[ "$_gone_comp" == . ]] || _gone_tail="/$_gone_comp$_gone_tail"
       _gone_head="${_gone_head%/*}"
       [[ -n "$_gone_head" ]] || _gone_head=/
     done
