@@ -95,4 +95,39 @@ check "2b: uninstall exits 0"                      0   "$RC"
 check "2b: nothing to strip"                       yes "$(has "$OUT" "settings.json does not exist; nothing to strip")"
 check "2b: no WARN"                                no  "$(has "$OUT" "WARN")"
 
+
+# 7. piped user-scope --uninstall (no clone: repo_root is empty).
+piped_uninstall() {
+  OUT="$(cd "$P" && HOME="$H" CLAUDE_HOME="$H/.claude" bash -s -- --uninstall < "$SRC/install.sh" 2>&1)"
+  RC=$?
+}
+nlinks() { find "$H/.claude/bin" "$H/.claude/skills" -type l 2>/dev/null | wc -l | tr -d ' '; }
+# 7a. symlink install: every link into the clone goes.
+fresh_sandbox
+inst
+check "7a: install made 13 links"                  13  "$(nlinks)"
+piped_uninstall
+check "7a: piped uninstall exits 0"                0   "$RC"
+check "7a: names the clone it matched against"     yes "$(has "$OUT" "no clone was used; matching against $SRC,")"
+check "7a: no link left"                           0   "$(nlinks)"
+check "7a: nothing skipped as 'not ours'"          no  "$(has "$OUT" "not ours")"
+check "7a: settings stripped"                      0   "$(nhooks "$H/.claude/settings.json")"
+# 7b. a link of the user's that points elsewhere stays.
+fresh_sandbox
+inst
+USERF="$(mktemp)"; cleanup_on_exit "$USERF"
+must rm "$H/.claude/skills/handoff/README.md"
+must ln -s "$USERF" "$H/.claude/skills/handoff/README.md"
+piped_uninstall
+check "7b: piped uninstall exits 0"                0   "$RC"
+check "7b: the user's link is skipped"             yes "$(has "$OUT" "skip    $H/.claude/skills/handoff/README.md (not ours")"
+check "7b: only the user's link is left"           1   "$(nlinks)"
+# 7c. copy install: no link to match, said so; the copies stay.
+fresh_sandbox
+inst --copy
+piped_uninstall
+check "7c: piped uninstall exits 0"                0   "$RC"
+check "7c: says copies cannot be matched"          yes "$(has "$OUT" "copies cannot be matched and are left in place")"
+check "7c: copies left in place"                   yes "$([[ -f "$H/.claude/bin/write_handoff.sh" ]] && echo yes || echo no)"
+
 finish

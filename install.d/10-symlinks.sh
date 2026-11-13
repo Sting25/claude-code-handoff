@@ -239,20 +239,54 @@ install_symlinks() {
            "$repo_root/bin/handoff_worktree_remove.sh" 2>/dev/null || true
 }
 
+# The clone the installed links point into: the root of
+# $claude_home/bin/write_handoff.sh's target, when that target is
+# <root>/bin/write_handoff.sh and <root> is a handoff checkout. Sets
+# LINK_ROOT, empty when there is no such link (copy mode, nothing installed).
+LINK_ROOT=""
+installed_clone_root() {
+  local l="$claude_home/bin/write_handoff.sh" r
+  LINK_ROOT=""
+  [[ -L "$l" ]] || return 0
+  read_link_into "$l" || return 0
+  case "$LINK_TARGET" in /?*/bin/write_handoff.sh) ;; *) return 0 ;; esac
+  r="${LINK_TARGET%/bin/write_handoff.sh}"
+  [[ -f "$r/bin/write_handoff.sh" && -f "$r/skills/handoff/SKILL.md" ]] || return 0
+  LINK_ROOT="$r"
+}
+
 uninstall_symlinks() {
-  unlink_if_ours "$claude_home/bin/write_handoff.sh"          "$repo_root/bin/write_handoff.sh"
-  unlink_if_ours "$claude_home/bin/handoff_turn_append.sh"    "$repo_root/bin/handoff_turn_append.sh"
-  unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"      "$repo_root/bin/handoff_ctx_check.sh"
-  unlink_if_ours "$claude_home/bin/handoff_session_start.sh"  "$repo_root/bin/handoff_session_start.sh"
-  unlink_if_ours "$claude_home/bin/handoff_recover_tail.sh"   "$repo_root/bin/handoff_recover_tail.sh"
-  unlink_if_ours "$claude_home/bin/handoff_statusline.sh"     "$repo_root/bin/handoff_statusline.sh"
-  unlink_if_ours "$claude_home/bin/handoff_compact_reset.sh"  "$repo_root/bin/handoff_compact_reset.sh"
-  unlink_if_ours "$claude_home/bin/handoff_worktree_remove.sh" "$repo_root/bin/handoff_worktree_remove.sh"
-  unlink_if_ours "$claude_home/bin/handoff_provenance.sh"     "$repo_root/bin/handoff_provenance.sh"
-  unlink_if_ours "$claude_home/skills/handoff/SKILL.md"          "$repo_root/skills/handoff/SKILL.md"
-  unlink_if_ours "$claude_home/skills/handoff/README.md"         "$repo_root/skills/handoff/README.md"
-  unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$repo_root/skills/handoff-more/SKILL.md"
-  unlink_if_ours "$claude_home/skills/handoff-recover/SKILL.md"  "$repo_root/skills/handoff-recover/SKILL.md"
+  local root="$repo_root"
+  if [[ -z "$root" ]]; then
+    # No clone of our own (a piped `bash -s -- --uninstall < install.sh`):
+    # every link was compared with "/bin/...", matched nothing and was left
+    # as "not ours" while the settings were stripped (#226). Match against
+    # the clone the install linked instead. Still an exact comparison per
+    # link, so a link of the user's that points elsewhere stays.
+    installed_clone_root
+    root="$LINK_ROOT"
+    if [[ -n "$root" ]]; then
+      echo "  note    no clone was used; matching against $(shown_path "$root"),"
+      echo "          the clone $claude_home/bin/write_handoff.sh links into"
+    elif [[ -e "$claude_home/bin/write_handoff.sh" ]]; then
+      echo "  note    no clone was used and $claude_home/bin/write_handoff.sh is not a"
+      echo "          link into one, so copies cannot be matched and are left in place;"
+      echo "          run ./install.sh --uninstall from a clone to remove them"
+    fi
+  fi
+  unlink_if_ours "$claude_home/bin/write_handoff.sh"          "$root/bin/write_handoff.sh"
+  unlink_if_ours "$claude_home/bin/handoff_turn_append.sh"    "$root/bin/handoff_turn_append.sh"
+  unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"      "$root/bin/handoff_ctx_check.sh"
+  unlink_if_ours "$claude_home/bin/handoff_session_start.sh"  "$root/bin/handoff_session_start.sh"
+  unlink_if_ours "$claude_home/bin/handoff_recover_tail.sh"   "$root/bin/handoff_recover_tail.sh"
+  unlink_if_ours "$claude_home/bin/handoff_statusline.sh"     "$root/bin/handoff_statusline.sh"
+  unlink_if_ours "$claude_home/bin/handoff_compact_reset.sh"  "$root/bin/handoff_compact_reset.sh"
+  unlink_if_ours "$claude_home/bin/handoff_worktree_remove.sh" "$root/bin/handoff_worktree_remove.sh"
+  unlink_if_ours "$claude_home/bin/handoff_provenance.sh"     "$root/bin/handoff_provenance.sh"
+  unlink_if_ours "$claude_home/skills/handoff/SKILL.md"          "$root/skills/handoff/SKILL.md"
+  unlink_if_ours "$claude_home/skills/handoff/README.md"         "$root/skills/handoff/README.md"
+  unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$root/skills/handoff-more/SKILL.md"
+  unlink_if_ours "$claude_home/skills/handoff-recover/SKILL.md"  "$root/skills/handoff-recover/SKILL.md"
   # Tidy up now-empty leaf dirs we created. `rmdir` only removes a directory
   # that is ALREADY empty (fails harmlessly otherwise) — never `rm -r` — so
   # this can never touch a dir the user left files in (their own script
