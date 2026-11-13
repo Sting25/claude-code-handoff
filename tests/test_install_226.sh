@@ -11,7 +11,12 @@
 #      still gives "nothing to strip".
 #   7. a piped user-scope --uninstall (no clone, empty repo_root) removes the
 #      links into the clone the install used, and still leaves a link of the
-#      user's that points elsewhere.
+#      user's that points elsewhere. The clone is the one the installed links
+#      agree on, so no single altered link decides it: one link pointed at a
+#      fork (7d), deleted (7e) or replaced by a copy (7f) changes nothing
+#      else; links into a directory that is not a handoff checkout are never
+#      a clone (7g); links split evenly between two clones remove nothing
+#      and say so (7h).
 # Every run sandboxes HOME and CLAUDE_HOME, so nothing touches ~/.claude.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -127,7 +132,62 @@ fresh_sandbox
 inst --copy
 piped_uninstall
 check "7c: piped uninstall exits 0"                0   "$RC"
-check "7c: says copies cannot be matched"          yes "$(has "$OUT" "copies cannot be matched and are left in place")"
+check "7c: says the files cannot be matched"      yes "$(has "$OUT" "no installed link points into a handoff clone")"
 check "7c: copies left in place"                   yes "$([[ -f "$H/.claude/bin/write_handoff.sh" ]] && echo yes || echo no)"
+
+
+# 7d. write_handoff.sh pointed at a user's fork (itself a handoff checkout).
+FORK="$(mktemp -d)"; cleanup_on_exit "$FORK"; FORK="$(cd "$FORK" && pwd -P)"
+must cp -r "$REPO_ROOT/bin" "$REPO_ROOT/skills" "$FORK/"
+fresh_sandbox
+inst
+must rm "$H/.claude/bin/write_handoff.sh"
+must ln -s "$FORK/bin/write_handoff.sh" "$H/.claude/bin/write_handoff.sh"
+piped_uninstall
+check "7d: piped uninstall exits 0"                0   "$RC"
+check "7d: matches against the clone, not the fork" yes "$(has "$OUT" "matching against $SRC,")"
+check "7d: the fork link is skipped"               yes "$(has "$OUT" "skip    $H/.claude/bin/write_handoff.sh (not ours")"
+check "7d: only the fork link is left"             1   "$(nlinks)"
+check "7d: and it still points at the fork"        "$FORK/bin/write_handoff.sh" "$(readlink "$H/.claude/bin/write_handoff.sh")"
+# 7e. write_handoff.sh link deleted: the other 12 still go.
+fresh_sandbox
+inst
+must rm "$H/.claude/bin/write_handoff.sh"
+piped_uninstall
+check "7e: piped uninstall exits 0"                0   "$RC"
+check "7e: matches against the clone"              yes "$(has "$OUT" "matching against $SRC,")"
+check "7e: no link left"                           0   "$(nlinks)"
+# 7f. write_handoff.sh replaced by a copy: links decide, the copy is compared.
+fresh_sandbox
+inst
+must rm "$H/.claude/bin/write_handoff.sh"
+must cp "$SRC/bin/write_handoff.sh" "$H/.claude/bin/write_handoff.sh"
+piped_uninstall
+check "7f: piped uninstall exits 0"                0   "$RC"
+check "7f: matches against the clone"              yes "$(has "$OUT" "matching against $SRC,")"
+check "7f: no note about unmatched files"          no  "$(has "$OUT" "cannot be matched")"
+check "7f: the identical copy is removed"          yes "$(has "$OUT" "remove  $H/.claude/bin/write_handoff.sh (copy)")"
+check "7f: no link left"                           0   "$(nlinks)"
+# 7g. links into a directory that is not a handoff checkout are not a clone.
+fresh_sandbox
+U="$(mktemp -d)"; cleanup_on_exit "$U"; U="$(cd "$U" && pwd -P)"
+must mkdir -p "$U/bin" "$H/.claude/bin"
+for n in write_handoff.sh handoff_ctx_check.sh; do
+  echo "# user" > "$U/bin/$n"
+  must ln -s "$U/bin/$n" "$H/.claude/bin/$n"
+done
+piped_uninstall
+check "7g: piped uninstall exits 0"                0   "$RC"
+check "7g: says no link points into a clone"       yes "$(has "$OUT" "no installed link points into a handoff clone")"
+check "7g: both user links left"                   2   "$(nlinks)"
+# 7h. two links into the clone, two into the fork: undecided, nothing removed.
+fresh_sandbox
+must mkdir -p "$H/.claude/bin"
+for n in write_handoff.sh handoff_ctx_check.sh; do must ln -s "$SRC/bin/$n" "$H/.claude/bin/$n"; done
+for n in handoff_statusline.sh handoff_turn_append.sh; do must ln -s "$FORK/bin/$n" "$H/.claude/bin/$n"; done
+piped_uninstall
+check "7h: piped uninstall exits 0"                0   "$RC"
+check "7h: says the links do not agree"            yes "$(has "$OUT" "do not agree on one clone")"
+check "7h: no link removed"                        4   "$(nlinks)"
 
 finish

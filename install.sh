@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: cff86f5feec7f0bf0488045683c2b4c10fe15acb0c21bd00d6278302836c8dee
+# SOURCE-SHA256: 3d874a0632ef6bc75bae38d9b23bb194b19126ab0d2e22f2ea85ca9d5feddf09
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -919,54 +919,89 @@ install_symlinks() {
            "$repo_root/bin/handoff_worktree_remove.sh" 2>/dev/null || true
 }
 
-# The clone the installed links point into: the root of
-# $claude_home/bin/write_handoff.sh's target, when that target is
-# <root>/bin/write_handoff.sh and <root> is a handoff checkout. Sets
-# LINK_ROOT, empty when there is no such link (copy mode, nothing installed).
-LINK_ROOT=""
+# Every file the install links (or copies) into $claude_home, relative to the
+# clone root. install_symlinks keeps its own explicit list; this one drives
+# the uninstall-side matching and must name the same files.
+handoff_files=(
+  bin/write_handoff.sh bin/handoff_turn_append.sh bin/handoff_ctx_check.sh
+  bin/handoff_session_start.sh bin/handoff_recover_tail.sh bin/handoff_statusline.sh
+  bin/handoff_compact_reset.sh bin/handoff_worktree_remove.sh bin/handoff_provenance.sh
+  skills/handoff/SKILL.md skills/handoff/README.md skills/handoff-more/SKILL.md
+  skills/handoff-recover/SKILL.md
+)
+
+# The clone the installed links point into, for an --uninstall with no clone
+# of its own. Every installed link votes: a link at $claude_home/<f> whose
+# target is exactly <root>/<f>, with <root> a handoff checkout, names <root>.
+# A root is chosen only when at least two links name it and they outnumber
+# the links naming any other root together, so no single link (one pointed
+# at a fork, one deleted, one replaced by a copy) can decide or block it;
+# without such a root nothing is matched and only dangling links go (#226).
+# Sets LINK_ROOT (empty when undecided), LINK_ROOT_VOTES, and CLONE_ROOTS
+# (every candidate root, for the note).
+LINK_ROOT=""; LINK_ROOT_VOTES=0; CLONE_ROOTS=()
 installed_clone_root() {
-  local l="$claude_home/bin/write_handoff.sh" r
-  LINK_ROOT=""
-  [[ -L "$l" ]] || return 0
-  read_link_into "$l" || return 0
-  case "$LINK_TARGET" in /?*/bin/write_handoff.sh) ;; *) return 0 ;; esac
-  r="${LINK_TARGET%/bin/write_handoff.sh}"
-  [[ -f "$r/bin/write_handoff.sh" && -f "$r/skills/handoff/SKILL.md" ]] || return 0
-  LINK_ROOT="$r"
+  local f r i n=0 best=-1 total=0
+  local -a votes=()
+  LINK_ROOT=""; LINK_ROOT_VOTES=0; CLONE_ROOTS=()
+  for f in "${handoff_files[@]}"; do
+    [[ -L "$claude_home/$f" ]] || continue
+    read_link_into "$claude_home/$f" || continue
+    case "$LINK_TARGET" in /?*/"$f") ;; *) continue ;; esac
+    r="${LINK_TARGET%/"$f"}"
+    [[ -f "$r/bin/write_handoff.sh" && -f "$r/skills/handoff/SKILL.md" ]] || continue
+    total=$((total + 1))
+    for (( i = 0; i < n; i++ )); do
+      [[ "${CLONE_ROOTS[i]}" == "$r" ]] && break
+    done
+    if (( i == n )); then CLONE_ROOTS[n]="$r"; votes[n]=0; n=$((n + 1)); fi
+    votes[i]=$(( votes[i] + 1 ))
+  done
+  # Two tests, not one `||`: bash 3.2 expands votes[-1] even when the
+  # left side already decided, and dies on the subscript.
+  for (( i = 0; i < n; i++ )); do
+    if (( best < 0 )); then best=$i; elif (( votes[i] > votes[best] )); then best=$i; fi
+  done
+  (( best >= 0 )) || return 0
+  if (( votes[best] >= 2 && votes[best] * 2 > total )); then
+    LINK_ROOT="${CLONE_ROOTS[best]}"
+    LINK_ROOT_VOTES=${votes[best]}
+  fi
 }
 
 uninstall_symlinks() {
-  local root="$repo_root"
+  local root="$repo_root" f r list="" any=0
   if [[ -z "$root" ]]; then
     # No clone of our own (a piped `bash -s -- --uninstall < install.sh`):
     # every link was compared with "/bin/...", matched nothing and was left
     # as "not ours" while the settings were stripped (#226). Match against
-    # the clone the install linked instead. Still an exact comparison per
-    # link, so a link of the user's that points elsewhere stays.
+    # the clone the installed links agree on instead. Still an exact
+    # comparison per file, so a link of the user's that points elsewhere stays.
     installed_clone_root
     root="$LINK_ROOT"
+    for f in "${handoff_files[@]}"; do
+      [[ -e "$claude_home/$f" ]] && any=1
+    done
     if [[ -n "$root" ]]; then
       echo "  note    no clone was used; matching against $(shown_path "$root"),"
-      echo "          the clone $claude_home/bin/write_handoff.sh links into"
-    elif [[ -e "$claude_home/bin/write_handoff.sh" ]]; then
-      echo "  note    no clone was used and $claude_home/bin/write_handoff.sh is not a"
-      echo "          link into one, so copies cannot be matched and are left in place;"
-      echo "          run ./install.sh --uninstall from a clone to remove them"
+      echo "          the clone $LINK_ROOT_VOTES of the installed links point into"
+    elif (( ${#CLONE_ROOTS[@]} )); then
+      for r in "${CLONE_ROOTS[@]}"; do list="${list:+$list, }$(shown_path "$r")"; done
+      echo "  note    no clone was used and the installed links do not agree on one clone"
+      echo "          ($list), so none of them is proven this installer's and only"
+      echo "          dangling links are removed; run ./install.sh --uninstall from the"
+      echo "          clone you installed from to remove the rest"
+    elif (( any )); then
+      echo "  note    no clone was used and no installed link points into a handoff clone,"
+      echo "          so the files below cannot be matched and are left in place; run"
+      echo "          ./install.sh --uninstall from a clone to remove them"
     fi
+    # Never "/bin/...": with no root, compare against a path no link can hold.
+    [[ -n "$root" ]] || root="/nonexistent-handoff-clone"
   fi
-  unlink_if_ours "$claude_home/bin/write_handoff.sh"          "$root/bin/write_handoff.sh"
-  unlink_if_ours "$claude_home/bin/handoff_turn_append.sh"    "$root/bin/handoff_turn_append.sh"
-  unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"      "$root/bin/handoff_ctx_check.sh"
-  unlink_if_ours "$claude_home/bin/handoff_session_start.sh"  "$root/bin/handoff_session_start.sh"
-  unlink_if_ours "$claude_home/bin/handoff_recover_tail.sh"   "$root/bin/handoff_recover_tail.sh"
-  unlink_if_ours "$claude_home/bin/handoff_statusline.sh"     "$root/bin/handoff_statusline.sh"
-  unlink_if_ours "$claude_home/bin/handoff_compact_reset.sh"  "$root/bin/handoff_compact_reset.sh"
-  unlink_if_ours "$claude_home/bin/handoff_worktree_remove.sh" "$root/bin/handoff_worktree_remove.sh"
-  unlink_if_ours "$claude_home/bin/handoff_provenance.sh"     "$root/bin/handoff_provenance.sh"
-  unlink_if_ours "$claude_home/skills/handoff/SKILL.md"          "$root/skills/handoff/SKILL.md"
-  unlink_if_ours "$claude_home/skills/handoff/README.md"         "$root/skills/handoff/README.md"
-  unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$root/skills/handoff-more/SKILL.md"
-  unlink_if_ours "$claude_home/skills/handoff-recover/SKILL.md"  "$root/skills/handoff-recover/SKILL.md"
+  for f in "${handoff_files[@]}"; do
+    unlink_if_ours "$claude_home/$f" "$root/$f"
+  done
   # Tidy up now-empty leaf dirs we created. `rmdir` only removes a directory
   # that is ALREADY empty (fails harmlessly otherwise) — never `rm -r` — so
   # this can never touch a dir the user left files in (their own script
