@@ -14,7 +14,10 @@
 #      settings.local.json -> `a` as one file and missed the duplicate;
 #   F. messages showed a stripped link target; they now show it in $'...'
 #      form (the doctor's link report, a dangling .claude link) and a
-#      settings link into a missing `d<LF>` is refused, not patched into `d`.
+#      settings link into a missing `d<LF>` is refused, not patched into `d`;
+#   G. git_tracks_file, called directly (its symlink branch is not reached
+#      through the install, which resolves the settings link first): a link
+#      to `x<LF>` is tracked only when `x<LF>` is, never because `x` is.
 # Every run sandboxes HOME and CLAUDE_HOME, so nothing touches ~/.claude.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -135,5 +138,30 @@ inst "$SRC/install.sh" --scope project --project "$P"
 check "F3: refused (exit 2)" 2 "$RC"
 check "F3: says the directory does not exist" yes "$(has "$OUT" "whose directory does not exist")"
 check "F3: nothing written into the sibling d" no "$(yn test -e "$T/d/settings.json")"
+
+
+# G. git_tracks_file on a link whose target ends in a newline. The function
+#    (and read_link_into, which it calls) is lifted out of install.sh, which
+#    runs its main body at the bottom and cannot be sourced whole.
+if command -v git >/dev/null 2>&1; then
+  R="$(mk_repo)" || R=""
+  if [[ -n "$R" ]]; then
+    cleanup_on_exit "$R"
+    echo tracked > "$R/x"; echo untracked > "$R/x$NL"
+    echo tracked > "$R/y$NL"
+    must git -C "$R" add -- x "y$NL"
+    must git -C "$R" commit -qm "x and y<LF>"
+    O="$(mktemp -d)"; cleanup_on_exit "$O"; O="$(cd "$O" && pwd -P)"
+    must ln -s "$R/x$NL" "$O/to_x_nl"
+    must ln -s "$R/y$NL" "$O/to_y_nl"
+    FN="$(sed -n -e '/^read_link_into() {/,/^}/p' -e '/^git_tracks_file() {/,/^}/p' "$REPO_ROOT/install.sh")"
+    check "G: both functions lifted" 2 "$(printf '%s\n' "$FN" | grep -cE '^(read_link_into|git_tracks_file)\(\) \{')"
+    gt() { ( eval "$FN"; git_tracks_file "$1" ) && echo tracked || echo untracked; }
+    check "G: link to untracked x<LF> (x tracked) is untracked" untracked "$(gt "$O/to_x_nl")"
+    check "G: link to tracked y<LF> is tracked"                 tracked   "$(gt "$O/to_y_nl")"
+  fi
+else
+  check "G: git present (CI has it)" present absent
+fi
 
 finish
