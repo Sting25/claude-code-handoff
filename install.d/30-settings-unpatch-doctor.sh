@@ -65,6 +65,16 @@ migrate_legacy_ss_hook() {
 # mid-run or clobber recoverable user config; print the manual snippet instead.
 # Returns 0 when the file is valid JSON and safe to patch, 1 to skip patching.
 ensure_settings_json() {
+  if settings_dir_unsearchable "$settings"; then
+    # Hidden, not absent (#213): seeding {} would fail on the redirect, and
+    # the old path then printed "new ... (created with {})" and a jq failure.
+    echo
+    echo "  ERROR   $settings cannot be read (check its permissions: a directory above it"
+    echo "          cannot be searched); refusing to auto-patch (left untouched)."
+    echo "          Fix the permissions and re-run, or patch settings.json by hand:"
+    print_manual_snippet
+    return 1
+  fi
   if [[ ! -f "$settings" ]]; then
     echo '{}' > "$settings"
     settings_seed_state=absent
@@ -389,6 +399,14 @@ patch_settings() {
 # exits non-zero, so a re-run can still clean up.
 uninstall_incomplete=0
 unpatch_settings() {
+  if settings_dir_unsearchable "$settings"; then
+    # Hidden, not absent (#213): the hooks may still be wired there. Stop
+    # before anything is removed, as for the unreadable file below.
+    echo "  ERROR   $settings cannot be read (check its permissions: a directory above it" >&2
+    echo "          cannot be searched); refusing to edit (left untouched)." >&2
+    echo "          Fix the permissions and re-run the same --uninstall command." >&2
+    exit 1
+  fi
   if [[ ! -f "$settings" ]]; then
     echo "  ok      $settings does not exist; nothing to strip"
     return
@@ -684,6 +702,9 @@ other_wired_note=""
 refuse_uninstall_if_other_file_wired() {
   local named="$settings" shown="$project_dir/.claude/$settings_name" why rc=0 flag cmd
   local leftovers=0 other_state
+  # A named file hidden by an unsearchable directory is not "does not exist":
+  # unpatch_settings refuses it (#213).
+  settings_dir_unsearchable "$named" && return 0
   if [[ -L "$shown" && ! -e "$shown" ]]; then
     why="is a dangling symlink"
   elif [[ ! -e "$named" ]]; then
@@ -797,6 +818,24 @@ settings_usable() {
 # would read as a jq failure (tests/test_install_jq_probes_187.sh, matrix).
 sh_jq_failed=0
 sh_jq_failed_file=""
+# settings_dir_unsearchable <file>: 0 when <file> is hidden by a directory
+# this process cannot search. `-f`, `-e` and `-r` are all false for a file
+# under such a directory, exactly as for an absent one, so every "does not
+# exist" branch must ask this first (#213). Walks up to the nearest ancestor
+# that can be stat'ed: when the project directory, or any directory above it,
+# cannot be searched, everything below it is hidden and the first stat-able
+# one is the unsearchable one. Parameter expansion, not `$(dirname ...)`,
+# which would strip a trailing newline from a component (#210).
+settings_dir_unsearchable() {
+  local d="$1"
+  case "$d" in */*) d="${d%/*}" ;; *) d=. ;; esac
+  [[ -n "$d" ]] || d=/
+  while [[ ! -e "$d" && "$d" != / && "$d" != . ]]; do
+    case "$d" in */*) d="${d%/*}" ;; *) d=. ;; esac
+    [[ -n "$d" ]] || d=/
+  done
+  [[ -d "$d" && ! -x "$d" ]]
+}
 sh_jq_failed_why=""   # "jq failed" or "permission denied": what the WARN said
 # sh_warn_once <file> <why> <line1> <line2>: print the two-line WARN to
 # stderr unless this run already printed it for <file> with the same <why>
@@ -818,13 +857,7 @@ settings_has_our_hooks() {
   # A directory this process cannot search hides the file: `-f` is false for
   # it exactly as for an absent file. Unknown, not "does not exist" (#213);
   # same report as the unreadable file below.
-  local d
-  d="$(dirname "$f")"
-  # Walk up to the nearest ancestor that can be stat'ed: when the project
-  # directory, or any directory above it, cannot be searched, everything
-  # below it is hidden and the first stat-able one is the unsearchable one.
-  while [[ ! -e "$d" && "$d" != "/" && "$d" != "." ]]; do d="$(dirname "$d")"; done
-  if [[ -d "$d" && ! -x "$d" ]]; then
+  if settings_dir_unsearchable "$f"; then
     sh_warn_once "$f" "permission denied" "  WARN    $f cannot be read (check its permissions);" \
       "          treating its wiring as unknown. Fix the file and re-run."
     sh_jq_failed=1

@@ -3,7 +3,9 @@
 #   1. a settings file under a directory the process cannot search is
 #      "unknown" (WARN, sh_jq_failed, doctor non-zero), never "does not exist";
 #   2. the install-time ensure_settings_json names the real cause: unreadable,
-#      jq failure, not an object (null root), or not valid JSON.
+#      jq failure, not an object (null root), or not valid JSON;
+#   3. the same unsearchable directory on --uninstall and on install is
+#      "cannot be read" with a non-zero exit, never "does not exist" (H, J).
 # Every run sandboxes HOME and CLAUDE_HOME. Permission cases are skipped as
 # root, where mode 000 stays readable.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -118,5 +120,42 @@ for case in F G; do
   check "$case: says cannot be read"            yes "$(has "$OUT" "cannot be read (check its permissions)")"
   check "$case: not a stale registry entry"     no  "$(has "$OUT" "stale project registry")"
 done
+
+
+# H. project-scope --uninstall with the .claude/ unsearchable: unknown, not
+#    "does not exist; nothing to strip" with the registry line cleared and
+#    exit 0. H2 drops the registry line and the created-file marker first, so
+#    the wrong-file check (refuse_uninstall_if_other_file_wired) has no
+#    leftovers to go on and must not call the hidden file absent either.
+for case in H H2; do
+  fresh_sandbox
+  inst --scope project --project "$P"
+  REG="$H/.claude/handoff_projects"
+  if [[ $case == H2 ]]; then
+    : > "$REG"
+    find "$H/.claude/handoff_settings_backups" -name '*.created' -exec rm -f {} +
+  fi
+  REG_BEFORE="$(cat "$REG")"
+  chmod 000 "$P/.claude"
+  inst --uninstall --scope project --project "$P"
+  chmod 755 "$P/.claude"
+  check "$case: uninstall exits 1"             1   "$RC"
+  check "$case: says cannot be read"           yes "$(has "$OUT" "settings.json cannot be read (check its permissions")"
+  check "$case: not called 'does not exist'"   no  "$(has "$OUT" "does not exist")"
+  check "$case: registry left as it was"       "$REG_BEFORE" "$(cat "$REG")"
+  check "$case: hooks still in the file"       7   "$(jq '.hooks | length' "$(S)")"
+done
+
+# J. install into a project whose .claude/ cannot be searched: named as
+#    unreadable, not "created with {}" followed by a jq failure.
+fresh_sandbox
+chmod 000 "$P/.claude"
+inst --scope project --project "$P"
+chmod 755 "$P/.claude"
+check "J: install exits 1"                   1   "$RC"
+check "J: says cannot be read"               yes "$(has "$OUT" "settings.json cannot be read (check its permissions")"
+check "J: no false 'created with {}'"        no  "$(has "$OUT" "created with {}")"
+check "J: no jq failure reported"            no  "$(has "$OUT" "jq failed")"
+check "J: nothing written"                   no  "$([[ -e "$(S)" ]] && echo yes || echo no)"
 
 finish
