@@ -170,7 +170,9 @@ project_key_check() {
   if [[ -L "$f" ]]; then
     project_key_state=foreign
   elif [[ -f "$f" ]]; then
-    if printf '%s\n' "$project_dir" | cmp -s - "$f"; then
+    # same_content, not a bare cmp: without cmp on PATH every key used to
+    # read as another project's (#208).
+    if same_content <(printf '%s\n' "$project_dir") "$f"; then
       project_key_state=own
     else
       project_key_state=foreign
@@ -388,7 +390,7 @@ patch_settings() {
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   record_created_settings
   # If no change vs backup, drop the redundant backup.
-  if [[ -n "$settings_backup" ]] && cmp -s "$settings" "$settings_backup"; then
+  if [[ -n "$settings_backup" ]] && same_content "$settings" "$settings_backup"; then
     rm "$settings_backup"
     echo "  ok      no settings.json changes (backup removed)"
   fi
@@ -491,7 +493,7 @@ unpatch_settings() {
   maybe_uninstall_perm "$perm_wr"
   maybe_uninstall_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
-  if cmp -s "$settings" "$settings_backup"; then
+  if same_content "$settings" "$settings_backup"; then
     rm "$settings_backup"
     echo "  ok      no settings.json changes (backup removed)"
   fi

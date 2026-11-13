@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 52aba00a9bf4407d28782d43f4bbe33c388972bb49c13942978d23fc391752e7
+# SOURCE-SHA256: 68464d2d98d76432307a0027855aa9afef43eb221e87ac069a7286de576dd9c5
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -744,6 +744,37 @@ record_replaced_link() {  # <dst> <old_target>
   return 0
 }
 
+# same_content <a> <b>: 0 when the two files hold the same bytes, 1 when they
+# differ or cannot be compared. cmp is not always on PATH (a stripped
+# container, diffutils not installed), and an unguarded `cmp -s` then failed
+# with "command not found" on every file and read as "different": a copy
+# install backed up each of its own copies on every re-run and --uninstall
+# left all of them behind as "not ours" (#208). Without cmp the hex dumps of
+# od (coreutils/POSIX, like cksum used for the settings fingerprint) are
+# compared instead, which is exact. With neither, the answer is "different",
+# the direction that never removes a file: link() backs it up, and
+# unlink_if_ours leaves it; a WARN says so once.
+same_content_warned=0
+same_content() {
+  local a b
+  if command -v cmp >/dev/null 2>&1; then
+    cmp -s "$1" "$2"
+    return
+  fi
+  if command -v od >/dev/null 2>&1; then
+    a="$(od -An -v -tx1 "$1" 2>/dev/null)" || return 1
+    b="$(od -An -v -tx1 "$2" 2>/dev/null)" || return 1
+    [[ "$a" == "$b" ]]
+    return
+  fi
+  if (( ! same_content_warned )); then
+    same_content_warned=1
+    echo "  WARN    neither cmp nor od is on PATH, so a copied file cannot be compared with"
+    echo "          the clone's; each one is treated as not this installer's copy."
+  fi
+  return 1
+}
+
 link() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
@@ -771,7 +802,7 @@ link() {
   elif [[ -e "$dst" ]]; then
     # A regular file identical to src is our own copy-mode install from a
     # prior run — treat as up to date rather than backing it up each time.
-    if [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+    if [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
       echo "  ok      $dst (copy)"
       return
     fi
@@ -811,7 +842,7 @@ unlink_if_ours() {
     # reported "already absent" and left behind. (install#1)
     echo "  remove  $dst (stale dangling link -> $(readlink "$dst"))"
     rm "$dst"
-  elif [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+  elif [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
     # Copy-mode install (identical content) — ours to remove.
     rm "$dst"
     echo "  remove  $dst (copy)"
@@ -1434,7 +1465,9 @@ project_key_check() {
   if [[ -L "$f" ]]; then
     project_key_state=foreign
   elif [[ -f "$f" ]]; then
-    if printf '%s\n' "$project_dir" | cmp -s - "$f"; then
+    # same_content, not a bare cmp: without cmp on PATH every key used to
+    # read as another project's (#208).
+    if same_content <(printf '%s\n' "$project_dir") "$f"; then
       project_key_state=own
     else
       project_key_state=foreign
@@ -1652,7 +1685,7 @@ patch_settings() {
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   record_created_settings
   # If no change vs backup, drop the redundant backup.
-  if [[ -n "$settings_backup" ]] && cmp -s "$settings" "$settings_backup"; then
+  if [[ -n "$settings_backup" ]] && same_content "$settings" "$settings_backup"; then
     rm "$settings_backup"
     echo "  ok      no settings.json changes (backup removed)"
   fi
@@ -1755,7 +1788,7 @@ unpatch_settings() {
   maybe_uninstall_perm "$perm_wr"
   maybe_uninstall_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
-  if cmp -s "$settings" "$settings_backup"; then
+  if same_content "$settings" "$settings_backup"; then
     rm "$settings_backup"
     echo "  ok      no settings.json changes (backup removed)"
   fi

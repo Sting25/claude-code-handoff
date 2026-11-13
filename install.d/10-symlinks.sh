@@ -96,6 +96,37 @@ record_replaced_link() {  # <dst> <old_target>
   return 0
 }
 
+# same_content <a> <b>: 0 when the two files hold the same bytes, 1 when they
+# differ or cannot be compared. cmp is not always on PATH (a stripped
+# container, diffutils not installed), and an unguarded `cmp -s` then failed
+# with "command not found" on every file and read as "different": a copy
+# install backed up each of its own copies on every re-run and --uninstall
+# left all of them behind as "not ours" (#208). Without cmp the hex dumps of
+# od (coreutils/POSIX, like cksum used for the settings fingerprint) are
+# compared instead, which is exact. With neither, the answer is "different",
+# the direction that never removes a file: link() backs it up, and
+# unlink_if_ours leaves it; a WARN says so once.
+same_content_warned=0
+same_content() {
+  local a b
+  if command -v cmp >/dev/null 2>&1; then
+    cmp -s "$1" "$2"
+    return
+  fi
+  if command -v od >/dev/null 2>&1; then
+    a="$(od -An -v -tx1 "$1" 2>/dev/null)" || return 1
+    b="$(od -An -v -tx1 "$2" 2>/dev/null)" || return 1
+    [[ "$a" == "$b" ]]
+    return
+  fi
+  if (( ! same_content_warned )); then
+    same_content_warned=1
+    echo "  WARN    neither cmp nor od is on PATH, so a copied file cannot be compared with"
+    echo "          the clone's; each one is treated as not this installer's copy."
+  fi
+  return 1
+}
+
 link() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
@@ -123,7 +154,7 @@ link() {
   elif [[ -e "$dst" ]]; then
     # A regular file identical to src is our own copy-mode install from a
     # prior run — treat as up to date rather than backing it up each time.
-    if [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+    if [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
       echo "  ok      $dst (copy)"
       return
     fi
@@ -163,7 +194,7 @@ unlink_if_ours() {
     # reported "already absent" and left behind. (install#1)
     echo "  remove  $dst (stale dangling link -> $(readlink "$dst"))"
     rm "$dst"
-  elif [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+  elif [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
     # Copy-mode install (identical content) — ours to remove.
     rm "$dst"
     echo "  remove  $dst (copy)"
