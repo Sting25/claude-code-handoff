@@ -296,12 +296,15 @@ check_created_settings() {
 git_tracks_file() {
   local f="$1" t
   command -v git >/dev/null 2>&1 || return 1
-  git -C "$(dirname "$f")" ls-files --error-unmatch -- "$(basename "$f")" >/dev/null 2>&1 && return 0
+  git -C "${f%/*}" ls-files --error-unmatch -- "${f##*/}" >/dev/null 2>&1 && return 0
   if [[ -L "$f" ]]; then
-    t="$(readlink "$f" 2>/dev/null || true)"
-    case "$t" in /*) ;; *) t="$(dirname "$f")/$t" ;; esac
-    [[ -n "$t" && -d "$(dirname "$t")" ]] \
-      && git -C "$(dirname "$t")" ls-files --error-unmatch -- "$(basename "$t")" >/dev/null 2>&1 && return 0
+    # read_link_into and expansion, not $(readlink/dirname/basename), which
+    # strip a trailing newline from the target (#226).
+    read_link_into "$f" || LINK_TARGET=""
+    t="$LINK_TARGET"
+    case "$t" in /*) ;; *) t="${f%/*}/$t" ;; esac
+    [[ -n "$t" && -d "${t%/*}" ]] \
+      && git -C "${t%/*}" ls-files --error-unmatch -- "${t##*/}" >/dev/null 2>&1 && return 0
   fi
   return 1
 }
@@ -923,12 +926,19 @@ settings_has_our_hooks() {
 # Physical path of a settings file (symlinks resolved, directory made
 # physical), so the wiring check below never counts one file twice: a
 # project rooted at $HOME, or a dotfiles link, can make two spellings name
-# the same file. Prints nothing when the directory does not exist.
-settings_phys_path() {
+# the same file. Sets SETTINGS_PHYS, empty when the directory does not
+# exist. A variable, not stdout: `$(...)` stripped a trailing newline from
+# the target, so a link to `x<LF>` and the file `x` read as one file (#226).
+SETTINGS_PHYS=""
+settings_phys_into() {  # <file>; sets SETTINGS_PHYS
   local f d
-  f="$(resolve_symlink "$1")"
-  d="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" || return 0
-  printf '%s/%s\n' "$d" "$(basename "$f")"
+  SETTINGS_PHYS=""
+  resolve_symlink_into "$1"
+  f="$RESOLVED"
+  case "$f" in */*) d="${f%/*}" ;; *) d=. ;; esac
+  [[ -n "$d" ]] || d=/
+  phys_dir "$d" || return 0
+  SETTINGS_PHYS="${PHYS_DIR%/}/${f##*/}"
 }
 
 # Project root the wiring checks look at: --project in project scope; in
@@ -961,9 +971,9 @@ wiring_project_root() {
 report_wiring() {
   local label="$1" proj pu ps pl u=0 sw=0 lw=0 user_issue=0 dup_issue=0 p1 pc
   proj="$(wiring_project_root)"
-  pu="$(settings_phys_path "$user_settings")"
-  ps="$(settings_phys_path "$proj/.claude/settings.json")"
-  pl="$(settings_phys_path "$proj/.claude/settings.local.json")"
+  settings_phys_into "$user_settings"; pu="$SETTINGS_PHYS"
+  settings_phys_into "$proj/.claude/settings.json"; ps="$SETTINGS_PHYS"
+  settings_phys_into "$proj/.claude/settings.local.json"; pl="$SETTINGS_PHYS"
   if [[ -n "$pu" ]] && settings_has_our_hooks "$pu"; then u=1; fi
   if [[ -n "$ps" && "$ps" != "$pu" ]] && settings_has_our_hooks "$ps"; then sw=1; fi
   if [[ -n "$pl" && "$pl" != "$pu" && "$pl" != "$ps" ]] && settings_has_our_hooks "$pl"; then lw=1; fi
@@ -1283,12 +1293,14 @@ doctor() {
     dst="$claude_home/bin/$name.sh"
     if [[ -e "$dst" ]]; then
       if [[ -L "$dst" ]]; then
-        echo "  ok      $dst -> $(readlink "$dst")"
+        read_link_into "$dst" || LINK_TARGET=""
+        echo "  ok      $dst -> $(shown_path "$LINK_TARGET")"
       else
         echo "  ok      $dst (copy)"
       fi
     elif [[ -L "$dst" ]]; then
-      tgt="$(readlink "$dst" 2>/dev/null || true)"
+      read_link_into "$dst" || LINK_TARGET=""
+      tgt="$(shown_path "$LINK_TARGET")"
       echo "  BROKEN  $dst -> $tgt (dangling symlink: hook is silently disabled)"
       broken=$((broken + 1))
     else
@@ -1457,12 +1469,14 @@ doctor() {
     fi
   fi
   if (( sib_check )); then
-    pu="$(settings_phys_path "$user_settings")"
-    ps="$(settings_phys_path "$settings")"
+    settings_phys_into "$user_settings"; pu="$SETTINGS_PHYS"
+    settings_phys_into "$settings"; ps="$SETTINGS_PHYS"
+    pfl=""
+    if [[ -n "$flag_settings" ]]; then settings_phys_into "$flag_settings"; pfl="$SETTINGS_PHYS"; fi
     for f in "$proj/.claude/settings.json" "$proj/.claude/settings.local.json"; do
-      pf="$(settings_phys_path "$f")"
+      settings_phys_into "$f"; pf="$SETTINGS_PHYS"
       [[ -n "$pf" && "$pf" != "$pu" && "$pf" != "$ps" ]] || continue
-      [[ -n "$flag_settings" && "$pf" == "$(settings_phys_path "$flag_settings")" ]] && continue
+      [[ -n "$flag_settings" && "$pf" == "$pfl" ]] && continue
       # Only a parse failure is new here: an unreadable file is already
       # reported by report_wiring's read, and an empty file is not an error.
       [[ -f "$pf" && -r "$pf" && -s "$pf" ]] || continue

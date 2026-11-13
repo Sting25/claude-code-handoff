@@ -132,14 +132,15 @@ link() {
   mkdir -p "$(dirname "$dst")"
   if [[ -L "$dst" ]]; then
     local current
-    current="$(readlink "$dst")"
+    read_link_into "$dst" || LINK_TARGET=""
+    current="$LINK_TARGET"
     if [[ "$current" == "$src" ]] && (( ! force_copy )); then
       echo "  ok      $dst -> $src"
       return
     fi
     # In copy mode, an existing symlink (even one pointing at src) must be
     # replaced by a real copy, so don't early-return above.
-    echo "  relink  $dst (was -> $current)"
+    echo "  relink  $dst (was -> $(shown_path "$current"))"
     # A symlink pointing SOMEWHERE ELSE is the user's own wiring (a customized
     # fork, a second clone, a dotfiles manager). A regular file in that position
     # gets a .bak.<ts>; a symlink used to be removed with the old target
@@ -182,7 +183,9 @@ link() {
 
 unlink_if_ours() {
   local dst="$1" src="$2"
-  if [[ -L "$dst" ]] && [[ "$(readlink "$dst")" == "$src" ]]; then
+  local t=""
+  if [[ -L "$dst" ]]; then read_link_into "$dst" && t="$LINK_TARGET"; fi
+  if [[ -L "$dst" ]] && [[ "$t" == "$src" ]]; then
     rm "$dst"
     echo "  remove  $dst"
   elif [[ -L "$dst" && ! -e "$dst" ]]; then
@@ -192,7 +195,7 @@ unlink_if_ours() {
     # branch above misses it). Safe to remove: nothing live sits behind a broken
     # link, and a user would not place their own link here. Without this it was
     # reported "already absent" and left behind. (install#1)
-    echo "  remove  $dst (stale dangling link -> $(readlink "$dst"))"
+    echo "  remove  $dst (stale dangling link -> $(shown_path "$t"))"
     rm "$dst"
   elif [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
     # Copy-mode install (identical content) — ours to remove.

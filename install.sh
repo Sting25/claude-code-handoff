@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 68464d2d98d76432307a0027855aa9afef43eb221e87ac069a7286de576dd9c5
+# SOURCE-SHA256: d73935053fb3f955cd8001a4c2f2bd5905a7ff66f635a6fa2c1cf3ca5e8cc73b
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -113,9 +113,17 @@ _self_src="${BASH_SOURCE[0]:-}"
 repo_root=""
 repo_root_err=""   # why repo_root is empty: "" (no source path, piped) or "cannot cd to <dir>"
 if [[ -n "$_self_src" ]]; then
-  repo_root="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || repo_root=""
+  # The x keeps a trailing newline in the clone's name (#226): a bare
+  # `$(cd ... && pwd)` strips it, so a clone at `handoff<LF>` resolved to a
+  # sibling `handoff` and the install linked that one instead. dirname's own
+  # output loses it the same way, so the directory part is cut by expansion.
+  case "$_self_src" in */*) _self_dir="${_self_src%/*}" ;; *) _self_dir=. ;; esac
+  [[ -n "$_self_dir" ]] || _self_dir=/
+  repo_root="$(cd "$_self_dir" 2>/dev/null && pwd && printf x)" || repo_root=""
+  repo_root="${repo_root%x}"
+  repo_root="${repo_root%$'\n'}"
   if [[ -z "$repo_root" ]]; then
-    repo_root_err="cannot cd to $(dirname "$_self_src")"
+    repo_root_err="cannot cd to $_self_dir"
   fi
 fi
 # The closing line of an --uninstall. A piped run (`bash -s -- --uninstall <
@@ -218,25 +226,41 @@ fi
 # loops, falling back to the link path itself.
 #
 # The result goes into RESOLVED with every trailing newline kept (#210): the
-# `printf x` trick on readlink, and phys_dir (below) for the parent, so a
-# link whose target ends in a newline resolves to that target and not to a
-# sibling without it. resolve_symlink prints it for callers that do not care.
+# `printf x` trick on readlink (read_link_into), and phys_dir (below) for the
+# parent, so a link whose target ends in a newline resolves to that target
+# and not to a sibling without it.
 # `readlink -n` (GNU, BSD, busybox) prints the target bytes exactly. Plain
 # readlink cannot be trusted for this: macOS adds its newline only when the
 # target does not already end in one, so stripping one would drop the
 # target's own. The plain form is the fallback for a readlink without -n.
+# Every readlink in this installer goes through read_link_into (#226): a
+# bare `$(readlink ...)` made a link to `x<LF>` compare equal to `x`.
+LINK_TARGET=""
+read_link_into() {  # <link>; sets LINK_TARGET; non-zero when it cannot be read
+  local t
+  LINK_TARGET=""
+  if t="$(readlink -n "$1" 2>/dev/null && printf x)"; then
+    LINK_TARGET="${t%x}"
+  elif t="$(readlink "$1" 2>/dev/null && printf x)"; then
+    t="${t%x}"
+    LINK_TARGET="${t%$'\n'}"
+  else
+    return 1
+  fi
+}
+# A path for a message: as is, or in $'...' form when it holds a control
+# character, so a trailing newline is visible instead of silently ending the
+# line (#226).
+shown_path() {
+  local LC_ALL=C
+  if [[ "$1" == *[[:cntrl:]]* ]]; then printf '%q' "$1"; else printf '%s' "$1"; fi
+}
 RESOLVED=""
 resolve_symlink_into() {  # <path>; sets RESOLVED
   local p="$1" n=0 t d
   while [[ -L "$p" ]] && (( n++ < 40 )); do
-    if t="$(readlink -n "$p" 2>/dev/null && printf x)"; then
-      t="${t%x}"
-    elif t="$(readlink "$p" && printf x)"; then
-      t="${t%x}"
-      t="${t%$'\n'}"
-    else
-      break
-    fi
+    read_link_into "$p" || break
+    t="$LINK_TARGET"
     case "$t" in
       /*) p="$t" ;;
       *)
@@ -247,10 +271,6 @@ resolve_symlink_into() {  # <path>; sets RESOLVED
     esac
   done
   RESOLVED="$p"
-}
-resolve_symlink() {  # <path> -> physical path on stdout
-  resolve_symlink_into "$1"
-  printf '%s\n' "$RESOLVED"
 }
 # (The symlink check itself runs after argument parsing, below, because
 # --scope project repoints $settings at a project file first.)
@@ -506,7 +526,10 @@ if [[ "$scope" == project ]] && (( ! project_gone )); then
   # patching a .claude/ under the clone. Prefix test with a trailing slash on
   # both sides, so /src/handoff-other is not mistaken for /src/handoff.
   if [[ -n "$repo_root" ]]; then
-    _src_phys="$(cd "$repo_root" && pwd -P)"
+    # phys_dir keeps a trailing newline in the clone's name (#226), so a
+    # project in a sibling without it is not mistaken for the clone.
+    phys_dir "$repo_root" || PHYS_DIR="$repo_root"
+    _src_phys="$PHYS_DIR"
     case "$project_dir/" in
       "$_src_phys"/*)
         echo "ERROR: project directory '$project_dir' is the handoff clone '$_src_phys' or inside it (the install source); refusing." >&2
@@ -577,8 +600,11 @@ fi
 settings_link=""
 if [[ -L "$settings" ]]; then
   settings_link="$settings"
-  settings_resolved="$(resolve_symlink "$settings")"
-  echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
+  # Into a variable, not `$(...)`, which would strip a trailing newline from
+  # the target and patch a sibling file instead (#226).
+  resolve_symlink_into "$settings"
+  settings_resolved="$RESOLVED"
+  echo "note: $settings is a symlink -> $(shown_path "$settings_resolved"); patching the target (symlink left intact)." >&2
   settings="$settings_resolved"
 fi
 
@@ -780,14 +806,15 @@ link() {
   mkdir -p "$(dirname "$dst")"
   if [[ -L "$dst" ]]; then
     local current
-    current="$(readlink "$dst")"
+    read_link_into "$dst" || LINK_TARGET=""
+    current="$LINK_TARGET"
     if [[ "$current" == "$src" ]] && (( ! force_copy )); then
       echo "  ok      $dst -> $src"
       return
     fi
     # In copy mode, an existing symlink (even one pointing at src) must be
     # replaced by a real copy, so don't early-return above.
-    echo "  relink  $dst (was -> $current)"
+    echo "  relink  $dst (was -> $(shown_path "$current"))"
     # A symlink pointing SOMEWHERE ELSE is the user's own wiring (a customized
     # fork, a second clone, a dotfiles manager). A regular file in that position
     # gets a .bak.<ts>; a symlink used to be removed with the old target
@@ -830,7 +857,9 @@ link() {
 
 unlink_if_ours() {
   local dst="$1" src="$2"
-  if [[ -L "$dst" ]] && [[ "$(readlink "$dst")" == "$src" ]]; then
+  local t=""
+  if [[ -L "$dst" ]]; then read_link_into "$dst" && t="$LINK_TARGET"; fi
+  if [[ -L "$dst" ]] && [[ "$t" == "$src" ]]; then
     rm "$dst"
     echo "  remove  $dst"
   elif [[ -L "$dst" && ! -e "$dst" ]]; then
@@ -840,7 +869,7 @@ unlink_if_ours() {
     # branch above misses it). Safe to remove: nothing live sits behind a broken
     # link, and a user would not place their own link here. Without this it was
     # reported "already absent" and left behind. (install#1)
-    echo "  remove  $dst (stale dangling link -> $(readlink "$dst"))"
+    echo "  remove  $dst (stale dangling link -> $(shown_path "$t"))"
     rm "$dst"
   elif [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
     # Copy-mode install (identical content) — ours to remove.
@@ -1591,12 +1620,15 @@ check_created_settings() {
 git_tracks_file() {
   local f="$1" t
   command -v git >/dev/null 2>&1 || return 1
-  git -C "$(dirname "$f")" ls-files --error-unmatch -- "$(basename "$f")" >/dev/null 2>&1 && return 0
+  git -C "${f%/*}" ls-files --error-unmatch -- "${f##*/}" >/dev/null 2>&1 && return 0
   if [[ -L "$f" ]]; then
-    t="$(readlink "$f" 2>/dev/null || true)"
-    case "$t" in /*) ;; *) t="$(dirname "$f")/$t" ;; esac
-    [[ -n "$t" && -d "$(dirname "$t")" ]] \
-      && git -C "$(dirname "$t")" ls-files --error-unmatch -- "$(basename "$t")" >/dev/null 2>&1 && return 0
+    # read_link_into and expansion, not $(readlink/dirname/basename), which
+    # strip a trailing newline from the target (#226).
+    read_link_into "$f" || LINK_TARGET=""
+    t="$LINK_TARGET"
+    case "$t" in /*) ;; *) t="${f%/*}/$t" ;; esac
+    [[ -n "$t" && -d "${t%/*}" ]] \
+      && git -C "${t%/*}" ls-files --error-unmatch -- "${t##*/}" >/dev/null 2>&1 && return 0
   fi
   return 1
 }
@@ -2218,12 +2250,19 @@ settings_has_our_hooks() {
 # Physical path of a settings file (symlinks resolved, directory made
 # physical), so the wiring check below never counts one file twice: a
 # project rooted at $HOME, or a dotfiles link, can make two spellings name
-# the same file. Prints nothing when the directory does not exist.
-settings_phys_path() {
+# the same file. Sets SETTINGS_PHYS, empty when the directory does not
+# exist. A variable, not stdout: `$(...)` stripped a trailing newline from
+# the target, so a link to `x<LF>` and the file `x` read as one file (#226).
+SETTINGS_PHYS=""
+settings_phys_into() {  # <file>; sets SETTINGS_PHYS
   local f d
-  f="$(resolve_symlink "$1")"
-  d="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" || return 0
-  printf '%s/%s\n' "$d" "$(basename "$f")"
+  SETTINGS_PHYS=""
+  resolve_symlink_into "$1"
+  f="$RESOLVED"
+  case "$f" in */*) d="${f%/*}" ;; *) d=. ;; esac
+  [[ -n "$d" ]] || d=/
+  phys_dir "$d" || return 0
+  SETTINGS_PHYS="${PHYS_DIR%/}/${f##*/}"
 }
 
 # Project root the wiring checks look at: --project in project scope; in
@@ -2256,9 +2295,9 @@ wiring_project_root() {
 report_wiring() {
   local label="$1" proj pu ps pl u=0 sw=0 lw=0 user_issue=0 dup_issue=0 p1 pc
   proj="$(wiring_project_root)"
-  pu="$(settings_phys_path "$user_settings")"
-  ps="$(settings_phys_path "$proj/.claude/settings.json")"
-  pl="$(settings_phys_path "$proj/.claude/settings.local.json")"
+  settings_phys_into "$user_settings"; pu="$SETTINGS_PHYS"
+  settings_phys_into "$proj/.claude/settings.json"; ps="$SETTINGS_PHYS"
+  settings_phys_into "$proj/.claude/settings.local.json"; pl="$SETTINGS_PHYS"
   if [[ -n "$pu" ]] && settings_has_our_hooks "$pu"; then u=1; fi
   if [[ -n "$ps" && "$ps" != "$pu" ]] && settings_has_our_hooks "$ps"; then sw=1; fi
   if [[ -n "$pl" && "$pl" != "$pu" && "$pl" != "$ps" ]] && settings_has_our_hooks "$pl"; then lw=1; fi
@@ -2578,12 +2617,14 @@ doctor() {
     dst="$claude_home/bin/$name.sh"
     if [[ -e "$dst" ]]; then
       if [[ -L "$dst" ]]; then
-        echo "  ok      $dst -> $(readlink "$dst")"
+        read_link_into "$dst" || LINK_TARGET=""
+        echo "  ok      $dst -> $(shown_path "$LINK_TARGET")"
       else
         echo "  ok      $dst (copy)"
       fi
     elif [[ -L "$dst" ]]; then
-      tgt="$(readlink "$dst" 2>/dev/null || true)"
+      read_link_into "$dst" || LINK_TARGET=""
+      tgt="$(shown_path "$LINK_TARGET")"
       echo "  BROKEN  $dst -> $tgt (dangling symlink: hook is silently disabled)"
       broken=$((broken + 1))
     else
@@ -2752,12 +2793,14 @@ doctor() {
     fi
   fi
   if (( sib_check )); then
-    pu="$(settings_phys_path "$user_settings")"
-    ps="$(settings_phys_path "$settings")"
+    settings_phys_into "$user_settings"; pu="$SETTINGS_PHYS"
+    settings_phys_into "$settings"; ps="$SETTINGS_PHYS"
+    pfl=""
+    if [[ -n "$flag_settings" ]]; then settings_phys_into "$flag_settings"; pfl="$SETTINGS_PHYS"; fi
     for f in "$proj/.claude/settings.json" "$proj/.claude/settings.local.json"; do
-      pf="$(settings_phys_path "$f")"
+      settings_phys_into "$f"; pf="$SETTINGS_PHYS"
       [[ -n "$pf" && "$pf" != "$pu" && "$pf" != "$ps" ]] || continue
-      [[ -n "$flag_settings" && "$pf" == "$(settings_phys_path "$flag_settings")" ]] && continue
+      [[ -n "$flag_settings" && "$pf" == "$pfl" ]] && continue
       # Only a parse failure is new here: an unreadable file is already
       # reported by report_wiring's read, and an empty file is not an error.
       [[ -f "$pf" && -r "$pf" && -s "$pf" ]] || continue
@@ -2836,7 +2879,9 @@ elif [[ "$mode" == install ]]; then
     echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
     exit 2
   fi
-  _rr_phys="$(cd "$repo_root" && pwd -P)"
+  # phys_dir keeps a trailing newline in the clone's name (#226).
+  phys_dir "$repo_root" || PHYS_DIR="$repo_root"
+  _rr_phys="$PHYS_DIR"
   case "$_rr_phys/" in
     /dev/*|/proc/*)
       echo "ERROR: install.sh was read from $repo_root (a process-substitution or device path), so there is no clone to install from." >&2
@@ -2857,16 +2902,20 @@ elif [[ "$mode" == install ]]; then
     # <project>/.claude for it would let a later --uninstall remove the
     # user's pre-existing .claude/ (#194).
     _pc="$project_dir/.claude"
+    settings_dir="${settings%/*}"
+    [[ -n "$settings_dir" ]] || settings_dir=/
     if [[ -L "$_pc" && ! -d "$_pc" ]]; then
-      echo "ERROR: $_pc is a dangling symlink (-> $(readlink "$_pc" 2>/dev/null || true)); refusing to create its target." >&2
+      read_link_into "$_pc" || LINK_TARGET=""
+      echo "ERROR: $_pc is a dangling symlink (-> $(shown_path "$LINK_TARGET")); refusing to create its target." >&2
       echo "       Create the directory it points to, or remove the link, and re-run." >&2
       exit 2
     elif [[ -e "$_pc" && ! -d "$_pc" ]]; then
       echo "ERROR: $_pc exists but is not a directory; refusing." >&2
       exit 2
-    elif [[ -n "$settings_link" && ! -d "$(dirname "$settings")" ]]; then
-      echo "ERROR: $settings_link is a dangling symlink (-> $settings, whose directory does not exist); refusing to create it." >&2
-      echo "       Create $(dirname "$settings")/, or remove the link, and re-run." >&2
+    elif [[ -n "$settings_link" && ! -d "$settings_dir" ]]; then
+      # Expansion, not `$(dirname ...)`, which strips a trailing newline (#226).
+      echo "ERROR: $settings_link is a dangling symlink (-> $(shown_path "$settings"), whose directory does not exist); refusing to create it." >&2
+      echo "       Create $(shown_path "$settings_dir")/, or remove the link, and re-run." >&2
       exit 2
     fi
   fi

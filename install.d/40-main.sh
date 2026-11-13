@@ -42,7 +42,9 @@ elif [[ "$mode" == install ]]; then
     echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
     exit 2
   fi
-  _rr_phys="$(cd "$repo_root" && pwd -P)"
+  # phys_dir keeps a trailing newline in the clone's name (#226).
+  phys_dir "$repo_root" || PHYS_DIR="$repo_root"
+  _rr_phys="$PHYS_DIR"
   case "$_rr_phys/" in
     /dev/*|/proc/*)
       echo "ERROR: install.sh was read from $repo_root (a process-substitution or device path), so there is no clone to install from." >&2
@@ -63,16 +65,20 @@ elif [[ "$mode" == install ]]; then
     # <project>/.claude for it would let a later --uninstall remove the
     # user's pre-existing .claude/ (#194).
     _pc="$project_dir/.claude"
+    settings_dir="${settings%/*}"
+    [[ -n "$settings_dir" ]] || settings_dir=/
     if [[ -L "$_pc" && ! -d "$_pc" ]]; then
-      echo "ERROR: $_pc is a dangling symlink (-> $(readlink "$_pc" 2>/dev/null || true)); refusing to create its target." >&2
+      read_link_into "$_pc" || LINK_TARGET=""
+      echo "ERROR: $_pc is a dangling symlink (-> $(shown_path "$LINK_TARGET")); refusing to create its target." >&2
       echo "       Create the directory it points to, or remove the link, and re-run." >&2
       exit 2
     elif [[ -e "$_pc" && ! -d "$_pc" ]]; then
       echo "ERROR: $_pc exists but is not a directory; refusing." >&2
       exit 2
-    elif [[ -n "$settings_link" && ! -d "$(dirname "$settings")" ]]; then
-      echo "ERROR: $settings_link is a dangling symlink (-> $settings, whose directory does not exist); refusing to create it." >&2
-      echo "       Create $(dirname "$settings")/, or remove the link, and re-run." >&2
+    elif [[ -n "$settings_link" && ! -d "$settings_dir" ]]; then
+      # Expansion, not `$(dirname ...)`, which strips a trailing newline (#226).
+      echo "ERROR: $settings_link is a dangling symlink (-> $(shown_path "$settings"), whose directory does not exist); refusing to create it." >&2
+      echo "       Create $(shown_path "$settings_dir")/, or remove the link, and re-run." >&2
       exit 2
     fi
   fi
