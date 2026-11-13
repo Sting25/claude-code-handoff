@@ -171,8 +171,10 @@ project_key_check() {
     project_key_state=foreign
   elif [[ -f "$f" ]]; then
     # same_content, not a bare cmp: without cmp on PATH every key used to
-    # read as another project's (#208).
-    if same_content <(printf '%s\n' "$project_dir") "$f"; then
+    # read as another project's (#208). Fed on stdin, not through `<(...)`:
+    # process substitution is a syntax error when bash runs as `sh` (POSIX
+    # mode, macOS bash 3.2), and that broke `sh install.sh` at parse time.
+    if printf '%s\n' "$project_dir" | same_content - "$f"; then
       project_key_state=own
     else
       project_key_state=foreign

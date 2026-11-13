@@ -97,8 +97,10 @@ record_replaced_link() {  # <dst> <old_target>
 }
 
 # same_content <a> <b>: 0 when the two files hold the same bytes, 1 when they
-# differ or cannot be compared. cmp is not always on PATH (a stripped
-# container, diffutils not installed), and an unguarded `cmp -s` then failed
+# differ or cannot be compared. <a> may be `-` for stdin (cmp and od both
+# read it), so a caller never needs `<(...)`, which `sh install.sh` rejects.
+# cmp is not always on PATH (a stripped container, diffutils not
+# installed), and an unguarded `cmp -s` then failed
 # with "command not found" on every file and read as "different": a copy
 # install backed up each of its own copies on every re-run and --uninstall
 # left all of them behind as "not ours" (#208). Without cmp the hex dumps of
@@ -114,7 +116,11 @@ same_content() {
     return
   fi
   if command -v od >/dev/null 2>&1; then
-    a="$(od -An -v -tx1 "$1" 2>/dev/null)" || return 1
+    if [[ "$1" == - ]]; then
+      a="$(od -An -v -tx1 2>/dev/null)" || return 1
+    else
+      a="$(od -An -v -tx1 "$1" 2>/dev/null)" || return 1
+    fi
     b="$(od -An -v -tx1 "$2" 2>/dev/null)" || return 1
     [[ "$a" == "$b" ]]
     return

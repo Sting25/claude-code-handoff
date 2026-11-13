@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: 21532407ca6b93affaff18d335e63f2271ef91b482e0862ac704b04e8c8b3e27
+# SOURCE-SHA256: cff86f5feec7f0bf0488045683c2b4c10fe15acb0c21bd00d6278302836c8dee
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -771,8 +771,10 @@ record_replaced_link() {  # <dst> <old_target>
 }
 
 # same_content <a> <b>: 0 when the two files hold the same bytes, 1 when they
-# differ or cannot be compared. cmp is not always on PATH (a stripped
-# container, diffutils not installed), and an unguarded `cmp -s` then failed
+# differ or cannot be compared. <a> may be `-` for stdin (cmp and od both
+# read it), so a caller never needs `<(...)`, which `sh install.sh` rejects.
+# cmp is not always on PATH (a stripped container, diffutils not
+# installed), and an unguarded `cmp -s` then failed
 # with "command not found" on every file and read as "different": a copy
 # install backed up each of its own copies on every re-run and --uninstall
 # left all of them behind as "not ours" (#208). Without cmp the hex dumps of
@@ -788,7 +790,11 @@ same_content() {
     return
   fi
   if command -v od >/dev/null 2>&1; then
-    a="$(od -An -v -tx1 "$1" 2>/dev/null)" || return 1
+    if [[ "$1" == - ]]; then
+      a="$(od -An -v -tx1 2>/dev/null)" || return 1
+    else
+      a="$(od -An -v -tx1 "$1" 2>/dev/null)" || return 1
+    fi
     b="$(od -An -v -tx1 "$2" 2>/dev/null)" || return 1
     [[ "$a" == "$b" ]]
     return
@@ -1529,8 +1535,10 @@ project_key_check() {
     project_key_state=foreign
   elif [[ -f "$f" ]]; then
     # same_content, not a bare cmp: without cmp on PATH every key used to
-    # read as another project's (#208).
-    if same_content <(printf '%s\n' "$project_dir") "$f"; then
+    # read as another project's (#208). Fed on stdin, not through `<(...)`:
+    # process substitution is a syntax error when bash runs as `sh` (POSIX
+    # mode, macOS bash 3.2), and that broke `sh install.sh` at parse time.
+    if printf '%s\n' "$project_dir" | same_content - "$f"; then
       project_key_state=own
     else
       project_key_state=foreign
