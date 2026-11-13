@@ -743,10 +743,24 @@ refuse_uninstall_if_other_file_wired() {
     leftovers=1
   fi
   other_project_settings
+  # settings.json linked to settings.local.json (or the reverse) is one file:
+  # the strip below goes through the link, so the other name is no longer
+  # wired afterwards. The note used to be computed here, before the strip,
+  # and said the other file "still carries the handoff hooks" (#226).
+  local named_phys
+  settings_phys_into "$named"; named_phys="$SETTINGS_PHYS"
+  settings_phys_into "$OTHER_SETTINGS"
+  [[ -n "$named_phys" && "$named_phys" == "$SETTINGS_PHYS" ]] && return 0
   sh_jq_failed_file=""
   if settings_has_our_hooks "$OTHER_SETTINGS"; then
     other_state=wired
   elif [[ "$sh_jq_failed_file" == "$OTHER_SETTINGS" ]]; then
+    other_state=unknown
+  elif settings_invalid_json "$OTHER_SETTINGS"; then
+    # Its wiring cannot be read, like a mode-000 file: unknown, not "not
+    # wired" (#226). It used to be "nothing to strip", exit 0, no WARN.
+    sh_warn_once "$OTHER_SETTINGS" "not valid JSON" "  WARN    $OTHER_SETTINGS is not valid JSON;" \
+      "          treating its wiring as unknown. Fix the file and re-run."
     other_state=unknown
   else
     return 0
@@ -801,6 +815,17 @@ shq() {
 # readability check runs first in bash so a mode-000 file is a plain "not
 # usable" its callers can name, not a jq failure. Shared by
 # settings_has_our_hooks, unpatch_settings and the doctor's settings gate.
+# settings_invalid_json <file>: 0 when <file> is non-empty, readable and not
+# valid JSON, the one unusable state whose wiring is unknown rather than a
+# plain "no": the user may well fix it back into a wired file. Needs jq; 1
+# without it. Shared by the registry scan (#208) and the wrong-file uninstall
+# check (#226).
+settings_invalid_json() {
+  local urc=0
+  [[ -s "$1" && -r "$1" ]] && command -v jq >/dev/null 2>&1 || return 1
+  settings_usable "$1" || urc=$?
+  [[ $urc -eq 1 ]] && ! jq empty "$1" >/dev/null 2>&1
+}
 settings_usable_rc=0
 settings_usable() {
   local rc=0
@@ -1076,7 +1101,7 @@ REGISTRY_OUT=""
 # the user fixes it. Left 0 for the doctor, which reports such a file stale.
 registry_unparseable_unknown=0
 registry_collect() {
-  local want="$1" rp rn has nl=$'\n' before failed=0 uf urc
+  local want="$1" rp rn has nl=$'\n' before failed=0 uf
   REGISTRY_OUT=""
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
   # The flag is cleared per entry and folded back after the loop, so a
@@ -1090,17 +1115,12 @@ registry_collect() {
     sh_jq_failed=0
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
     uf="$rp/.claude/$rn"
-    if (( registry_unparseable_unknown && ! sh_jq_failed )) && [[ -s "$uf" && -r "$uf" ]] \
-       && command -v jq >/dev/null 2>&1; then
-      urc=0
-      settings_usable "$uf" || urc=$?
-      if [[ $urc -eq 1 ]] && ! jq empty "$uf" >/dev/null 2>&1; then
-        echo "  WARN    $uf is not valid JSON;" >&2
-        echo "          treating its wiring as unknown. Fix the file and re-run." >&2
-        sh_jq_failed=1
-        sh_jq_failed_file="$uf"
-        sh_jq_failed_why="not valid JSON"
-      fi
+    if (( registry_unparseable_unknown && ! sh_jq_failed )) && settings_invalid_json "$uf"; then
+      echo "  WARN    $uf is not valid JSON;" >&2
+      echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+      sh_jq_failed=1
+      sh_jq_failed_file="$uf"
+      sh_jq_failed_why="not valid JSON"
     fi
     if (( sh_jq_failed )); then failed=1; continue; fi
     if [[ "$has" == "$want" ]]; then
