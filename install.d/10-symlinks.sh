@@ -96,19 +96,57 @@ record_replaced_link() {  # <dst> <old_target>
   return 0
 }
 
+# same_content <a> <b>: 0 when the two files hold the same bytes, 1 when they
+# differ or cannot be compared. <a> may be `-` for stdin (cmp and od both
+# read it), so a caller never needs `<(...)`, which `sh install.sh` rejects.
+# cmp is not always on PATH (a stripped container, diffutils not
+# installed), and an unguarded `cmp -s` then failed
+# with "command not found" on every file and read as "different": a copy
+# install backed up each of its own copies on every re-run and --uninstall
+# left all of them behind as "not ours" (#208). Without cmp the hex dumps of
+# od (coreutils/POSIX, like cksum used for the settings fingerprint) are
+# compared instead, which is exact. With neither, the answer is "different",
+# the direction that never removes a file: link() backs it up, and
+# unlink_if_ours leaves it; a WARN says so once.
+same_content_warned=0
+same_content() {
+  local a b
+  if command -v cmp >/dev/null 2>&1; then
+    cmp -s "$1" "$2"
+    return
+  fi
+  if command -v od >/dev/null 2>&1; then
+    if [[ "$1" == - ]]; then
+      a="$(od -An -v -tx1 2>/dev/null)" || return 1
+    else
+      a="$(od -An -v -tx1 "$1" 2>/dev/null)" || return 1
+    fi
+    b="$(od -An -v -tx1 "$2" 2>/dev/null)" || return 1
+    [[ "$a" == "$b" ]]
+    return
+  fi
+  if (( ! same_content_warned )); then
+    same_content_warned=1
+    echo "  WARN    neither cmp nor od is on PATH, so a copied file cannot be compared with"
+    echo "          the clone's; each one is treated as not this installer's copy."
+  fi
+  return 1
+}
+
 link() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
   if [[ -L "$dst" ]]; then
     local current
-    current="$(readlink "$dst")"
+    read_link_into "$dst" || LINK_TARGET=""
+    current="$LINK_TARGET"
     if [[ "$current" == "$src" ]] && (( ! force_copy )); then
       echo "  ok      $dst -> $src"
       return
     fi
     # In copy mode, an existing symlink (even one pointing at src) must be
     # replaced by a real copy, so don't early-return above.
-    echo "  relink  $dst (was -> $current)"
+    echo "  relink  $dst (was -> $(shown_path "$current"))"
     # A symlink pointing SOMEWHERE ELSE is the user's own wiring (a customized
     # fork, a second clone, a dotfiles manager). A regular file in that position
     # gets a .bak.<ts>; a symlink used to be removed with the old target
@@ -123,7 +161,7 @@ link() {
   elif [[ -e "$dst" ]]; then
     # A regular file identical to src is our own copy-mode install from a
     # prior run — treat as up to date rather than backing it up each time.
-    if [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+    if [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
       echo "  ok      $dst (copy)"
       return
     fi
@@ -151,7 +189,9 @@ link() {
 
 unlink_if_ours() {
   local dst="$1" src="$2"
-  if [[ -L "$dst" ]] && [[ "$(readlink "$dst")" == "$src" ]]; then
+  local t=""
+  if [[ -L "$dst" ]]; then read_link_into "$dst" && t="$LINK_TARGET"; fi
+  if [[ -L "$dst" ]] && [[ "$t" == "$src" ]]; then
     rm "$dst"
     echo "  remove  $dst"
   elif [[ -L "$dst" && ! -e "$dst" ]]; then
@@ -161,9 +201,9 @@ unlink_if_ours() {
     # branch above misses it). Safe to remove: nothing live sits behind a broken
     # link, and a user would not place their own link here. Without this it was
     # reported "already absent" and left behind. (install#1)
-    echo "  remove  $dst (stale dangling link -> $(readlink "$dst"))"
+    echo "  remove  $dst (stale dangling link -> $(shown_path "$t"))"
     rm "$dst"
-  elif [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+  elif [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
     # Copy-mode install (identical content) — ours to remove.
     rm "$dst"
     echo "  remove  $dst (copy)"
@@ -205,20 +245,89 @@ install_symlinks() {
            "$repo_root/bin/handoff_worktree_remove.sh" 2>/dev/null || true
 }
 
+# Every file the install links (or copies) into $claude_home, relative to the
+# clone root. install_symlinks keeps its own explicit list; this one drives
+# the uninstall-side matching and must name the same files.
+handoff_files=(
+  bin/write_handoff.sh bin/handoff_turn_append.sh bin/handoff_ctx_check.sh
+  bin/handoff_session_start.sh bin/handoff_recover_tail.sh bin/handoff_statusline.sh
+  bin/handoff_compact_reset.sh bin/handoff_worktree_remove.sh bin/handoff_provenance.sh
+  skills/handoff/SKILL.md skills/handoff/README.md skills/handoff-more/SKILL.md
+  skills/handoff-recover/SKILL.md
+)
+
+# The clone the installed links point into, for an --uninstall with no clone
+# of its own. Every installed link votes: a link at $claude_home/<f> whose
+# target is exactly <root>/<f>, with <root> a handoff checkout, names <root>.
+# A root is chosen only when at least two links name it and they outnumber
+# the links naming any other root together, so no single link (one pointed
+# at a fork, one deleted, one replaced by a copy) can decide or block it;
+# without such a root nothing is matched and only dangling links go (#226).
+# Sets LINK_ROOT (empty when undecided), LINK_ROOT_VOTES, and CLONE_ROOTS
+# (every candidate root, for the note).
+LINK_ROOT=""; LINK_ROOT_VOTES=0; CLONE_ROOTS=()
+installed_clone_root() {
+  local f r i n=0 best=-1 total=0
+  local -a votes=()
+  LINK_ROOT=""; LINK_ROOT_VOTES=0; CLONE_ROOTS=()
+  for f in "${handoff_files[@]}"; do
+    [[ -L "$claude_home/$f" ]] || continue
+    read_link_into "$claude_home/$f" || continue
+    case "$LINK_TARGET" in /?*/"$f") ;; *) continue ;; esac
+    r="${LINK_TARGET%/"$f"}"
+    [[ -f "$r/bin/write_handoff.sh" && -f "$r/skills/handoff/SKILL.md" ]] || continue
+    total=$((total + 1))
+    for (( i = 0; i < n; i++ )); do
+      [[ "${CLONE_ROOTS[i]}" == "$r" ]] && break
+    done
+    if (( i == n )); then CLONE_ROOTS[n]="$r"; votes[n]=0; n=$((n + 1)); fi
+    votes[i]=$(( votes[i] + 1 ))
+  done
+  # Two tests, not one `||`: bash 3.2 expands votes[-1] even when the
+  # left side already decided, and dies on the subscript.
+  for (( i = 0; i < n; i++ )); do
+    if (( best < 0 )); then best=$i; elif (( votes[i] > votes[best] )); then best=$i; fi
+  done
+  (( best >= 0 )) || return 0
+  if (( votes[best] >= 2 && votes[best] * 2 > total )); then
+    LINK_ROOT="${CLONE_ROOTS[best]}"
+    LINK_ROOT_VOTES=${votes[best]}
+  fi
+}
+
 uninstall_symlinks() {
-  unlink_if_ours "$claude_home/bin/write_handoff.sh"          "$repo_root/bin/write_handoff.sh"
-  unlink_if_ours "$claude_home/bin/handoff_turn_append.sh"    "$repo_root/bin/handoff_turn_append.sh"
-  unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"      "$repo_root/bin/handoff_ctx_check.sh"
-  unlink_if_ours "$claude_home/bin/handoff_session_start.sh"  "$repo_root/bin/handoff_session_start.sh"
-  unlink_if_ours "$claude_home/bin/handoff_recover_tail.sh"   "$repo_root/bin/handoff_recover_tail.sh"
-  unlink_if_ours "$claude_home/bin/handoff_statusline.sh"     "$repo_root/bin/handoff_statusline.sh"
-  unlink_if_ours "$claude_home/bin/handoff_compact_reset.sh"  "$repo_root/bin/handoff_compact_reset.sh"
-  unlink_if_ours "$claude_home/bin/handoff_worktree_remove.sh" "$repo_root/bin/handoff_worktree_remove.sh"
-  unlink_if_ours "$claude_home/bin/handoff_provenance.sh"     "$repo_root/bin/handoff_provenance.sh"
-  unlink_if_ours "$claude_home/skills/handoff/SKILL.md"          "$repo_root/skills/handoff/SKILL.md"
-  unlink_if_ours "$claude_home/skills/handoff/README.md"         "$repo_root/skills/handoff/README.md"
-  unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$repo_root/skills/handoff-more/SKILL.md"
-  unlink_if_ours "$claude_home/skills/handoff-recover/SKILL.md"  "$repo_root/skills/handoff-recover/SKILL.md"
+  local root="$repo_root" f r list="" any=0
+  if [[ -z "$root" ]]; then
+    # No clone of our own (a piped `bash -s -- --uninstall < install.sh`):
+    # every link was compared with "/bin/...", matched nothing and was left
+    # as "not ours" while the settings were stripped (#226). Match against
+    # the clone the installed links agree on instead. Still an exact
+    # comparison per file, so a link of the user's that points elsewhere stays.
+    installed_clone_root
+    root="$LINK_ROOT"
+    for f in "${handoff_files[@]}"; do
+      [[ -e "$claude_home/$f" ]] && any=1
+    done
+    if [[ -n "$root" ]]; then
+      echo "  note    no clone was used; matching against $(shown_path "$root"),"
+      echo "          the clone $LINK_ROOT_VOTES of the installed links point into"
+    elif (( ${#CLONE_ROOTS[@]} )); then
+      for r in "${CLONE_ROOTS[@]}"; do list="${list:+$list, }$(shown_path "$r")"; done
+      echo "  note    no clone was used and the installed links do not agree on one clone"
+      echo "          ($list), so none of them is proven this installer's and only"
+      echo "          dangling links are removed; run ./install.sh --uninstall from the"
+      echo "          clone you installed from to remove the rest"
+    elif (( any )); then
+      echo "  note    no clone was used and no installed link points into a handoff clone,"
+      echo "          so the files below cannot be matched and are left in place; run"
+      echo "          ./install.sh --uninstall from a clone to remove them"
+    fi
+    # Never "/bin/...": with no root, compare against a path no link can hold.
+    [[ -n "$root" ]] || root="/nonexistent-handoff-clone"
+  fi
+  for f in "${handoff_files[@]}"; do
+    unlink_if_ours "$claude_home/$f" "$root/$f"
+  done
   # Tidy up now-empty leaf dirs we created. `rmdir` only removes a directory
   # that is ALREADY empty (fails harmlessly otherwise) — never `rm -r` — so
   # this can never touch a dir the user left files in (their own script

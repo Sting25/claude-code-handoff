@@ -101,9 +101,17 @@ _self_src="${BASH_SOURCE[0]:-}"
 repo_root=""
 repo_root_err=""   # why repo_root is empty: "" (no source path, piped) or "cannot cd to <dir>"
 if [[ -n "$_self_src" ]]; then
-  repo_root="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || repo_root=""
+  # The x keeps a trailing newline in the clone's name (#226): a bare
+  # `$(cd ... && pwd)` strips it, so a clone at `handoff<LF>` resolved to a
+  # sibling `handoff` and the install linked that one instead. dirname's own
+  # output loses it the same way, so the directory part is cut by expansion.
+  case "$_self_src" in */*) _self_dir="${_self_src%/*}" ;; *) _self_dir=. ;; esac
+  [[ -n "$_self_dir" ]] || _self_dir=/
+  repo_root="$(cd "$_self_dir" 2>/dev/null && pwd && printf x)" || repo_root=""
+  repo_root="${repo_root%x}"
+  repo_root="${repo_root%$'\n'}"
   if [[ -z "$repo_root" ]]; then
-    repo_root_err="cannot cd to $(dirname "$_self_src")"
+    repo_root_err="cannot cd to $_self_dir"
   fi
 fi
 # The closing line of an --uninstall. A piped run (`bash -s -- --uninstall <
@@ -206,25 +214,41 @@ fi
 # loops, falling back to the link path itself.
 #
 # The result goes into RESOLVED with every trailing newline kept (#210): the
-# `printf x` trick on readlink, and phys_dir (below) for the parent, so a
-# link whose target ends in a newline resolves to that target and not to a
-# sibling without it. resolve_symlink prints it for callers that do not care.
+# `printf x` trick on readlink (read_link_into), and phys_dir (below) for the
+# parent, so a link whose target ends in a newline resolves to that target
+# and not to a sibling without it.
 # `readlink -n` (GNU, BSD, busybox) prints the target bytes exactly. Plain
 # readlink cannot be trusted for this: macOS adds its newline only when the
 # target does not already end in one, so stripping one would drop the
 # target's own. The plain form is the fallback for a readlink without -n.
+# Every readlink in this installer goes through read_link_into (#226): a
+# bare `$(readlink ...)` made a link to `x<LF>` compare equal to `x`.
+LINK_TARGET=""
+read_link_into() {  # <link>; sets LINK_TARGET; non-zero when it cannot be read
+  local t
+  LINK_TARGET=""
+  if t="$(readlink -n "$1" 2>/dev/null && printf x)"; then
+    LINK_TARGET="${t%x}"
+  elif t="$(readlink "$1" 2>/dev/null && printf x)"; then
+    t="${t%x}"
+    LINK_TARGET="${t%$'\n'}"
+  else
+    return 1
+  fi
+}
+# A path for a message: as is, or in $'...' form when it holds a control
+# character, so a trailing newline is visible instead of silently ending the
+# line (#226).
+shown_path() {
+  local LC_ALL=C
+  if [[ "$1" == *[[:cntrl:]]* ]]; then printf '%q' "$1"; else printf '%s' "$1"; fi
+}
 RESOLVED=""
 resolve_symlink_into() {  # <path>; sets RESOLVED
   local p="$1" n=0 t d
   while [[ -L "$p" ]] && (( n++ < 40 )); do
-    if t="$(readlink -n "$p" 2>/dev/null && printf x)"; then
-      t="${t%x}"
-    elif t="$(readlink "$p" && printf x)"; then
-      t="${t%x}"
-      t="${t%$'\n'}"
-    else
-      break
-    fi
+    read_link_into "$p" || break
+    t="$LINK_TARGET"
     case "$t" in
       /*) p="$t" ;;
       *)
@@ -235,10 +259,6 @@ resolve_symlink_into() {  # <path>; sets RESOLVED
     esac
   done
   RESOLVED="$p"
-}
-resolve_symlink() {  # <path> -> physical path on stdout
-  resolve_symlink_into "$1"
-  printf '%s\n' "$RESOLVED"
 }
 # (The symlink check itself runs after argument parsing, below, because
 # --scope project repoints $settings at a project file first.)
@@ -494,7 +514,10 @@ if [[ "$scope" == project ]] && (( ! project_gone )); then
   # patching a .claude/ under the clone. Prefix test with a trailing slash on
   # both sides, so /src/handoff-other is not mistaken for /src/handoff.
   if [[ -n "$repo_root" ]]; then
-    _src_phys="$(cd "$repo_root" && pwd -P)"
+    # phys_dir keeps a trailing newline in the clone's name (#226), so a
+    # project in a sibling without it is not mistaken for the clone.
+    phys_dir "$repo_root" || PHYS_DIR="$repo_root"
+    _src_phys="$PHYS_DIR"
     case "$project_dir/" in
       "$_src_phys"/*)
         echo "ERROR: project directory '$project_dir' is the handoff clone '$_src_phys' or inside it (the install source); refusing." >&2
@@ -565,8 +588,11 @@ fi
 settings_link=""
 if [[ -L "$settings" ]]; then
   settings_link="$settings"
-  settings_resolved="$(resolve_symlink "$settings")"
-  echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
+  # Into a variable, not `$(...)`, which would strip a trailing newline from
+  # the target and patch a sibling file instead (#226).
+  resolve_symlink_into "$settings"
+  settings_resolved="$RESOLVED"
+  echo "note: $settings is a symlink -> $(shown_path "$settings_resolved"); patching the target (symlink left intact)." >&2
   settings="$settings_resolved"
 fi
 

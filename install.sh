@@ -9,7 +9,7 @@
 #
 # CI's install-drift job rebuilds this file into a temp path and diffs it
 # against the committed copy below; a stale install.sh fails that gate.
-# SOURCE-SHA256: e614cd5cf56b6489f3e0ef4777819c032e00ae59498d0143f3b987288051daec
+# SOURCE-SHA256: 3d874a0632ef6bc75bae38d9b23bb194b19126ab0d2e22f2ea85ca9d5feddf09
 # install.sh — wire this repo's handoff skill into ~/.claude/.
 #
 # Full behavior/usage summary lives in usage() below — that heredoc is the
@@ -113,9 +113,17 @@ _self_src="${BASH_SOURCE[0]:-}"
 repo_root=""
 repo_root_err=""   # why repo_root is empty: "" (no source path, piped) or "cannot cd to <dir>"
 if [[ -n "$_self_src" ]]; then
-  repo_root="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || repo_root=""
+  # The x keeps a trailing newline in the clone's name (#226): a bare
+  # `$(cd ... && pwd)` strips it, so a clone at `handoff<LF>` resolved to a
+  # sibling `handoff` and the install linked that one instead. dirname's own
+  # output loses it the same way, so the directory part is cut by expansion.
+  case "$_self_src" in */*) _self_dir="${_self_src%/*}" ;; *) _self_dir=. ;; esac
+  [[ -n "$_self_dir" ]] || _self_dir=/
+  repo_root="$(cd "$_self_dir" 2>/dev/null && pwd && printf x)" || repo_root=""
+  repo_root="${repo_root%x}"
+  repo_root="${repo_root%$'\n'}"
   if [[ -z "$repo_root" ]]; then
-    repo_root_err="cannot cd to $(dirname "$_self_src")"
+    repo_root_err="cannot cd to $_self_dir"
   fi
 fi
 # The closing line of an --uninstall. A piped run (`bash -s -- --uninstall <
@@ -218,25 +226,41 @@ fi
 # loops, falling back to the link path itself.
 #
 # The result goes into RESOLVED with every trailing newline kept (#210): the
-# `printf x` trick on readlink, and phys_dir (below) for the parent, so a
-# link whose target ends in a newline resolves to that target and not to a
-# sibling without it. resolve_symlink prints it for callers that do not care.
+# `printf x` trick on readlink (read_link_into), and phys_dir (below) for the
+# parent, so a link whose target ends in a newline resolves to that target
+# and not to a sibling without it.
 # `readlink -n` (GNU, BSD, busybox) prints the target bytes exactly. Plain
 # readlink cannot be trusted for this: macOS adds its newline only when the
 # target does not already end in one, so stripping one would drop the
 # target's own. The plain form is the fallback for a readlink without -n.
+# Every readlink in this installer goes through read_link_into (#226): a
+# bare `$(readlink ...)` made a link to `x<LF>` compare equal to `x`.
+LINK_TARGET=""
+read_link_into() {  # <link>; sets LINK_TARGET; non-zero when it cannot be read
+  local t
+  LINK_TARGET=""
+  if t="$(readlink -n "$1" 2>/dev/null && printf x)"; then
+    LINK_TARGET="${t%x}"
+  elif t="$(readlink "$1" 2>/dev/null && printf x)"; then
+    t="${t%x}"
+    LINK_TARGET="${t%$'\n'}"
+  else
+    return 1
+  fi
+}
+# A path for a message: as is, or in $'...' form when it holds a control
+# character, so a trailing newline is visible instead of silently ending the
+# line (#226).
+shown_path() {
+  local LC_ALL=C
+  if [[ "$1" == *[[:cntrl:]]* ]]; then printf '%q' "$1"; else printf '%s' "$1"; fi
+}
 RESOLVED=""
 resolve_symlink_into() {  # <path>; sets RESOLVED
   local p="$1" n=0 t d
   while [[ -L "$p" ]] && (( n++ < 40 )); do
-    if t="$(readlink -n "$p" 2>/dev/null && printf x)"; then
-      t="${t%x}"
-    elif t="$(readlink "$p" && printf x)"; then
-      t="${t%x}"
-      t="${t%$'\n'}"
-    else
-      break
-    fi
+    read_link_into "$p" || break
+    t="$LINK_TARGET"
     case "$t" in
       /*) p="$t" ;;
       *)
@@ -247,10 +271,6 @@ resolve_symlink_into() {  # <path>; sets RESOLVED
     esac
   done
   RESOLVED="$p"
-}
-resolve_symlink() {  # <path> -> physical path on stdout
-  resolve_symlink_into "$1"
-  printf '%s\n' "$RESOLVED"
 }
 # (The symlink check itself runs after argument parsing, below, because
 # --scope project repoints $settings at a project file first.)
@@ -506,7 +526,10 @@ if [[ "$scope" == project ]] && (( ! project_gone )); then
   # patching a .claude/ under the clone. Prefix test with a trailing slash on
   # both sides, so /src/handoff-other is not mistaken for /src/handoff.
   if [[ -n "$repo_root" ]]; then
-    _src_phys="$(cd "$repo_root" && pwd -P)"
+    # phys_dir keeps a trailing newline in the clone's name (#226), so a
+    # project in a sibling without it is not mistaken for the clone.
+    phys_dir "$repo_root" || PHYS_DIR="$repo_root"
+    _src_phys="$PHYS_DIR"
     case "$project_dir/" in
       "$_src_phys"/*)
         echo "ERROR: project directory '$project_dir' is the handoff clone '$_src_phys' or inside it (the install source); refusing." >&2
@@ -577,8 +600,11 @@ fi
 settings_link=""
 if [[ -L "$settings" ]]; then
   settings_link="$settings"
-  settings_resolved="$(resolve_symlink "$settings")"
-  echo "note: $settings is a symlink -> $settings_resolved; patching the target (symlink left intact)." >&2
+  # Into a variable, not `$(...)`, which would strip a trailing newline from
+  # the target and patch a sibling file instead (#226).
+  resolve_symlink_into "$settings"
+  settings_resolved="$RESOLVED"
+  echo "note: $settings is a symlink -> $(shown_path "$settings_resolved"); patching the target (symlink left intact)." >&2
   settings="$settings_resolved"
 fi
 
@@ -744,19 +770,57 @@ record_replaced_link() {  # <dst> <old_target>
   return 0
 }
 
+# same_content <a> <b>: 0 when the two files hold the same bytes, 1 when they
+# differ or cannot be compared. <a> may be `-` for stdin (cmp and od both
+# read it), so a caller never needs `<(...)`, which `sh install.sh` rejects.
+# cmp is not always on PATH (a stripped container, diffutils not
+# installed), and an unguarded `cmp -s` then failed
+# with "command not found" on every file and read as "different": a copy
+# install backed up each of its own copies on every re-run and --uninstall
+# left all of them behind as "not ours" (#208). Without cmp the hex dumps of
+# od (coreutils/POSIX, like cksum used for the settings fingerprint) are
+# compared instead, which is exact. With neither, the answer is "different",
+# the direction that never removes a file: link() backs it up, and
+# unlink_if_ours leaves it; a WARN says so once.
+same_content_warned=0
+same_content() {
+  local a b
+  if command -v cmp >/dev/null 2>&1; then
+    cmp -s "$1" "$2"
+    return
+  fi
+  if command -v od >/dev/null 2>&1; then
+    if [[ "$1" == - ]]; then
+      a="$(od -An -v -tx1 2>/dev/null)" || return 1
+    else
+      a="$(od -An -v -tx1 "$1" 2>/dev/null)" || return 1
+    fi
+    b="$(od -An -v -tx1 "$2" 2>/dev/null)" || return 1
+    [[ "$a" == "$b" ]]
+    return
+  fi
+  if (( ! same_content_warned )); then
+    same_content_warned=1
+    echo "  WARN    neither cmp nor od is on PATH, so a copied file cannot be compared with"
+    echo "          the clone's; each one is treated as not this installer's copy."
+  fi
+  return 1
+}
+
 link() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
   if [[ -L "$dst" ]]; then
     local current
-    current="$(readlink "$dst")"
+    read_link_into "$dst" || LINK_TARGET=""
+    current="$LINK_TARGET"
     if [[ "$current" == "$src" ]] && (( ! force_copy )); then
       echo "  ok      $dst -> $src"
       return
     fi
     # In copy mode, an existing symlink (even one pointing at src) must be
     # replaced by a real copy, so don't early-return above.
-    echo "  relink  $dst (was -> $current)"
+    echo "  relink  $dst (was -> $(shown_path "$current"))"
     # A symlink pointing SOMEWHERE ELSE is the user's own wiring (a customized
     # fork, a second clone, a dotfiles manager). A regular file in that position
     # gets a .bak.<ts>; a symlink used to be removed with the old target
@@ -771,7 +835,7 @@ link() {
   elif [[ -e "$dst" ]]; then
     # A regular file identical to src is our own copy-mode install from a
     # prior run — treat as up to date rather than backing it up each time.
-    if [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+    if [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
       echo "  ok      $dst (copy)"
       return
     fi
@@ -799,7 +863,9 @@ link() {
 
 unlink_if_ours() {
   local dst="$1" src="$2"
-  if [[ -L "$dst" ]] && [[ "$(readlink "$dst")" == "$src" ]]; then
+  local t=""
+  if [[ -L "$dst" ]]; then read_link_into "$dst" && t="$LINK_TARGET"; fi
+  if [[ -L "$dst" ]] && [[ "$t" == "$src" ]]; then
     rm "$dst"
     echo "  remove  $dst"
   elif [[ -L "$dst" && ! -e "$dst" ]]; then
@@ -809,9 +875,9 @@ unlink_if_ours() {
     # branch above misses it). Safe to remove: nothing live sits behind a broken
     # link, and a user would not place their own link here. Without this it was
     # reported "already absent" and left behind. (install#1)
-    echo "  remove  $dst (stale dangling link -> $(readlink "$dst"))"
+    echo "  remove  $dst (stale dangling link -> $(shown_path "$t"))"
     rm "$dst"
-  elif [[ -f "$dst" && ! -L "$dst" ]] && cmp -s "$src" "$dst"; then
+  elif [[ -f "$dst" && ! -L "$dst" ]] && same_content "$src" "$dst"; then
     # Copy-mode install (identical content) — ours to remove.
     rm "$dst"
     echo "  remove  $dst (copy)"
@@ -853,20 +919,89 @@ install_symlinks() {
            "$repo_root/bin/handoff_worktree_remove.sh" 2>/dev/null || true
 }
 
+# Every file the install links (or copies) into $claude_home, relative to the
+# clone root. install_symlinks keeps its own explicit list; this one drives
+# the uninstall-side matching and must name the same files.
+handoff_files=(
+  bin/write_handoff.sh bin/handoff_turn_append.sh bin/handoff_ctx_check.sh
+  bin/handoff_session_start.sh bin/handoff_recover_tail.sh bin/handoff_statusline.sh
+  bin/handoff_compact_reset.sh bin/handoff_worktree_remove.sh bin/handoff_provenance.sh
+  skills/handoff/SKILL.md skills/handoff/README.md skills/handoff-more/SKILL.md
+  skills/handoff-recover/SKILL.md
+)
+
+# The clone the installed links point into, for an --uninstall with no clone
+# of its own. Every installed link votes: a link at $claude_home/<f> whose
+# target is exactly <root>/<f>, with <root> a handoff checkout, names <root>.
+# A root is chosen only when at least two links name it and they outnumber
+# the links naming any other root together, so no single link (one pointed
+# at a fork, one deleted, one replaced by a copy) can decide or block it;
+# without such a root nothing is matched and only dangling links go (#226).
+# Sets LINK_ROOT (empty when undecided), LINK_ROOT_VOTES, and CLONE_ROOTS
+# (every candidate root, for the note).
+LINK_ROOT=""; LINK_ROOT_VOTES=0; CLONE_ROOTS=()
+installed_clone_root() {
+  local f r i n=0 best=-1 total=0
+  local -a votes=()
+  LINK_ROOT=""; LINK_ROOT_VOTES=0; CLONE_ROOTS=()
+  for f in "${handoff_files[@]}"; do
+    [[ -L "$claude_home/$f" ]] || continue
+    read_link_into "$claude_home/$f" || continue
+    case "$LINK_TARGET" in /?*/"$f") ;; *) continue ;; esac
+    r="${LINK_TARGET%/"$f"}"
+    [[ -f "$r/bin/write_handoff.sh" && -f "$r/skills/handoff/SKILL.md" ]] || continue
+    total=$((total + 1))
+    for (( i = 0; i < n; i++ )); do
+      [[ "${CLONE_ROOTS[i]}" == "$r" ]] && break
+    done
+    if (( i == n )); then CLONE_ROOTS[n]="$r"; votes[n]=0; n=$((n + 1)); fi
+    votes[i]=$(( votes[i] + 1 ))
+  done
+  # Two tests, not one `||`: bash 3.2 expands votes[-1] even when the
+  # left side already decided, and dies on the subscript.
+  for (( i = 0; i < n; i++ )); do
+    if (( best < 0 )); then best=$i; elif (( votes[i] > votes[best] )); then best=$i; fi
+  done
+  (( best >= 0 )) || return 0
+  if (( votes[best] >= 2 && votes[best] * 2 > total )); then
+    LINK_ROOT="${CLONE_ROOTS[best]}"
+    LINK_ROOT_VOTES=${votes[best]}
+  fi
+}
+
 uninstall_symlinks() {
-  unlink_if_ours "$claude_home/bin/write_handoff.sh"          "$repo_root/bin/write_handoff.sh"
-  unlink_if_ours "$claude_home/bin/handoff_turn_append.sh"    "$repo_root/bin/handoff_turn_append.sh"
-  unlink_if_ours "$claude_home/bin/handoff_ctx_check.sh"      "$repo_root/bin/handoff_ctx_check.sh"
-  unlink_if_ours "$claude_home/bin/handoff_session_start.sh"  "$repo_root/bin/handoff_session_start.sh"
-  unlink_if_ours "$claude_home/bin/handoff_recover_tail.sh"   "$repo_root/bin/handoff_recover_tail.sh"
-  unlink_if_ours "$claude_home/bin/handoff_statusline.sh"     "$repo_root/bin/handoff_statusline.sh"
-  unlink_if_ours "$claude_home/bin/handoff_compact_reset.sh"  "$repo_root/bin/handoff_compact_reset.sh"
-  unlink_if_ours "$claude_home/bin/handoff_worktree_remove.sh" "$repo_root/bin/handoff_worktree_remove.sh"
-  unlink_if_ours "$claude_home/bin/handoff_provenance.sh"     "$repo_root/bin/handoff_provenance.sh"
-  unlink_if_ours "$claude_home/skills/handoff/SKILL.md"          "$repo_root/skills/handoff/SKILL.md"
-  unlink_if_ours "$claude_home/skills/handoff/README.md"         "$repo_root/skills/handoff/README.md"
-  unlink_if_ours "$claude_home/skills/handoff-more/SKILL.md"     "$repo_root/skills/handoff-more/SKILL.md"
-  unlink_if_ours "$claude_home/skills/handoff-recover/SKILL.md"  "$repo_root/skills/handoff-recover/SKILL.md"
+  local root="$repo_root" f r list="" any=0
+  if [[ -z "$root" ]]; then
+    # No clone of our own (a piped `bash -s -- --uninstall < install.sh`):
+    # every link was compared with "/bin/...", matched nothing and was left
+    # as "not ours" while the settings were stripped (#226). Match against
+    # the clone the installed links agree on instead. Still an exact
+    # comparison per file, so a link of the user's that points elsewhere stays.
+    installed_clone_root
+    root="$LINK_ROOT"
+    for f in "${handoff_files[@]}"; do
+      [[ -e "$claude_home/$f" ]] && any=1
+    done
+    if [[ -n "$root" ]]; then
+      echo "  note    no clone was used; matching against $(shown_path "$root"),"
+      echo "          the clone $LINK_ROOT_VOTES of the installed links point into"
+    elif (( ${#CLONE_ROOTS[@]} )); then
+      for r in "${CLONE_ROOTS[@]}"; do list="${list:+$list, }$(shown_path "$r")"; done
+      echo "  note    no clone was used and the installed links do not agree on one clone"
+      echo "          ($list), so none of them is proven this installer's and only"
+      echo "          dangling links are removed; run ./install.sh --uninstall from the"
+      echo "          clone you installed from to remove the rest"
+    elif (( any )); then
+      echo "  note    no clone was used and no installed link points into a handoff clone,"
+      echo "          so the files below cannot be matched and are left in place; run"
+      echo "          ./install.sh --uninstall from a clone to remove them"
+    fi
+    # Never "/bin/...": with no root, compare against a path no link can hold.
+    [[ -n "$root" ]] || root="/nonexistent-handoff-clone"
+  fi
+  for f in "${handoff_files[@]}"; do
+    unlink_if_ours "$claude_home/$f" "$root/$f"
+  done
   # Tidy up now-empty leaf dirs we created. `rmdir` only removes a directory
   # that is ALREADY empty (fails harmlessly otherwise) — never `rm -r` — so
   # this can never touch a dir the user left files in (their own script
@@ -1329,6 +1464,16 @@ migrate_legacy_ss_hook() {
 # mid-run or clobber recoverable user config; print the manual snippet instead.
 # Returns 0 when the file is valid JSON and safe to patch, 1 to skip patching.
 ensure_settings_json() {
+  if settings_dir_unsearchable "$settings"; then
+    # Hidden, not absent (#213): seeding {} would fail on the redirect, and
+    # the old path then printed "new ... (created with {})" and a jq failure.
+    echo
+    echo "  ERROR   $settings cannot be read (check its permissions: a directory above it"
+    echo "          cannot be searched); refusing to auto-patch (left untouched)."
+    echo "          Fix the permissions and re-run, or patch settings.json by hand:"
+    print_manual_snippet
+    return 1
+  fi
   if [[ ! -f "$settings" ]]; then
     echo '{}' > "$settings"
     settings_seed_state=absent
@@ -1424,7 +1569,11 @@ project_key_check() {
   if [[ -L "$f" ]]; then
     project_key_state=foreign
   elif [[ -f "$f" ]]; then
-    if printf '%s\n' "$project_dir" | cmp -s - "$f"; then
+    # same_content, not a bare cmp: without cmp on PATH every key used to
+    # read as another project's (#208). Fed on stdin, not through `<(...)`:
+    # process substitution is a syntax error when bash runs as `sh` (POSIX
+    # mode, macOS bash 3.2), and that broke `sh install.sh` at parse time.
+    if printf '%s\n' "$project_dir" | same_content - "$f"; then
       project_key_state=own
     else
       project_key_state=foreign
@@ -1548,12 +1697,15 @@ check_created_settings() {
 git_tracks_file() {
   local f="$1" t
   command -v git >/dev/null 2>&1 || return 1
-  git -C "$(dirname "$f")" ls-files --error-unmatch -- "$(basename "$f")" >/dev/null 2>&1 && return 0
+  git -C "${f%/*}" ls-files --error-unmatch -- "${f##*/}" >/dev/null 2>&1 && return 0
   if [[ -L "$f" ]]; then
-    t="$(readlink "$f" 2>/dev/null || true)"
-    case "$t" in /*) ;; *) t="$(dirname "$f")/$t" ;; esac
-    [[ -n "$t" && -d "$(dirname "$t")" ]] \
-      && git -C "$(dirname "$t")" ls-files --error-unmatch -- "$(basename "$t")" >/dev/null 2>&1 && return 0
+    # read_link_into and expansion, not $(readlink/dirname/basename), which
+    # strip a trailing newline from the target (#226).
+    read_link_into "$f" || LINK_TARGET=""
+    t="$LINK_TARGET"
+    case "$t" in /*) ;; *) t="${f%/*}/$t" ;; esac
+    [[ -n "$t" && -d "${t%/*}" ]] \
+      && git -C "${t%/*}" ls-files --error-unmatch -- "${t##*/}" >/dev/null 2>&1 && return 0
   fi
   return 1
 }
@@ -1642,7 +1794,7 @@ patch_settings() {
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
   record_created_settings
   # If no change vs backup, drop the redundant backup.
-  if [[ -n "$settings_backup" ]] && cmp -s "$settings" "$settings_backup"; then
+  if [[ -n "$settings_backup" ]] && same_content "$settings" "$settings_backup"; then
     rm "$settings_backup"
     echo "  ok      no settings.json changes (backup removed)"
   fi
@@ -1653,6 +1805,14 @@ patch_settings() {
 # exits non-zero, so a re-run can still clean up.
 uninstall_incomplete=0
 unpatch_settings() {
+  if settings_dir_unsearchable "$settings"; then
+    # Hidden, not absent (#213): the hooks may still be wired there. Stop
+    # before anything is removed, as for the unreadable file below.
+    echo "  ERROR   $settings cannot be read (check its permissions: a directory above it" >&2
+    echo "          cannot be searched); refusing to edit (left untouched)." >&2
+    echo "          Fix the permissions and re-run the same --uninstall command." >&2
+    exit 1
+  fi
   if [[ ! -f "$settings" ]]; then
     echo "  ok      $settings does not exist; nothing to strip"
     return
@@ -1737,7 +1897,7 @@ unpatch_settings() {
   maybe_uninstall_perm "$perm_wr"
   maybe_uninstall_model
   patch_in_progress=0   # full sequence succeeded; disarm restore-on-abort
-  if cmp -s "$settings" "$settings_backup"; then
+  if same_content "$settings" "$settings_backup"; then
     rm "$settings_backup"
     echo "  ok      no settings.json changes (backup removed)"
   fi
@@ -1948,6 +2108,9 @@ other_wired_note=""
 refuse_uninstall_if_other_file_wired() {
   local named="$settings" shown="$project_dir/.claude/$settings_name" why rc=0 flag cmd
   local leftovers=0 other_state
+  # A named file hidden by an unsearchable directory is not "does not exist":
+  # unpatch_settings refuses it (#213).
+  settings_dir_unsearchable "$named" && return 0
   if [[ -L "$shown" && ! -e "$shown" ]]; then
     why="is a dangling symlink"
   elif [[ ! -e "$named" ]]; then
@@ -1981,10 +2144,24 @@ refuse_uninstall_if_other_file_wired() {
     leftovers=1
   fi
   other_project_settings
+  # settings.json linked to settings.local.json (or the reverse) is one file:
+  # the strip below goes through the link, so the other name is no longer
+  # wired afterwards. The note used to be computed here, before the strip,
+  # and said the other file "still carries the handoff hooks" (#226).
+  local named_phys
+  settings_phys_into "$named"; named_phys="$SETTINGS_PHYS"
+  settings_phys_into "$OTHER_SETTINGS"
+  [[ -n "$named_phys" && "$named_phys" == "$SETTINGS_PHYS" ]] && return 0
   sh_jq_failed_file=""
   if settings_has_our_hooks "$OTHER_SETTINGS"; then
     other_state=wired
   elif [[ "$sh_jq_failed_file" == "$OTHER_SETTINGS" ]]; then
+    other_state=unknown
+  elif settings_invalid_json "$OTHER_SETTINGS"; then
+    # Its wiring cannot be read, like a mode-000 file: unknown, not "not
+    # wired" (#226). It used to be "nothing to strip", exit 0, no WARN.
+    sh_warn_once "$OTHER_SETTINGS" "not valid JSON" "  WARN    $OTHER_SETTINGS is not valid JSON;" \
+      "          treating its wiring as unknown. Fix the file and re-run."
     other_state=unknown
   else
     return 0
@@ -2039,6 +2216,17 @@ shq() {
 # readability check runs first in bash so a mode-000 file is a plain "not
 # usable" its callers can name, not a jq failure. Shared by
 # settings_has_our_hooks, unpatch_settings and the doctor's settings gate.
+# settings_invalid_json <file>: 0 when <file> is non-empty, readable and not
+# valid JSON, the one unusable state whose wiring is unknown rather than a
+# plain "no": the user may well fix it back into a wired file. Needs jq; 1
+# without it. Shared by the registry scan (#208) and the wrong-file uninstall
+# check (#226).
+settings_invalid_json() {
+  local urc=0
+  [[ -s "$1" && -r "$1" ]] && command -v jq >/dev/null 2>&1 || return 1
+  settings_usable "$1" || urc=$?
+  [[ $urc -eq 1 ]] && ! jq empty "$1" >/dev/null 2>&1
+}
 settings_usable_rc=0
 settings_usable() {
   local rc=0
@@ -2061,6 +2249,24 @@ settings_usable() {
 # would read as a jq failure (tests/test_install_jq_probes_187.sh, matrix).
 sh_jq_failed=0
 sh_jq_failed_file=""
+# settings_dir_unsearchable <file>: 0 when <file> is hidden by a directory
+# this process cannot search. `-f`, `-e` and `-r` are all false for a file
+# under such a directory, exactly as for an absent one, so every "does not
+# exist" branch must ask this first (#213). Walks up to the nearest ancestor
+# that can be stat'ed: when the project directory, or any directory above it,
+# cannot be searched, everything below it is hidden and the first stat-able
+# one is the unsearchable one. Parameter expansion, not `$(dirname ...)`,
+# which would strip a trailing newline from a component (#210).
+settings_dir_unsearchable() {
+  local d="$1"
+  case "$d" in */*) d="${d%/*}" ;; *) d=. ;; esac
+  [[ -n "$d" ]] || d=/
+  while [[ ! -e "$d" && "$d" != / && "$d" != . ]]; do
+    case "$d" in */*) d="${d%/*}" ;; *) d=. ;; esac
+    [[ -n "$d" ]] || d=/
+  done
+  [[ -d "$d" && ! -x "$d" ]]
+}
 sh_jq_failed_why=""   # "jq failed" or "permission denied": what the WARN said
 # sh_warn_once <file> <why> <line1> <line2>: print the two-line WARN to
 # stderr unless this run already printed it for <file> with the same <why>
@@ -2082,13 +2288,7 @@ settings_has_our_hooks() {
   # A directory this process cannot search hides the file: `-f` is false for
   # it exactly as for an absent file. Unknown, not "does not exist" (#213);
   # same report as the unreadable file below.
-  local d
-  d="$(dirname "$f")"
-  # Walk up to the nearest ancestor that can be stat'ed: when the project
-  # directory, or any directory above it, cannot be searched, everything
-  # below it is hidden and the first stat-able one is the unsearchable one.
-  while [[ ! -e "$d" && "$d" != "/" && "$d" != "." ]]; do d="$(dirname "$d")"; done
-  if [[ -d "$d" && ! -x "$d" ]]; then
+  if settings_dir_unsearchable "$f"; then
     sh_warn_once "$f" "permission denied" "  WARN    $f cannot be read (check its permissions);" \
       "          treating its wiring as unknown. Fix the file and re-run."
     sh_jq_failed=1
@@ -2152,12 +2352,19 @@ settings_has_our_hooks() {
 # Physical path of a settings file (symlinks resolved, directory made
 # physical), so the wiring check below never counts one file twice: a
 # project rooted at $HOME, or a dotfiles link, can make two spellings name
-# the same file. Prints nothing when the directory does not exist.
-settings_phys_path() {
+# the same file. Sets SETTINGS_PHYS, empty when the directory does not
+# exist. A variable, not stdout: `$(...)` stripped a trailing newline from
+# the target, so a link to `x<LF>` and the file `x` read as one file (#226).
+SETTINGS_PHYS=""
+settings_phys_into() {  # <file>; sets SETTINGS_PHYS
   local f d
-  f="$(resolve_symlink "$1")"
-  d="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" || return 0
-  printf '%s/%s\n' "$d" "$(basename "$f")"
+  SETTINGS_PHYS=""
+  resolve_symlink_into "$1"
+  f="$RESOLVED"
+  case "$f" in */*) d="${f%/*}" ;; *) d=. ;; esac
+  [[ -n "$d" ]] || d=/
+  phys_dir "$d" || return 0
+  SETTINGS_PHYS="${PHYS_DIR%/}/${f##*/}"
 }
 
 # Project root the wiring checks look at: --project in project scope; in
@@ -2190,9 +2397,9 @@ wiring_project_root() {
 report_wiring() {
   local label="$1" proj pu ps pl u=0 sw=0 lw=0 user_issue=0 dup_issue=0 p1 pc
   proj="$(wiring_project_root)"
-  pu="$(settings_phys_path "$user_settings")"
-  ps="$(settings_phys_path "$proj/.claude/settings.json")"
-  pl="$(settings_phys_path "$proj/.claude/settings.local.json")"
+  settings_phys_into "$user_settings"; pu="$SETTINGS_PHYS"
+  settings_phys_into "$proj/.claude/settings.json"; ps="$SETTINGS_PHYS"
+  settings_phys_into "$proj/.claude/settings.local.json"; pl="$SETTINGS_PHYS"
   if [[ -n "$pu" ]] && settings_has_our_hooks "$pu"; then u=1; fi
   if [[ -n "$ps" && "$ps" != "$pu" ]] && settings_has_our_hooks "$ps"; then sw=1; fi
   if [[ -n "$pl" && "$pl" != "$pu" && "$pl" != "$ps" ]] && settings_has_our_hooks "$pl"; then lw=1; fi
@@ -2295,7 +2502,7 @@ REGISTRY_OUT=""
 # the user fixes it. Left 0 for the doctor, which reports such a file stale.
 registry_unparseable_unknown=0
 registry_collect() {
-  local want="$1" rp rn has nl=$'\n' before failed=0 uf urc
+  local want="$1" rp rn has nl=$'\n' before failed=0 uf
   REGISTRY_OUT=""
   [[ -f "$project_registry" && ! -L "$project_registry" ]] || return 0
   # The flag is cleared per entry and folded back after the loop, so a
@@ -2309,17 +2516,12 @@ registry_collect() {
     sh_jq_failed=0
     if settings_has_our_hooks "$rp/.claude/$rn"; then has=wired; fi
     uf="$rp/.claude/$rn"
-    if (( registry_unparseable_unknown && ! sh_jq_failed )) && [[ -s "$uf" && -r "$uf" ]] \
-       && command -v jq >/dev/null 2>&1; then
-      urc=0
-      settings_usable "$uf" || urc=$?
-      if [[ $urc -eq 1 ]] && ! jq empty "$uf" >/dev/null 2>&1; then
-        echo "  WARN    $uf is not valid JSON;" >&2
-        echo "          treating its wiring as unknown. Fix the file and re-run." >&2
-        sh_jq_failed=1
-        sh_jq_failed_file="$uf"
-        sh_jq_failed_why="not valid JSON"
-      fi
+    if (( registry_unparseable_unknown && ! sh_jq_failed )) && settings_invalid_json "$uf"; then
+      echo "  WARN    $uf is not valid JSON;" >&2
+      echo "          treating its wiring as unknown. Fix the file and re-run." >&2
+      sh_jq_failed=1
+      sh_jq_failed_file="$uf"
+      sh_jq_failed_why="not valid JSON"
     fi
     if (( sh_jq_failed )); then failed=1; continue; fi
     if [[ "$has" == "$want" ]]; then
@@ -2512,12 +2714,14 @@ doctor() {
     dst="$claude_home/bin/$name.sh"
     if [[ -e "$dst" ]]; then
       if [[ -L "$dst" ]]; then
-        echo "  ok      $dst -> $(readlink "$dst")"
+        read_link_into "$dst" || LINK_TARGET=""
+        echo "  ok      $dst -> $(shown_path "$LINK_TARGET")"
       else
         echo "  ok      $dst (copy)"
       fi
     elif [[ -L "$dst" ]]; then
-      tgt="$(readlink "$dst" 2>/dev/null || true)"
+      read_link_into "$dst" || LINK_TARGET=""
+      tgt="$(shown_path "$LINK_TARGET")"
       echo "  BROKEN  $dst -> $tgt (dangling symlink: hook is silently disabled)"
       broken=$((broken + 1))
     else
@@ -2686,12 +2890,14 @@ doctor() {
     fi
   fi
   if (( sib_check )); then
-    pu="$(settings_phys_path "$user_settings")"
-    ps="$(settings_phys_path "$settings")"
+    settings_phys_into "$user_settings"; pu="$SETTINGS_PHYS"
+    settings_phys_into "$settings"; ps="$SETTINGS_PHYS"
+    pfl=""
+    if [[ -n "$flag_settings" ]]; then settings_phys_into "$flag_settings"; pfl="$SETTINGS_PHYS"; fi
     for f in "$proj/.claude/settings.json" "$proj/.claude/settings.local.json"; do
-      pf="$(settings_phys_path "$f")"
+      settings_phys_into "$f"; pf="$SETTINGS_PHYS"
       [[ -n "$pf" && "$pf" != "$pu" && "$pf" != "$ps" ]] || continue
-      [[ -n "$flag_settings" && "$pf" == "$(settings_phys_path "$flag_settings")" ]] && continue
+      [[ -n "$flag_settings" && "$pf" == "$pfl" ]] && continue
       # Only a parse failure is new here: an unreadable file is already
       # reported by report_wiring's read, and an empty file is not an error.
       [[ -f "$pf" && -r "$pf" && -s "$pf" ]] || continue
@@ -2770,7 +2976,9 @@ elif [[ "$mode" == install ]]; then
     echo "       Clone the repo and run ./install.sh from inside it (see the README)." >&2
     exit 2
   fi
-  _rr_phys="$(cd "$repo_root" && pwd -P)"
+  # phys_dir keeps a trailing newline in the clone's name (#226).
+  phys_dir "$repo_root" || PHYS_DIR="$repo_root"
+  _rr_phys="$PHYS_DIR"
   case "$_rr_phys/" in
     /dev/*|/proc/*)
       echo "ERROR: install.sh was read from $repo_root (a process-substitution or device path), so there is no clone to install from." >&2
@@ -2791,16 +2999,20 @@ elif [[ "$mode" == install ]]; then
     # <project>/.claude for it would let a later --uninstall remove the
     # user's pre-existing .claude/ (#194).
     _pc="$project_dir/.claude"
+    settings_dir="${settings%/*}"
+    [[ -n "$settings_dir" ]] || settings_dir=/
     if [[ -L "$_pc" && ! -d "$_pc" ]]; then
-      echo "ERROR: $_pc is a dangling symlink (-> $(readlink "$_pc" 2>/dev/null || true)); refusing to create its target." >&2
+      read_link_into "$_pc" || LINK_TARGET=""
+      echo "ERROR: $_pc is a dangling symlink (-> $(shown_path "$LINK_TARGET")); refusing to create its target." >&2
       echo "       Create the directory it points to, or remove the link, and re-run." >&2
       exit 2
     elif [[ -e "$_pc" && ! -d "$_pc" ]]; then
       echo "ERROR: $_pc exists but is not a directory; refusing." >&2
       exit 2
-    elif [[ -n "$settings_link" && ! -d "$(dirname "$settings")" ]]; then
-      echo "ERROR: $settings_link is a dangling symlink (-> $settings, whose directory does not exist); refusing to create it." >&2
-      echo "       Create $(dirname "$settings")/, or remove the link, and re-run." >&2
+    elif [[ -n "$settings_link" && ! -d "$settings_dir" ]]; then
+      # Expansion, not `$(dirname ...)`, which strips a trailing newline (#226).
+      echo "ERROR: $settings_link is a dangling symlink (-> $(shown_path "$settings"), whose directory does not exist); refusing to create it." >&2
+      echo "       Create $(shown_path "$settings_dir")/, or remove the link, and re-run." >&2
       exit 2
     fi
   fi
