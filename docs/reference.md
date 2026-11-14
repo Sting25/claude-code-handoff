@@ -23,6 +23,7 @@ env-var list, see [skills/handoff/README.md](../skills/handoff/README.md).
 - [Install internals](#install-internals)
 - [Updating](#updating)
 - [Uninstall details](#uninstall-details)
+- [Release fence: multi-session e2e](#release-fence-multi-session-e2e)
 - [What's in the repo](#whats-in-the-repo)
 
 ## The four paths in detail
@@ -1306,6 +1307,37 @@ Everything else in your `settings.json` — your own hooks (including ones
 co-located in the same event), permissions, `statusLine`, `env`, theme —
 is preserved; uninstall only removes entries it can prove are its own.
 
+## Release fence: multi-session e2e
+
+Before any release, run the multi-session driver on the exact tree being
+released and paste its results table into the release PR body:
+
+```bash
+bash tools/e2e_multi_session.sh <release-tree> <fresh-outdir>
+```
+
+It installs that tree for real into a throwaway HOME and project (the
+installer runs with `HOME` and `CLAUDE_HOME` pointing into the jail, never
+your own `~/.claude`), then replays sessions through the hook commands the
+installer wrote: session A curates, B to J never curate, K only starts. The
+variants cover Notes and Rules, Notes only, a linked worktree session, a
+history pruned to one snapshot, and a 2000-byte SessionStart budget. Each
+expected outcome (Notes and fences reaching every later session, history
+counts, the stale-refresh archive labels, the worktree salvage) is a named
+check; the driver exits 1 when any check fails, 2 on a usage or setup error,
+and 0 only when every check held. `<outdir>/results.md` holds the table and
+every check; per-call payloads, output and exit codes sit beside it. The
+jails are removed when the run ends (`--keep-jails` keeps them for
+debugging). It refuses a tree with uncommitted changes, since the fence is
+a run on the exact release tree; `--allow-dirty` overrides that for
+deliberate red runs on a modified copy.
+
+It is not part of `./tests/run.sh` or CI: it sleeps on purpose between
+writes (about two and a half minutes for all five variants) and needs jq,
+git, openssl and perl. `--variant <name>` runs one variant. What it does
+not cover (live Claude Code behaviour, the verbatim `|| true` hook strings,
+concurrency) is listed in #203.
+
 ## What's in the repo
 
 ```
@@ -1339,7 +1371,8 @@ is preserved; uninstall only removes entries it can prove are its own.
 │   ├── 30-settings-unpatch-doctor.sh
 │   └── 40-main.sh
 ├── tools/
-│   └── build-install.sh           # concatenates install.d/*.sh -> install.sh + install.sh.sha256
+│   ├── build-install.sh           # concatenates install.d/*.sh -> install.sh + install.sh.sha256
+│   └── e2e_multi_session.sh       # release-fence multi-session e2e driver (run before each release)
 ├── tests/                         # dependency-free bash test suite (./tests/run.sh)
 ├── install.sh                     # GENERATED: symlink + settings.json patcher (built from install.d/*.sh — do not edit directly)
 ├── install.sh.sha256              # GENERATED: sha256 of install.sh, for a future curl|bash consumer to verify

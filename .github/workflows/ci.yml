@@ -79,7 +79,7 @@ jobs:
         # is what proves install.sh actually reflects install.d/*.sh.
         run: |
           shellcheck --version
-          shellcheck bin/*.sh tests/*.sh tools/build-install.sh install.sh
+          shellcheck bin/*.sh tests/*.sh tools/build-install.sh tools/e2e_multi_session.sh install.sh
 
   # v0.14.0: flags the missed-tag/missing-version failure mode. VERSION is
   # the single source of truth. On a release tag the tag itself must match
