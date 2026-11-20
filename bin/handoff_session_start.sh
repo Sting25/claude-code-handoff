@@ -2,13 +2,15 @@
 # handoff_session_start.sh — SessionStart hook output.
 #
 # Cats <repo>/.claude/handoff_current.md so the new session starts with
-# the previous session's snapshot in context. Two extras over the
+# the previous session's snapshot in context. Three extras over the
 # original one-liner:
 #
 #   1. If the curated Notes block in handoff_current.md is the unedited
 #      placeholder (i.e. SessionEnd auto-wrote the snapshot but no model
-#      was in the loop to fill in prose), also cat the most recent file
-#      from .claude/handoff_history/. The previous session's curated
+#      was in the loop to fill in prose), also cat the newest snapshot
+#      in .claude/handoff_history/ whose Notes were curated (failing
+#      that, the newest whose Rules were), and print the
+#      /handoff-recover banner. The previous session's curated
 #      prose is more useful than git-state-only.
 #   2. If handoff_history/ has any entries, append a one-line pointer
 #      so the assistant knows older snapshots exist and can run
@@ -18,7 +20,14 @@
 #      same tiers as a local load, nothing written anywhere, and never
 #      the /handoff-recover banner or the auto-rebuild for it.
 #
-# Env overrides (rare):
+# Also in this hook, each described where it lives below: the output
+# budget (HANDOFF_SS_MAX_BYTES), the session-origin marker for the
+# overwrite guard, the orphaned-sidecar sweep, the list of handoffs saved
+# from linked worktrees, the auto-rebuild for a missing or corrupted doc,
+# the retrospective Stop-hook health warning (HANDOFF_NO_HEALTH_WARN), and
+# the tiered binding load (HANDOFF_TRUST_DISABLE).
+#
+# Env overrides specific to the fallback and banner (rare):
 #   HANDOFF_SS_DISABLE_FALLBACK=1  — never auto-include the previous
 #       handoff, even if current is placeholder-only.
 #   HANDOFF_SS_DISABLE_RECOVER=1   — never emit the /handoff-recover
@@ -1437,8 +1446,9 @@ fi
 # snapshot is git-state-only.
 #
 # When placeholder-only is detected, do two things:
-#   1. Cat the most recent file from .claude/handoff_history/ so the
-#      next session at least has the previous session's curated prose.
+#   1. Cat the newest CURATED snapshot from .claude/handoff_history/
+#      (handoff_newest_curated_history_snapshot below) so the next
+#      session at least has the previous session's curated prose.
 #   2. Emit an ACTION sentinel telling the model to invoke
 #      /handoff-recover before starting new work. The fallback above
 #      is "what we know"; the recover skill is "compose what we can

@@ -27,9 +27,11 @@ What it does:
      manual step instead). Which file: ~/.claude/settings.json by default,
      or with --scope project the project's .claude/settings.json or
      .claude/settings.local.json (see "Scope" below).
-     Requires jq. Without it, install refuses (exit 1); --uninstall removes the
-     scripts but cannot unpatch the settings file and prints the entries to
-     remove by hand; --doctor reports jq as BROKEN.
+     Requires jq. Without it, install refuses (exit 1); --uninstall cannot
+     unpatch a settings file that has content: it prints the entries to remove
+     by hand, removes nothing (scripts, skills and secret stay) and exits 1, so
+     a re-run with jq can finish (an absent or empty settings file needs no
+     jq); --doctor reports jq as BROKEN.
 
 Idempotent. Existing files at symlink targets are backed up to
 <path>.bak.<timestamp> before being replaced. An existing settings file is

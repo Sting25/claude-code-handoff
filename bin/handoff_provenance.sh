@@ -89,8 +89,8 @@ HANDOFF_NOTES_HEADING='## Notes from this session'
 # $CLAUDE_HOME/handoff_secret while this file's callers actually signed under
 # $HOME/.claude/handoff_secret — a false clean on the exposure doctor exists
 # to catch. Following install.sh (vs. hardcoding doctor back) is also the
-# back-compat-safe direction: CLAUDE_HOME is undocumented/test-only (never in
-# the README), so ${CLAUDE_HOME:-$HOME/.claude} == $HOME/.claude for every
+# back-compat-safe direction: CLAUDE_HOME is an advanced override (listed in
+# docs/reference.md, never in the README), so ${CLAUDE_HOME:-$HOME/.claude} == $HOME/.claude for every
 # real install — a no-op change, not a relocation — whereas the alternative
 # would make remove_secret_if_ours (already claude_home-based) target a file
 # signing never used whenever CLAUDE_HOME is set.

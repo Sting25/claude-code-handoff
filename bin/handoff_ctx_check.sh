@@ -33,9 +33,12 @@
 #   .ctx_prompts_<session_id>     — per-session UserPromptSubmit fire counter
 #                                    (issue #71, Stop-hook health detector A).
 #                                    Incremented on every fire that reaches it;
-#                                    once it passes HANDOFF_HEALTH_PROMPTS
-#                                    fires with .ctx_<session_id> still absent,
-#                                    the Stop hook is provably not running.
+#                                    once it reaches HANDOFF_HEALTH_PROMPTS
+#                                    fires with .ctx_<session_id> AND
+#                                    .ctx_model_<session_id> still absent, the
+#                                    transcript is checked, and that many
+#                                    COMPLETED turns there (issue #159) mean
+#                                    the Stop hook is not running.
 #                                    Survives compaction untouched (see
 #                                    handoff_compact_reset.sh: prompt count is
 #                                    not invalidated by a compaction event).
@@ -143,9 +146,12 @@
 #                               number of COMPLETED turns (issue #159: main-
 #                               chain assistant transcript lines with
 #                               stop_reason end_turn, not prompts), with
-#                               .ctx_<session_id> still absent, before this
-#                               hook warns that the Stop hook appears dead
-#                               (default: 3). A Stop hook should write that
+#                               .ctx_<session_id> and .ctx_model_<session_id>
+#                               both still absent, before this hook warns
+#                               that the Stop hook appears dead (default: 3,
+#                               clamped to a minimum of 2; the prompt counter
+#                               must have reached the same number before the
+#                               transcript is read). A Stop hook should write that
 #                               file on every turn, so surviving this many
 #                               turns with no such file is strong evidence
 #                               it never ran this session, rather than just

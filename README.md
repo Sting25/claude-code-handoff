@@ -1,32 +1,21 @@
 # claude-code-handoff
 
-Claude Code sessions run out of context. This tool writes a short,
-human-readable handoff file at the end of a session and loads it
-automatically when the next session starts — so you pick up where you
-left off instead of starting from a blank slate or an auto-compacted
-digest you never read.
+Claude Code sessions run out of context. When that happens you either
+start over from a blank slate or trust an auto-compacted digest you
+never read.
 
-**Technical reference:** [docs/reference.md](docs/reference.md)
+This tool gives you a third option. At the end of a session it writes a
+short handoff file you can actually read, and the next session in the
+same project loads it automatically. You pick up where you left off.
 
-## What it does
+- **Works in:** the Claude Code CLI and the desktop app, in git and
+  non-git projects.
+- **Installs with:** one shell script. No package manager, no plugin.
+- **Full reference:** [docs/reference.md](docs/reference.md)
 
-- **Snapshots where you left off** — git state plus a written summary of decisions, open questions, and next steps.
-- **Auto-loads that snapshot into your next session** in the same repo — no copy-paste, no kickoff prompt.
-- **Follows you into linked git worktrees**: a session in a worktree that has no handoff of its own loads the main checkout's handoff as inherited context (standing rules included), and never asks you to recover a session that never ran there.
-- **Keeps a per-turn backup**, so a crashed or killed session can be reconstructed afterwards.
-- **Saves a mechanical git-state snapshot on every clean exit**, even if you forget to hand off.
-- **Nudges you when context is filling** (at 30% of the window, then every 5 points; at 100k tokens when the window size is unknown), while Claude is still sharp enough to write a good summary, so you hand off confidently instead of riding a bloated session, which also means less context re-processing and fewer wasted tokens.
-- **Signs each handoff with a per-machine key**, so a cloned repo can't inject fake standing rules.
-- **Keeps a history of past handoffs** (last 5 by default) that you can pull back into context on demand.
-- **Auto-rebuilds a missing or corrupted handoff on load**: if `handoff_current.md` is missing, empty, unreadable, or fails an integrity check, the next session start composes a best-effort stand-in from your history and per-turn backups instead of loading nothing, clearly labeled `AUTO-REBUILT` and never written to disk or signed.
-- **Guards against a stale resumed session clobbering a fresher one's handoff** — refuses (exit 3) rather than silently rotating a newer session's curated work under an older one's; see [Cross-session overwrite guard](docs/reference.md#cross-session-overwrite-guard).
-- **Works in git and non-git projects**, in both the Claude Code CLI and the desktop app.
+## Quick start
 
-## Installation
-
-One install path: clone the repo and run `install.sh`. The recommended
-layout wires the hooks into one project only, so the tool runs where you
-opted in and nowhere else:
+Install it for one project:
 
 ```bash
 git clone https://github.com/Sting25/claude-code-handoff.git ~/code/claude-code-handoff
@@ -34,107 +23,214 @@ cd ~/code/claude-code-handoff
 ./install.sh --scope project --project ~/code/myapp
 ```
 
-The installer symlinks the scripts into `~/.claude/bin` and the skills
-into `~/.claude/skills`, then writes the seven hooks, the status line,
-and the permission entries into `~/code/myapp/.claude/settings.json`
-(backed up first; idempotent; your own settings are left untouched).
-`~/.claude/settings.json` is not touched. Add `--local` to target
-`.claude/settings.local.json` instead (that file is per machine and not
-committed, so its hooks do not reach the project's git worktrees). Run
-`--scope project` from inside the project to skip `--project`. Repeat
-the command for each project that should have the handoff; every wired
-project shares the same scripts in `~/.claude/bin`.
+Then, in that project:
 
-What to expect:
+| Command | When to use it |
+|---|---|
+| `/handoff` | At the end of a working session. Writes the snapshot and your notes. |
+| `/handoff-recover` | When a new session shows an `ACTION: RUN /handoff-recover` banner. |
+| `/handoff-more` | When you want older handoffs, not just the latest one. |
 
-- Only wired projects run the hooks. The skills (`/handoff`,
-  `/handoff-more`, `/handoff-recover`) are installed for your user, but
-  they need the hooks and do nothing useful in a project that is not
-  wired.
-- Project scope in `.claude/settings.json` also covers that repo's git
-  worktrees.
-- Collaborators run the installer themselves. A committed
-  `.claude/settings.json` that names `~/.claude/bin` scripts is harmless
-  on a machine without the install: every hook command ends in
-  `2>/dev/null || true`, so it does nothing there.
+Start a new session and the handoff is already there. Loading,
+per-turn backups, and the context nudge all run through hooks, so
+there is nothing else to remember.
 
-Plain `./install.sh` (no scope flag) still wires the hooks into
-`~/.claude/settings.json`, which makes them run in every project on the
-machine. Avoid that wiring if you want the tool in one project only; the
-doctor warns when the user file and a project file both carry the hooks.
+**A tip on timing:** run `/handoff` while there is still room to think,
+with 30 to 50% of the context left. At 5% the summary will be poor.
 
-Uninstall a project with the same flags:
-`./install.sh --uninstall --scope project --project ~/code/myapp`. That
-strips only that project's settings file and keeps the shared scripts,
-skills, and HMAC secret for your other projects.
+## What you get
 
-The tracked `settings.json` carries this machine's absolute home path in
-its `permissions.allow` entries. `--local` keeps that out of git, at the
-cost of not applying inside worktrees (`settings.local.json` is
-gitignored and per checkout).
+**Picking up where you left off**
 
-`install.sh` is a generated artifact (concatenated from `install.d/`
-by `tools/build-install.sh`; CI rebuilds and diffs it on every change)
-and ships with a checksum. Inside a full clone, git already guarantees
-integrity, but if you ever fetch `install.sh` on its own instead of
-cloning, fetch `install.sh.sha256` from the same tag and verify before
-running:
+- A snapshot of where things stand: git state plus a written summary
+  of decisions, open questions, and next steps.
+- That snapshot loads into your next session in the same project. No
+  copy-paste, no kickoff prompt.
+- A history of past handoffs (the last 5 by default) that you can pull
+  back in with `/handoff-more`.
+
+**Not losing work**
+
+- Your written notes stay put. If a later session ends without running
+  `/handoff`, the handoff you wrote is kept as it is, and one line is
+  added under its notes saying a later session ran and where its raw
+  turn log is.
+- If you never ran `/handoff` at all, a session ending or a compaction
+  still leaves a mechanical git-state snapshot behind.
+- Every turn is appended to a backup, so a crashed or killed session
+  can be reconstructed afterwards with `/handoff-recover`.
+- If the handoff file is missing, empty, or damaged, the next session
+  builds a stand-in from your history and backups. It is labeled
+  `AUTO-REBUILT`, never written to disk, and never signed.
+- An older session that you resume cannot overwrite a newer session's
+  handoff. The write is refused instead. See the
+  [cross-session overwrite guard](docs/reference.md#cross-session-overwrite-guard).
+
+**Staying ahead of a full context**
+
+- A nudge appears when context reaches 30% of the window, then again
+  every 5 points. If the window size is unknown, it appears at 100k
+  tokens instead.
+- The point is to hand off while Claude is still sharp enough to write
+  a good summary. That also means less re-processing and fewer wasted
+  tokens.
+
+**Worktrees**
+
+- A session in a linked git worktree that has no handoff of its own
+  loads the main checkout's handoff, standing rules included.
+- It is never asked to recover a session that did not run there.
+
+**Trust**
+
+- Each handoff is signed with a key that stays on your machine.
+- Only rules with a valid signature load as binding. A cloned repo
+  cannot plant standing rules for your next session; anything unsigned
+  loads as plain reference text.
+
+## Install
+
+### One project (recommended)
+
+```bash
+./install.sh --scope project --project ~/code/myapp
+```
+
+What that does:
+
+- Links the scripts into `~/.claude/bin` and the skills into
+  `~/.claude/skills`.
+- Writes seven hooks, a status line, and seven permission entries into
+  `~/code/myapp/.claude/settings.json`.
+- Backs that file up first, and leaves your own settings alone.
+- Does not touch `~/.claude/settings.json`.
+
+It is safe to run again. Repeat it for each project that should have
+the handoff; they all share the same scripts.
+
+Good to know:
+
+- **Run it from inside the project** and you can drop `--project`.
+- **Only wired projects run the hooks.** The three slash commands are
+  installed for your user, but they do nothing useful in a project
+  that is not wired.
+- **Git worktrees of the project are covered** when the hooks live in
+  `.claude/settings.json`.
+- **Collaborators install it themselves.** If you commit
+  `.claude/settings.json`, it is harmless on a machine without the
+  install: every hook command discards its output and ends in
+  `|| true`, so it does nothing there.
+
+### Keeping it out of git: `--local`
+
+The project's `settings.json` ends up with your home directory path in
+its permission entries. If you would rather not commit that:
+
+```bash
+./install.sh --scope project --project ~/code/myapp --local
+```
+
+This writes to `.claude/settings.local.json`, which is per machine and
+not committed. The trade-off: that file does not reach the project's
+git worktrees, so the hooks will not run there.
+
+### Every project on the machine
+
+```bash
+./install.sh
+```
+
+With no scope flag, the hooks go into `~/.claude/settings.json` and run
+in every project. Skip this if you want the tool in one project only.
+The doctor warns you when both your user file and a project file carry
+the hooks.
+
+### Check, update, uninstall
+
+- **Check:** `./install.sh --doctor` confirms every installed hook
+  still resolves. Add `--scope project --project <dir>` to check one
+  project.
+- **Update:** `git pull` in the clone. The install is a set of
+  symlinks, so the new scripts are live in your next session. Re-run
+  `./install.sh` only when [CHANGELOG.md](CHANGELOG.md) says a hook
+  changed.
+- **Uninstall one project:**
+  `./install.sh --uninstall --scope project --project ~/code/myapp`.
+  This strips only that project's settings file. The shared scripts,
+  skills, and signing key stay for your other projects.
+- **Uninstall everything:** `./install.sh --uninstall`. This removes
+  the links, strips only the entries it can prove are its own (after a
+  backup), and deletes the signing key. Details are in
+  [the reference](docs/reference.md#uninstall-details).
+
+A few install options you will rarely need:
+
+- Installing from a temporary path (`/tmp`, a CI scratch directory)
+  switches to copying the files, since links would dangle. Copies do
+  not update on `git pull`, so re-run the installer after pulling.
+- `--copy` and `--link` force one mode or the other.
+- `--model 'opus[1m]'` pins the model on a new machine.
+
+More in [install internals](docs/reference.md#install-internals).
+
+<a id="keeping-signed-handoffs-across-a-reinstall"></a>
+
+<details>
+<summary><strong>Reinstalling without losing your signed handoffs</strong></summary>
+
+A full `./install.sh --uninstall` deletes the signing key at
+`~/.claude/handoff_secret`, so that no key material is left behind by a
+tool you removed.
+
+- If a registered project is still wired, the key is kept, because
+  that project signs with it. The uninstall tells you so.
+  `--remove-secret` deletes it anyway.
+- If you are uninstalling only to reinstall (for example, to move from
+  every-project to one-project wiring), use
+  `./install.sh --uninstall --keep-secret`. Your existing handoffs keep
+  verifying.
+- Without `--keep-secret`, existing signed handoffs still load. Their
+  rules just load as reference text instead of binding rules, and
+  `/handoff` signs new ones with a fresh key.
+- A project-scope uninstall never removes the key.
+
+</details>
+
+<details>
+<summary><strong>Verifying <code>install.sh</code> if you download it on its own</strong></summary>
+
+`install.sh` is generated from the files in `install.d/` by
+`tools/build-install.sh`. CI rebuilds it and compares on every change,
+and it ships with a checksum.
+
+In a full clone, git already guarantees integrity. If you fetch
+`install.sh` by itself, fetch `install.sh.sha256` from the same tag and
+check it before running:
 
 ```bash
 shasum -a 256 -c install.sh.sha256
 ```
 
-A mismatch means a corrupted or tampered download: don't run it. (Both
-files travel the same channel, so this catches corruption and casual
-tampering, not a fully compromised host.)
+A mismatch means a corrupted or tampered download, so do not run it.
+Both files travel the same channel, which means this catches
+corruption and casual tampering, not a fully compromised host.
 
-### Using it
-
-Once installed, in a wired project:
-
-- **`/handoff`**: run at the end of a working session; writes the snapshot and fills in the "Notes from this session" prose block. Invoke at 30-50% context remaining, not at 5%.
-- **`/handoff-recover`**: run when a new session shows an `ACTION: RUN /handoff-recover` banner; reconstructs the notes a crashed or un-handed-off session never wrote.
-- **`/handoff-more`**: run in a fresh session to pull older handoffs into context, beyond the most recent one that auto-loads.
-
-Everything else (loading, per-turn backups, the context nudge) runs
-through hooks without you thinking about it.
-
-### Keeping signed handoffs across a reinstall
-
-A user-scope `./install.sh --uninstall` deletes the per-machine HMAC
-secret at `~/.claude/handoff_secret` (see [Uninstall
-details](docs/reference.md#uninstall-details)) so no key material is
-left behind by a tool you removed, unless a registered project is still
-wired: those projects sign with the same secret, so it is kept and the
-uninstall says so (`--remove-secret` deletes it anyway). If you are uninstalling only to
-reinstall (for example to move from user scope to `--scope project`)
-and have already-signed `handoff_current.md` files (or entries in
-`handoff_history/`) you want to keep verifying as binding rules, run
-`./install.sh --uninstall --keep-secret` instead: it skips that
-deletion. Without `--keep-secret`, existing signed handoffs still load
-fine, just as reference data instead of binding rules, and `/handoff`
-re-signs new ones under a fresh secret. A project-scope uninstall never
-removes the secret.
+</details>
 
 ### Migrating from the plugin (0.19 and earlier)
 
-Versions up to 0.19 also shipped as a Claude Code plugin, and 0.19.0 is
-the last version published as a plugin. That distribution is gone;
-`install.sh` is the only install path. To move a plugin install over:
+Versions up to 0.19 were also published as a Claude Code plugin. That
+is gone. `install.sh` is the only way to install now. To move over:
 
-1. Remove the plugin at the scope you installed it with. Run
-   `claude plugin list` to see that scope (the installer and
-   `./install.sh --doctor` also print the matching command while the
-   plugin is still installed). For a global install:
+1. Remove the plugin at the scope you installed it with.
+   `claude plugin list` shows the scope. For a global install:
 
    ```bash
    claude plugin uninstall claude-code-handoff@claude-code-handoff --scope user
    ```
 
-   For a per-project install, run it from inside the project directory,
-   since project and local scope act on the `.claude/` settings of the
-   directory you run the command in (use `--scope local` if you installed
-   with that):
+   For a per-project install, run it from inside the project (use
+   `--scope local` if that is how you installed it):
 
    ```bash
    cd <dir>
@@ -153,110 +249,88 @@ the last version published as a plugin. That distribution is gone;
    ./install.sh --scope project --project <dir>
    ```
 
-The HMAC secret is per machine (`~/.claude/handoff_secret`), and the
-plugin read the same file, so handoffs it signed keep verifying as
-binding rules after the switch. Until the plugin is gone, the installer
-and `./install.sh --doctor` say so: its hook commands differ from the
-installer's, so both sets would run on every event.
+The signing key is the same file the plugin used, so handoffs it
+signed keep verifying after the switch. Until the plugin is removed,
+the installer and `./install.sh --doctor` remind you, because both
+sets of hooks would otherwise run on every event.
 
-## Requirements
+## What it needs
 
-- `bash` and `jq`. If `jq` is not on PATH, the installer refuses to
-  install (`exit 1`) because the Stop hook, context nudge, and
-  `/handoff-recover` all depend on it at runtime. (`--uninstall` and
-  `--doctor` still work without `jq`.)
-- `git` — optional since 0.8.4. Outside a git worktree the snapshot
-  simply omits the git sections and the project directory becomes the
-  root; the installer runs no git at all.
-- `perl` — optional. The Stop hook and `/handoff-recover` use it to
-  strip transcript noise and fall back to `cat` when it is absent, so
-  the dumps are just noisier without it.
-- `openssl` — optional. Without it, handoffs aren't HMAC-signed and
-  the rules layer loads as reference data instead of binding; nothing
-  errors.
-- Tested in CI on Linux (bash 5) and macOS (bash 3.2, BSD userland);
-  both jobs are required to merge. The scripts handle BSD differences
-  like `flock` and `date`. Windows (Git Bash / WSL) is untested in CI.
+- **`bash` and `jq`.** The installer refuses to run without `jq`.
+- **Linux or macOS.** CI runs the tests on Linux (bash 5) and macOS
+  (bash 3.2 with the BSD tools), and both must pass. Windows through
+  Git Bash or WSL is untested.
+
+Three more tools are used when they are present:
+
+- **`git`:** outside a git repository the snapshot leaves out the git
+  sections and treats the project directory as the root.
+- **`openssl`:** without it handoffs are not signed, so standing rules
+  load as reference text instead of binding rules.
+- **`perl`:** without it the per-turn backups keep some transcript
+  noise that would otherwise be stripped.
 
 ## How it works
 
-Seven hooks drive it, written by the installer into the project's
-`.claude/settings.json` (or `.claude/settings.local.json` with `--local`,
-or `~/.claude/settings.json` for a user-scope install):
-`SessionStart` loads the latest handoff into a new session,
-`SessionEnd` and `PreCompact` write a mechanical git-state safety net
-before an ending or a compaction, `Stop` appends each turn to a
-backup and records context usage, `UserPromptSubmit` nudges you
-toward `/handoff` once usage crosses 30% of the window and again every 5
-points (or 100k tokens when the window size is unknown), and
-`PostCompact` resets those measurements so the freed window is
-treated as fresh, and `WorktreeRemove` salvages a removed git
-worktree's handoff and raw dumps into the main checkout (see
-"Worktree sessions" in the reference). Handoffs are signed with a per-machine HMAC key, so
-a cloned repo can't inject fake standing rules: only rules with a
-valid signature load as binding, everything else loads as inert
-reference text.
+The installer wires seven hooks into the project's settings file:
 
-See [docs/reference.md](docs/reference.md) for the full technical
-reference: hook internals, file formats, the signing design, and the
-optional status line.
+| Hook | What it does |
+|---|---|
+| `SessionStart` | Loads the latest handoff into the new session. |
+| `Stop` | Appends the finished turn to a backup and records context usage. |
+| `UserPromptSubmit` | Shows the nudge toward `/handoff` as context fills. |
+| `SessionEnd` | Safety net. Keeps a handoff you wrote, or writes a git-state snapshot if you never wrote one. |
+| `PreCompact` | The same safety net, just before a compaction. |
+| `PostCompact` | Resets the context measurements so the freed window counts as fresh. |
+| `WorktreeRemove` | Saves a removed worktree's handoff and turn backups into the main checkout. |
+
+The handoff itself is a Markdown file at
+`.claude/handoff_current.md` in your project. When a new handoff
+replaces one you wrote, the old one is archived in
+`.claude/handoff_history/`.
 
 ## Configuration
 
-Configuration is entirely through `HANDOFF_*` environment variables
-set in your shell rc file (`~/.bashrc`, `~/.zshrc`): how many old
-handoffs to keep, the context-window size the nudge uses, whether
-trusted rules are enabled, and more. Defaults work for a normal
-single-repo project; you only need to touch these for non-default
-setups (a shared substrate repo, a custom pinned-context path, tuning
-how aggressively the nudge fires).
+The defaults suit a normal single-repo project. Everything else is set
+through `HANDOFF_*` environment variables in your shell rc file
+(`~/.bashrc`, `~/.zshrc`), for example:
 
-See [docs/reference.md](docs/reference.md) for the full technical
-reference (hook internals, file formats, signing design, every
-environment variable) and
-[skills/handoff/README.md](skills/handoff/README.md) for the complete
-`/handoff` env-var list.
+- how many old handoffs to keep,
+- the context-window size the nudge assumes,
+- how eagerly the nudge fires,
+- whether trusted rules are enabled.
 
-## Updating, doctor, uninstall
-
-Symlink install means updating is just `git pull` in the clone (live next session, no
-re-install (re-run `./install.sh` only when
-[`CHANGELOG.md`](CHANGELOG.md) says a hook changed). Run
-`./install.sh --doctor` anytime to confirm every installed hook still
-resolves (add `--scope project --project <dir>` to check a project's
-wiring; it also warns when the user file and a project file both carry
-the hooks). `./install.sh --uninstall`
-removes the symlinks, strips only the entries it can prove are its own
-from the settings file for that scope (backup first), and deletes the per-machine HMAC
-secret — details in
-[docs/reference.md](docs/reference.md#uninstall-details).
-
-Installing from a volatile path (`/tmp`, CI scratch) auto-switches to
-copy mode; `--copy` / `--link` force it, and `--model 'opus[1m]'` pins
-the model on a new machine. See
-[docs/reference.md](docs/reference.md#install-internals).
+The variables are documented in
+[docs/reference.md](docs/reference.md) and in
+[skills/handoff/README.md](skills/handoff/README.md).
 
 ## Going deeper
 
-- [docs/reference.md](docs/reference.md) — full reference: the four
-  paths in detail, context tracking, status line internals, retention
-  edge cases, pinned context, trusted-rules design, install internals.
-- [docs/handoff-pattern.md](docs/handoff-pattern.md) — design
-  philosophy: why state lives on the filesystem and the handoff
-  carries only what it can't; the WRITE/READ discipline.
-- [skills/handoff/README.md](skills/handoff/README.md) — skill spec,
-  env vars, and limitations worth knowing — notably that Claude Code
-  can't force a session restart at a context threshold, so the human
-  keystroke is still required.
+- [docs/reference.md](docs/reference.md): the full reference. Each
+  path in detail, context tracking, the status line, retention,
+  pinned context, the signing design, and install internals.
+- [docs/handoff-pattern.md](docs/handoff-pattern.md): the thinking
+  behind it. Why state lives on the filesystem and the handoff carries
+  only what the filesystem cannot.
+- [skills/handoff/README.md](skills/handoff/README.md): the skill
+  itself, its environment variables, and its limits. The main one:
+  Claude Code cannot force a session restart at a context threshold,
+  so starting the new session is still up to you.
+- [PRIVACY.md](PRIVACY.md): what the tool reads and writes, and where.
 
-## Develop
+## Developing
 
-Edits land live (symlink install). Run the test suite with
-`./tests/run.sh` — dependency-free bash + git (tests needing
-`jq`/`perl` self-skip when absent). Each suite file is a standalone
-`tests/test_*.sh`. New changes ship with a test. If you change a hook
-command string or add a new hook/permission, update `CHANGELOG.md` so
-users know to re-run `./install.sh` after pulling.
+- A symlink install means your edits are live right away.
+- Run the tests with `./tests/run.sh`. They need only bash and git;
+  tests that need `jq` or `openssl` skip themselves when the tool is
+  missing.
+- Each test file is a standalone `tests/test_*.sh`. New changes ship
+  with a test.
+- If you change a hook command or add a hook or permission entry, say
+  so in `CHANGELOG.md`, so people know to re-run `./install.sh` after
+  pulling.
+- Before a release, run `tools/e2e_multi_session.sh` on the release
+  tree. See [the reference](docs/reference.md) for what it checks.
 
 ## License
 

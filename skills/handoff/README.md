@@ -174,10 +174,11 @@ Manual install:
 
    Adjust the permission paths for your username. Hook roles:
    - **`SessionStart`** runs `handoff_session_start.sh`, which cats
-     `.claude/handoff_current.md` and — if it has the unedited Notes
-     placeholder (auto-write, no /handoff was run) — also cats the
-     most-recent file from `.claude/handoff_history/` so the new
-     session has curated prose from the session before that. Adds a
+     `.claude/handoff_current.md` and, if it has the unedited Notes
+     placeholder (auto-write, no /handoff was run), also cats the
+     newest snapshot in `.claude/handoff_history/` whose Notes are
+     curated (failing that, the newest whose Rules are curated) so the
+     new session has curated prose from an earlier session. Adds a
      one-line pointer to the history dir when entries exist.
    - **`Stop`** makes the raw-dump backup incremental — fires after
      every assistant turn, appends to
@@ -201,9 +202,17 @@ Manual install:
      applies the reminder says the window is unknown, gives no
      percentage, and fires at 100,000 tokens instead.
    - **`SessionEnd`** runs `write_handoff.sh --if-curated`: a mechanical
-     git-state safety net that writes an auto handoff only when no curated
-     one exists, so a session that ends without `/handoff` still leaves
-     something to load.
+     git-state safety net, so a session that ends without `/handoff`
+     still leaves something to load. It writes an auto handoff when no
+     handoff exists or the current one has nothing curated. Curated
+     Notes are never replaced: a handoff this session curated is left
+     untouched, and one curated by an earlier session is kept and, when
+     the script can tell it predates this session, gets one line under
+     the Notes heading (`> **Later session, no /handoff**
+     (HANDOFF_LATER_SESSION sid=... t=...)`) naming this session and
+     its raw turn dump when one exists. An earlier session's handoff
+     whose only curated content is Rules fences is archived and
+     replaced, with its verified fences carried into the new one.
    - **`PreCompact`** fires the same safety net as `SessionEnd`
      before auto or manual compaction — compaction destroys the
      conversation just like an ending, and `SessionEnd` doesn't
@@ -234,16 +243,18 @@ Manual install:
    > the user mentions context, meter, percentage, or "getting long,"
    > immediately offer to run /handoff; (c) when the
    > `handoff_ctx_check.sh` UserPromptSubmit hook injects its
-   > `<system-reminder>` (real transcript-size measurement crossed
+   > `<system-reminder>` (real context-usage measurement crossed
    > the threshold), surface it as a one-line passive mention — no
    > question mark, no "want me to?" — and continue with the user's
    > prompt. The user's meter is still the source of truth for (a)
    > and (b); the hook is the only legitimate numeric signal.
 
-6. First time you invoke `/handoff` in a project, the script
-   self-bootstraps `.claude/handoff_current.md` into that project's
-   `.gitignore` (the file is regenerated, not source). One-line
-   stderr notice the first time; idempotent after.
+6. First time you invoke `/handoff` in a git project, the script
+   self-bootstraps `.claude/handoff_current.md`,
+   `.claude/handoff_history/`, `.claude/handoff_backups/` and an
+   in-repo pinned file into that project's `.gitignore` (the files are
+   generated, not source). One stderr notice per entry added;
+   idempotent after.
 
 ## Use
 
@@ -256,10 +267,12 @@ The two write paths capture different things:
   thumb: invoke at 30-50% context remaining, not at 5% — quality
   degrades well before the meter runs out, and you want the
   reflection to happen while the model is still sharp.
-- **`SessionEnd` hook (automatic, safety net):** fires `write_handoff.sh`
-  silently on clean session exit (`/exit`, Ctrl-D, etc.). Captures
-  git state only — the "Notes from this session" block stays as a
-  placeholder because no model is in the loop. Doesn't fire on
+- **`SessionEnd` hook (automatic, safety net):** fires
+  `write_handoff.sh --if-curated` silently on clean session exit
+  (`/exit`, Ctrl-D, etc.). When there are no curated Notes to keep it
+  captures git state only: the "Notes from this session" block stays as
+  a placeholder because no model is in the loop. Curated Notes are left
+  in place (see the `SessionEnd` hook role above). Doesn't fire on
   SIGKILL or a closed terminal; the `Stop` hook's per-turn raw-dump
   backup covers that case.
 
@@ -293,14 +306,16 @@ export HANDOFF_SUBSTRATE_NAME="_shared"
 # Default: empty
 export HANDOFF_SUBSTRATE_INFLIGHT_DIRS="rfcs proposals"
 
-# Skip the auto-add of .claude/handoff_current.md and
-# .claude/handoff_history/ to project .gitignore.
+# Skip the auto-add of .claude/handoff_current.md,
+# .claude/handoff_history/, .claude/handoff_backups/ and the in-repo
+# pinned file to project .gitignore.
 # Default: unset (bootstrap runs once per project)
 export HANDOFF_NO_GITIGNORE_BOOTSTRAP=1
 
 # Number of older handoffs to retain in .claude/handoff_history/.
-# Each /handoff or SessionEnd auto-write rotates the previous
-# handoff_current.md into the history dir, then prunes to the newest N.
+# A /handoff or safety-net write that replaces handoff_current.md first
+# rotates the previous one into the history dir (a previous one with
+# nothing curated in it is deleted instead), then prunes to the newest N.
 # Default: 5. Set to 0 to disable retention (overwrite-in-place like
 # pre-0.3.0). Each handoff is a few KB, so raising this further is
 # cheap if you want a sibling re-entering the repo weeks later to be
@@ -320,14 +335,16 @@ export HANDOFF_PINNED_FILE=.claude/handoff_pinned.md
 # Inert when the file is absent.
 export HANDOFF_SYSTEMLOG_FILE=SYSTEM_LOG.md
 
-# Disable the SessionStart auto-include of the most-recent history
-# entry when handoff_current.md has placeholder-only Notes.
+# Disable the SessionStart auto-include of the newest curated history
+# entry when handoff_current.md has placeholder-only Notes (and the
+# sources of the auto-rebuild when it is missing or corrupted).
 # Default: unset (fallback enabled).
 export HANDOFF_SS_DISABLE_FALLBACK=1
 
 # Disable the SessionStart "ACTION: RUN /handoff-recover" banner that
-# fires when handoff_current.md has placeholder-only Notes (previous
-# session ended without /handoff). Default: unset (banner enabled).
+# fires when handoff_current.md has placeholder-only Notes (a session
+# ended without /handoff and there were no curated Notes to keep) or is
+# missing or corrupted. Default: unset (banner enabled).
 export HANDOFF_SS_DISABLE_RECOVER=1
 
 # --- Context-usage system-reminder hook (handoff_ctx_check.sh) ---
@@ -390,8 +407,8 @@ export HANDOFF_CTX_MAX_FLAGS=0
 # Reminder behavior when the threshold trips. "suggest" (default) emits a
 # passive system-reminder for the assistant to flag a /handoff moment to
 # you. "act" switches to model-directed text — the assistant wraps up the
-# current step and invokes /handoff itself without asking. Pairs well with
-# a lower HANDOFF_CTX_THRESHOLD_PCT (~30) so it has runway.
+# current step and invokes /handoff itself without asking. The default
+# HANDOFF_CTX_THRESHOLD_PCT (30) leaves it runway.
 export HANDOFF_CTX_REMINDER_MODE=suggest
 
 # Ignore the statusline cache (.ctx_sl_*) and restore the pre-statusline
@@ -477,8 +494,9 @@ keep it under `.claude/` so it sits with other Claude artifacts.
 ### Disable the auto-loaded label
 
 The SessionStart hook prepends `## Auto-loaded handoff from previous
-session` so the assistant knows what it's reading. To omit, edit the
-hook command in `settings.json` to drop the `echo` lines.
+session` so the assistant knows what it's reading. There is no setting
+for it: the line is an `echo` in `bin/handoff_session_start.sh`, so
+omitting it means editing that script.
 
 ## Limitations (worth knowing)
 
@@ -517,5 +535,6 @@ hook command in `settings.json` to drop the `echo` lines.
 
 ## License
 
-Whatever license your dotfiles use. The author wrote this in a
-collaboration with Claude; copy, modify, share freely.
+MIT (the `LICENSE` file at the root of the claude-code-handoff repo).
+The author wrote this in a collaboration with Claude; copy, modify,
+share freely.

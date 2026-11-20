@@ -1,6 +1,6 @@
 ---
 name: handoff-recover
-description: Compose a retroactive curated handoff when the previous session ended without invoking /handoff. Requires the scripts/hooks installed by this repo's ./install.sh — not a prompt-only skill. Triggered by the SessionStart "ACTION: RUN /handoff-recover" banner (emitted when handoff_current.md still has the placeholder Notes block) or by explicit /handoff-recover. Reads the previous session's raw per-turn dump under .claude/handoff_backups/ and the most recent curated handoff under .claude/handoff_history/, then writes a retroactive Notes block into handoff_current.md so the recovered context persists.
+description: Compose a retroactive curated handoff when the previous session ended without invoking /handoff. Requires the scripts/hooks installed by this repo's ./install.sh (not a prompt-only skill). Triggered by the SessionStart "ACTION: RUN /handoff-recover" banner (emitted when handoff_current.md has the placeholder Notes block, or is missing or corrupted) or by explicit /handoff-recover. Reads the previous session's raw per-turn dump under .claude/handoff_backups/ and the most recent curated handoff under .claude/handoff_history/, then writes a retroactive Notes block into handoff_current.md so the recovered context persists.
 ---
 
 # /handoff-recover — retroactive handoff composition
@@ -12,11 +12,27 @@ description: Compose a retroactive curated handoff when the previous session end
 > None of that ships with this file alone; run
 > `./install.sh --scope project --project <dir>` from that repo first.
 
-The previous session ended without running `/handoff` — crashed,
-killed, terminal closed, or just never invoked. `SessionEnd` wrote a
-safety-net snapshot, so `handoff_current.md` has git state but no
-curated Notes. The SessionStart hook detected this and printed an
-ACTION banner telling you to invoke this skill.
+The previous session ended without running `/handoff` (crashed,
+killed, terminal closed, or just never invoked) and there were no
+curated Notes to keep. `SessionEnd` wrote a safety-net snapshot, so
+`handoff_current.md` has git state and the placeholder Notes block.
+The SessionStart hook detected this and printed an ACTION banner
+telling you to invoke this skill. The hook prints the same banner when
+`handoff_current.md` is missing or corrupted, after its best-effort
+auto-rebuild.
+
+The banner does not fire when a later session ended without `/handoff`
+over a handoff whose Notes were already curated. The safety net keeps
+that doc and adds one line per such session under the Notes heading:
+
+```
+> **Later session, no /handoff** (HANDOFF_LATER_SESSION sid=<id> t=<epoch>): ...
+```
+
+The line names the later session and its raw turn dump
+(`.claude/handoff_backups/handoff_raw_<id>.md`) when one exists, and
+says no dump was found otherwise. For an explicit `/handoff-recover` on
+such a doc, see "Curated Notes with pointer lines" below.
 
 Note: since the `PreCompact` hook joined the safety net, a
 placeholder can also be written MID-session (an uncurated session
@@ -171,6 +187,11 @@ final turns.
    loading the OLDER of a same-second pair. `bin/write_handoff.sh` and
    `bin/handoff_session_start.sh` pin their equivalents for this reason.
 
+   This command prints the newest snapshot of any kind. The hook's own
+   pick is the newest one whose Notes are curated, so if the file you
+   get still has the placeholder Notes block, go down the sorted list
+   to the first one that does not.
+
    Use it as scaffolding context — it tells you what the session
    *before* the lost one had been working on, which often clarifies
    what the lost session's session-of-its-own-day was about.
@@ -271,6 +292,24 @@ final turns.
     retroactive Notes in context and the tree reconciled, you have a
     working baseline.
 
+## Curated Notes with pointer lines
+
+If `/handoff-recover` is invoked on a `handoff_current.md` whose Notes
+are curated and carry one or more `HANDOFF_LATER_SESSION` lines, there
+is no placeholder to replace, and curated Notes are never replaced or
+removed. Instead of steps 1 to 6:
+
+1. Keep the existing curated Notes and every pointer line exactly as
+   they are.
+2. For each pointer line that names a raw turn dump, read that file if
+   it still exists.
+3. Add what you recovered as a clearly labelled subsection under the
+   Notes heading, below the existing curated text (e.g.
+   `### Recovered by /handoff-recover: session <sid>`). If a line names
+   no dump, or the dump is gone, say so there instead of guessing.
+4. Re-sign with the restamp block from step 7, then continue from
+   step 8.
+
 ## What gets persisted to disk
 
 The recovered Notes go into `handoff_current.md`'s Notes block,
@@ -278,13 +317,15 @@ replacing the placeholder. When the current session later invokes
 `/handoff`, that file rotates into `handoff_history/` with the
 retroactive Notes intact, so future sessions can see the recovery.
 
-The git-state snapshot above the Notes section is from the current
-session's SessionStart (the `SessionEnd` auto-write), not the
-previous session. That's a known caveat: the snapshot's HEAD/commits
-reflect "state at the end of the lost session" (which is what got
-captured), but the timestamp is the safety-net's write time, not
-the lost session's actual end. Don't try to backdate it — the Notes
-prose makes the recovery context clear without rewriting metadata.
+The git-state snapshot above the Notes section was written by the
+previous session's `SessionEnd`/`PreCompact` safety net, not by the
+current session (SessionStart only reads the file). That's a known
+caveat: the snapshot's HEAD/commits reflect "state at the end of the
+lost session" (which is what got captured), but the timestamp is the
+safety net's write time, not the lost session's actual end. In a doc
+kept with pointer lines, the snapshot is from the curated write. Don't
+try to backdate it. The Notes prose makes the recovery context clear
+without rewriting metadata.
 
 ## Raw dump not available
 
