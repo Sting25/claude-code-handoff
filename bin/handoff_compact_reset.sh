@@ -13,11 +13,17 @@
 # Stop fire repopulate real post-compact numbers.
 #
 # What is deleted, and why each one:
-#   .ctx_<sid>             — byte size. LOAD-BEARING delete: ctx-check gates
-#                            on this file ("nothing recorded yet" -> exit 0),
-#                            so removing it guarantees NO nudge can fire in
-#                            the gap between compaction and the next Stop
-#                            fire — not even off a stale estimate.
+#   .ctx_<sid>             : byte size, pre-compact. Removing it takes
+#                            ctx-check off the byte ledger, so no nudge
+#                            can fire off a stale byte estimate. It no
+#                            longer silences ctx-check by itself (that
+#                            was the old "nothing recorded yet" -> exit 0
+#                            gate): with the file absent ctx-check uses
+#                            the token ledger, and the gap until the next
+#                            assistant turn stays silent because it
+#                            ignores transcript usage older than the
+#                            compaction boundary and .ctx_sl_<sid> is
+#                            deleted below.
 #   .ctx_tokens_<sid>      — pre-compact usage; wrong by definition now.
 #   .ctx_flagged_<sid>     — the byte-ledger nudge cap/cooldown; clearing it
 #                            re-arms one nudge for the freed window (the

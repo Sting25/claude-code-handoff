@@ -28,7 +28,8 @@ env-var list, see [skills/handoff/README.md](../skills/handoff/README.md).
 
 ## The four paths in detail
 
-Three slash commands plus one automatic safety net, doing different jobs:
+Three slash commands plus two automatic paths (the auto-rebuild and the
+`SessionEnd` safety net), doing different jobs:
 
 - **`/handoff` (preferred, you invoke it at session end):** writes
   the snapshot AND asks the assistant to append a "Notes from this
@@ -100,7 +101,11 @@ Three slash commands plus one automatic safety net, doing different jobs:
   the moment it was curated. Only a stale doc whose Notes are still the
   placeholder and whose `## Rules` fences were curated is refreshed
   (issue #125): `--if-curated` falls through to a normal write, and
-  that doc is archived into `.claude/handoff_history/`, never deleted.
+  that doc is archived into `.claude/handoff_history/`. The one doc
+  removed without an archive copy is a carried copy: its Notes are the
+  placeholder and its only curated content is fences carried from an
+  earlier doc, which this refresh carries forward again (see
+  [Trusted rules](#trusted-rules-when-the-fences-actually-bind)).
   Two limits keep that refresh from ever losing content: with
   `HANDOFF_HISTORY_KEEP=0` (archiving disabled) the doc is preserved
   as before, and when its provenance verifies, its `## Rules` fences
@@ -165,9 +170,12 @@ above it.
 set, else from the status line's `context_window_size` while that cache is
 live, else from the session's own model id: a `[1m]` suffix means 1M, an id
 matching `HANDOFF_CTX_1M_MODEL_REGEX` (if you set it) means 1M, and
-otherwise a built-in table checked against the model docs decides (Claude
-5 family models and Opus 4.7 and later: 1M; 4.5 models: 200k;
-`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` is honored). Opus 4.6 and Sonnet 4.6 run
+otherwise a built-in table checked against the model docs decides (1M:
+Fable 5, 5.1 and 5.2, Mythos 5, 5.1, 5.2 and Preview, Opus 4.7, 4.8, 5
+and 5.5, Sonnet 5 and 5.5, Haiku 5.5; 200k: Opus, Sonnet and Haiku 4.5;
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` is honored). Only a listed id matches,
+so one the table does not list (`claude-opus-5-1`, for example) leaves
+the window unknown. Opus 4.6 and Sonnet 4.6 run
 at 200k or 1M depending on the variant picked, which the model id does not
 record, so they are not in the table. When nothing applies, the window is
 **unknown**: the reminder says so, prints no percentage, and the absolute
@@ -265,11 +273,16 @@ healthy, both throttled to once per session:
 
 - **Detector A** (`handoff_ctx_check.sh`, same session): counts
   `UserPromptSubmit` fires in `.ctx_prompts_<session_id>`. Once the
-  count passes `HANDOFF_HEALTH_PROMPTS` (default `3`, clamped to a
+  count reaches `HANDOFF_HEALTH_PROMPTS` (default `3`, clamped to a
   minimum of `2` — at `0` or `1` the very first prompt of every
   session would already meet the threshold, before a working Stop
   hook has had any chance to fire) with **both** `.ctx_<session_id>`
-  and `.ctx_model_<session_id>` still absent, it warns once. Checking
+  and `.ctx_model_<session_id>` still absent, it reads the transcript
+  and warns once if this session has also completed at least that many
+  turns (main-chain assistant lines that ended with `end_turn`, issue
+  #159). A prompt whose turn never finished (an API error, an
+  interrupt, a queued prompt) is not evidence of a dead Stop hook, and
+  a missing or unreadable transcript means no warning. Checking
   both, not just the byte ledger file, matters across compaction:
   `handoff_compact_reset.sh` clears `.ctx_<session_id>` on every
   `PostCompact` fire but deliberately keeps `.ctx_model_<session_id>`,
@@ -361,7 +374,9 @@ fire on it. Two hooks cover it:
 
 Only the latest snapshot is named `handoff_current.md`. Each new
 write rotates the previous one into `<repo>/.claude/handoff_history/`,
-filename stamped with the snapshot's own timestamp. The last 5 are
+filename stamped with the snapshot's own timestamp (a previous one that
+was never curated, or whose only curated content is carried fences the
+new write carries again, is replaced without an archive copy). The last 5 are
 kept (override via `HANDOFF_HISTORY_KEEP=N`; `0` means keep no history
 at all, which also disables rotation — see the note below before
 setting it). So the on-disk layout looks like:
@@ -462,7 +477,8 @@ session that wrote them even when nothing ever goes wrong:
 `.ctx_nojq_<id>` (once-per-session jq-missing warning), `.ctx_prompts_<id>`
 and `.ctx_health_<id>` (Stop-hook health-warning counters and throttles,
 see [Stop-hook health warnings](#stop-hook-health-warnings)),
-`.ss_health_<id>` (the statusline's own health throttle), and
+`.ss_health_<id>` (the `SessionStart` hook's once-per-session throttle
+for its retrospective Stop-hook health warning, detector B), and
 `.session_started_<id>` (the cross-session overwrite guard's origin
 marker, see [Cross-session overwrite guard](#cross-session-overwrite-guard)).
 
@@ -781,6 +797,7 @@ After `/handoff` (or any session exit) you get
 **Generated:** 2026-05-12 14:59 UTC
 
 <!-- HANDOFF_ROOT: /path/to/myproject in_git=1 -->
+<!-- HANDOFF_WRITER: sid=0b6f2c1e-7d7a-4c55-9a51-3f2f6f0f8a10 t=1778597940 -->
 
 _(Twelve or so lines of auto-written preamble follow here, explaining
 what wrote this file, where it lives, and how rotation works. Elided in
@@ -859,7 +876,10 @@ copied `.claude/`) announces itself instead of silently loading a
 snapshot that describes somewhere else. (One copy is expected and named
 as such: a doc copied from the main checkout into one of its linked
 worktrees, see "Linked git worktrees" under "Where the handoff files
-live".) The `SessionEnd` hook
+live".) The `HANDOFF_WRITER` line under it names the session that wrote
+or last restamped the doc and when (see
+[Cross-session overwrite guard](#cross-session-overwrite-guard)); it is
+absent when no session id could be resolved. The `SessionEnd` hook
 leaves the Notes block as a placeholder. Running `/handoff` is what
 fills it in, so for any session that involved real discussion, `/handoff`
 is the preferred path; `SessionEnd` is the safety net for unplanned exits.
@@ -868,8 +888,8 @@ is the preferred path; `SessionEnd` is the safety net for unplanned exits.
 
 These are implemented and supported, but deliberately kept out of the
 README's configuration block — you should not need any of them for a
-normal install. They are listed here so nothing in the code is
-undocumented.
+normal install. They are listed here so every variable meant to be set
+is documented; internal heading and marker strings are not listed.
 
 **`CLAUDE_HOME`** — install target, default `$HOME/.claude`. Everything
 the installer writes goes under it, and `handoff_secret_path` resolves
@@ -956,6 +976,43 @@ create a temp buffer to trim into (e.g. `TMPDIR` points at a missing
 directory), it says so on the first line and falls back to untrimmed
 output instead of silently disabling trimming.
 
+**`HANDOFF_SS_DISABLE_FALLBACK`** (default unset). Set to `1` and the
+`SessionStart` hook never auto-includes a history snapshot when the
+current doc's Notes are the placeholder. The auto-rebuild for a missing
+or corrupted doc then loads no sources either (its warning and the
+`/handoff-recover` banner still print).
+
+**`HANDOFF_SS_DISABLE_RECOVER`** (default unset). Set to `1` and the
+`SessionStart` hook never prints the `ACTION: RUN /handoff-recover`
+banner, neither for a placeholder doc nor after an auto-rebuild. The
+history fallback still loads.
+
+**`HANDOFF_STDIN_TIMEOUT`** (default `2`, minimum `1`): whole seconds
+each hook script and `write_handoff.sh` wait for the first byte of a
+hook payload on stdin before going on without one. A value that is not
+1 to 4 digits falls back to `2`. For `write_handoff.sh` a timeout means
+the write proceeds as if no payload came.
+
+**`HANDOFF_INFLIGHT_DIRS`** (default `docs`): space-separated
+subdirectories of the project whose untracked or modified `.md` files
+are listed in the handoff's "In-flight" sections, for example
+`"docs design rfcs"`.
+
+**`HANDOFF_SUBSTRATE_NAME`** (default empty): name of a sibling git
+repo (a directory next to the project root) to snapshot in the same
+handoff, under a `## Substrate:` heading. When it is set but no git repo
+is found there, the write says so on stderr and skips that snapshot.
+
+**`HANDOFF_SUBSTRATE_INFLIGHT_DIRS`** (default empty): space-separated
+subdirectories of the substrate repo to scan for in-flight `.md` files.
+Only used when `HANDOFF_SUBSTRATE_NAME` resolves to a repo.
+
+**`HANDOFF_NO_GITIGNORE_BOOTSTRAP`** (default unset). Set to `1` and
+neither `write_handoff.sh` nor the Stop hook adds the handoff paths
+(`.claude/handoff_current.md`, `.claude/handoff_history/`,
+`.claude/handoff_backups/`, and the pin file) to the project's
+`.gitignore`; ignoring them is then up to you.
+
 ### Test/debug overrides
 
 ```bash
@@ -1035,8 +1092,11 @@ settings.json (other hooks, theme, etc.) are left untouched.
 
 Requires `jq`. If `jq` is not on PATH, the installer refuses to install
 (`exit 1`) because the Stop hook, context nudge, and `/handoff-recover`
-all depend on it at runtime. (The `--uninstall` and `--doctor` modes still
-work without `jq`.)
+all depend on it at runtime. (`--doctor` still runs without `jq` and
+reports it as `BROKEN`. `--uninstall` completes without `jq` only when the
+settings file is absent or empty; when the file has content it prints the
+entries to remove by hand, removes nothing and exits 1, see
+[Uninstall details](#uninstall-details).)
 
 ### Install scope: user vs. project
 
@@ -1049,8 +1109,8 @@ switches the target to `.claude/settings.local.json`. The tracked
 `settings.json` is the default because `settings.local.json` is
 gitignored and per checkout, so it is absent from git worktrees of the
 project; a clone without this install is unaffected, since every hook
-command ends in `2>/dev/null || true` and simply no-ops. One thing the
-tracked file does carry: the seven `permissions.allow` entries hold the
+command discards stderr and ends in `|| true`, so it simply no-ops. One
+thing the tracked file does carry: the seven `permissions.allow` entries hold the
 installer's absolute home path (for example
 `Bash(bash /Users/you/.claude/bin/write_handoff.sh)`), so committing the
 file publishes that path. `--local` keeps it out of git, at the cost of
@@ -1393,7 +1453,13 @@ concurrency) is listed in #203.
 ├── tests/                         # dependency-free bash test suite (./tests/run.sh)
 ├── install.sh                     # GENERATED: symlink + settings.json patcher (built from install.d/*.sh — do not edit directly)
 ├── install.sh.sha256              # GENERATED: sha256 of install.sh, for a future curl|bash consumer to verify
+├── .github/workflows/ci.yml       # CI: tests (Linux, macOS), shellcheck, version sync, install.sh drift, and smaller gates
+├── .gitattributes                 # forces LF line endings on *.sh
+├── .gitignore
+├── .shellcheckrc                  # shellcheck settings shared by CI and local runs
 ├── CHANGELOG.md
 ├── LICENSE                        # MIT
-└── README.md
+├── PRIVACY.md                     # privacy statement
+├── README.md
+└── VERSION                        # the current version, the single source of truth for releases
 ```

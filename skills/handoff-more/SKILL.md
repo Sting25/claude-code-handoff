@@ -14,8 +14,9 @@ description: Pull older handoffs from .claude/handoff_history/ into the current 
 
 The `SessionStart` hook auto-loads `handoff_current.md` (the most
 recent handoff). This skill pulls in the older snapshots that
-`write_handoff.sh` rotated into `<repo>/.claude/handoff_history/`
-before each new write.
+`write_handoff.sh` archived in `<repo>/.claude/handoff_history/` when
+a later write replaced them. (A handoff with nothing curated in it is
+deleted on replacement, not archived.)
 
 ## When to invoke
 
@@ -56,7 +57,12 @@ before each new write.
 
 2. Read each retained snapshot, newest first. The default retention
    is 5 (configurable via `HANDOFF_HISTORY_KEEP` in the user's shell),
-   so this is normally 1–5 files. Use the `Read` tool on each.
+   so this is normally 1–5 files. There can be more: pruning never
+   removes the newest snapshot with curated Notes, the newest with
+   curated Rules, or a file not named `handoff_<date>_<time>.md`. Read
+   only the `handoff_*.md` files directly in the directory; the
+   `worktrees/` subdirectory holds handoffs and raw dumps salvaged
+   from removed git worktrees. Use the `Read` tool on each.
 
 3. Acknowledge in one line that older handoffs are now in context
    (e.g. "Loaded 3 older handoffs from

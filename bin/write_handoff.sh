@@ -5,20 +5,32 @@
 # last HANDOFF_HISTORY_KEEP retained — default 5, override via env).
 # Prints the absolute path of the written handoff to stdout.
 #
-# Triggers: /handoff skill, SessionEnd hook, or manual invocation.
+# Triggers: /handoff skill, SessionEnd and PreCompact hooks, or manual
+# invocation.
 # Auto-loaded by the next session via the SessionStart hook in the settings
 # file the installer patched (user or project scope, see the header below).
 #
 # Flags:
 #   --if-curated           Skip (no rotation, no write) if handoff_current.md
-#                          already contains curated Notes content (i.e. the
-#                          /handoff skill ran and replaced the placeholder
-#                          block). The SessionEnd hook passes this so the
+#                          already contains curated content: curated Notes
+#                          (the /handoff skill ran and replaced the
+#                          placeholder block) or curated Rules fences. The
+#                          SessionEnd and PreCompact hooks pass this so the
 #                          safety-net write only fires when there's no real
-#                          curated content to preserve. Detection is by the
-#                          presence/absence of the HANDOFF_PLACEHOLDER
-#                          sentinel; an unedited handoff carries the
-#                          sentinel, a curated one does not.
+#                          curated content to preserve. Notes detection is
+#                          position-scoped: the HANDOFF_PLACEHOLDER sentinel
+#                          counts only as the first non-blank line under
+#                          the Notes heading (handoff_is_unedited_placeholder).
+#                          Two exceptions for a STALE curated doc (written
+#                          by an earlier session before this one started,
+#                          HANDOFF_HISTORY_KEEP > 0): curated Notes are
+#                          kept and one "Later session" pointer line is
+#                          added under the Notes heading (#235); placeholder
+#                          Notes with curated Rules fall through to a normal
+#                          write that carries verified Rules forward (#125).
+#                          A payload reason in
+#                          HANDOFF_SESSIONEND_SKIP_REASONS also skips (see
+#                          "Reason-aware safety net" below).
 #   --if-stale-by SECONDS  DEPRECATED (since v0.5.0). The numeric argument
 #                          is ignored; this is now treated as an alias for
 #                          --if-curated. Slated for removal in a future
@@ -1413,9 +1425,13 @@ if (( IF_CURATED )); then
       # asking whether the doc predates THIS session: if its HANDOFF_WRITER
       # marker names an earlier session that finished before this one even
       # started, this session never curated it (there was nothing to
-      # preserve from this session's own work) and it's safe to fall
-      # through to a normal write, which rotates the stale curated doc into
-      # handoff_history/ rather than deleting it.
+      # preserve from this session's own work). Since #235 what happens to
+      # a stale doc depends on its Notes (decided further down): curated
+      # Notes are kept in place with a pointer line; only a doc whose Notes
+      # are the placeholder (curated Rules alone) falls through to a normal
+      # write, which rotates it into handoff_history/ (or, for a
+      # carried-only copy whose Rules are carried again, deletes it: see
+      # rotate_existing_handoff).
       #
       # All of the following must be known and unambiguous, or we keep
       # today's behavior (preserve): an unreadable signal must fail open
@@ -1469,10 +1485,10 @@ if (( IF_CURATED )); then
       # the whole doc, via the provenance lib). Anything less (no lib, no
       # openssl, no secret, tracked, tampered, planted, trust disabled)
       # carries nothing: copying an unverified doc's fences into a doc this
-      # run is about to SIGN would launder them into the binding tier. The
-      # Notes are never carried: they stay in history and load via the
-      # fallback as data. Also requires can_sign: an unsigned new doc could
-      # not make them bind anyway.
+      # run is about to SIGN would launder them into the binding tier.
+      # Notes are never carried, and since #235 there are none to carry:
+      # this point is reached only with placeholder Notes. Also requires
+      # can_sign: an unsigned new doc could not make them bind anyway.
       if (( rules_curated )) && can_sign \
          && type handoff_provenance_ok >/dev/null 2>&1 \
          && handoff_provenance_ok "$handoff_path" "$repo_root" "$handoff_relpath"; then

@@ -1,8 +1,12 @@
 # install.sh split — v0.14.0 design
 
-> Status: PROPOSED design note, written 2026-08-10 during the v0.13.0 release
-> stabilization. Implementation is v0.14.0 work — do NOT land any of this on
-> `release/v0.13.0`. `bin/write_handoff.sh` is explicitly EXCLUDED from any
+> Status: HISTORICAL design note, written 2026-08-10 during the v0.13.0 release
+> stabilization, and since implemented: `install.d/`, `tools/build-install.sh`,
+> `install.sh.sha256`, the `install-drift` CI job and
+> `tests/test_install_build_drift.sh` all exist. The text below is kept as
+> written, so "PROPOSED" marks what was proposed then, and its line counts,
+> test counts and `ci.yml` line references describe the tree at the time of
+> writing, not today's. `bin/write_handoff.sh` is explicitly EXCLUDED from any
 > split by user decision.
 
 Two load-bearing findings shaped this plan:

@@ -30,9 +30,10 @@ nothing gets lost across the restart boundary.
      directories (default: `docs/`; configurable via `HANDOFF_INFLIGHT_DIRS`)
    - The "verify state matches reality" command block
    - Before overwriting `handoff_current.md`, the script rotates the
-     previous one into `.claude/handoff_history/` and prunes to the
+     previous one into `.claude/handoff_history/` (a previous one with
+     nothing curated in it is deleted instead) and prunes to the
      last `HANDOFF_HISTORY_KEEP` (default 5). The next session's
-     SessionStart hook auto-includes the most recent history entry
+     SessionStart hook auto-includes the newest curated history entry
      if the current handoff has no curated Notes; `/handoff-more` lets
      a future session pull more of the history into context on demand.
    (Auto-compaction is also checkpointed: a `PreCompact` hook fires
@@ -77,7 +78,7 @@ nothing gets lost across the restart boundary.
    ```
    The `</dev/null` matters: the Bash tool's stdin is an open socket that
    never sends EOF, and the script reads an optional hook payload from
-   stdin. Installs from 0.19.1 on bound that read; older ones hang on it.
+   stdin. Installs from 0.20.0 on bound that read; older ones hang on it.
    If it prints MISSING, **stop here** — tell the user to clone
    https://github.com/Sting25/claude-code-handoff and run `./install.sh`,
    then re-invoke `/handoff`. Do NOT attempt to
@@ -381,7 +382,7 @@ treat it as an explicit cue. Immediately offer:
 If they confirm, invoke this skill. Don't try to estimate the number
 yourself; the user has the meter, the user is the source of truth.
 
-### Trigger 3: transcript-size system-reminder
+### Trigger 3: context-usage system-reminder
 
 The `handoff_ctx_check.sh` `UserPromptSubmit` hook measures context
 usage each turn and emits a `<system-reminder>` at 30% of the context
@@ -411,8 +412,8 @@ itself states which case applies.
 ### What NOT to trigger on
 
 - A fabricated percentage. The assistant does not have access to the
-  number directly; the only real numeric signal is the size from
-  Trigger 3.
+  number directly; the only real numeric signal is the measurement
+  from Trigger 3.
 - Mid-task interruption. Always wait for a clean boundary, even if a
   user signal lands mid-track — finish the in-flight edit, then offer.
 - Repeated asks at every tiny boundary. One offer per substantive

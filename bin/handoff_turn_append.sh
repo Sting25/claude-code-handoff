@@ -12,12 +12,18 @@
 # (when context is saturated, generating the dump in one shot truncates).
 #
 # Guards against duplication:
-#   - A per-session lockfile (flock) serializes concurrent Stop hook fires.
+#   - A per-session lock serializes concurrent Stop hook fires: flock where
+#     it exists, a mkdir lock where it does not (macOS).
 #   - A cursor file tracks how many transcript lines we've already processed,
 #     so the same turn never gets appended twice.
 #   - Recurring noise tags Claude Code re-injects each turn (system-reminder,
-#     command-name, command-message, command-args, local-command-stdout) are
-#     stripped from user-message content before appending.
+#     command-name, command-message, command-args, local-command-stdout,
+#     local-command-stderr) are stripped from user-message content before
+#     appending.
+#
+# Also records this turn's context measurements beside the dump for
+# handoff_ctx_check.sh: .ctx_<session_id> (transcript bytes),
+# .ctx_tokens_<session_id> and .ctx_model_<session_id>.
 #
 # Keeps only the 3 newest handoff_raw_*.md files in the backup dir (plus
 # their cursor files). Pruning is per-repo.
