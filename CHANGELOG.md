@@ -12,6 +12,9 @@ are appended).
 
 ## [Unreleased]
 
+### Changed
+- **Curated Notes are no longer replaced by a placeholder when a later session ends without `/handoff` (#235).** The `SessionEnd`/`PreCompact` safety net (`write_handoff.sh --if-curated`) used to treat a curated `handoff_current.md` as stale once a newer session ended without curating: it archived the doc and left a placeholder as the current handoff. Desktop sub-sessions and `/btw` forks are such sessions, so they displaced Notes the user had just written. Now a doc with curated Notes stays in place, and the safety net adds one line under the Notes heading (`> **Later session, no /handoff** (HANDOFF_LATER_SESSION sid=... t=...)`) naming the later session and its raw turn dump when one exists. One line per session, however often its hooks fire. The `HANDOFF_WRITER` marker is unchanged, so the author's next `/handoff` is not refused. A signed doc is re-signed only if its signature verified first; one that does not verify is left byte for byte as it was. With `HANDOFF_HISTORY_KEEP=0` the doc is kept without the pointer line, as before. The stale refresh from #125 (archive the doc, carry verified `## Rules` fences into a fresh one) still applies to a doc whose Notes are the placeholder and whose only curated content is fences. The kept doc's git state stays as of the curated write. No hook command or permission entry changed. New `tests/test_keep_curated_pointer_235.sh`; `tests/test_curated_staleness.sh` case 1 (stale curated Notes rotated into history) is retired, and its carry cases now start from a fences-only doc or from the on-disk layout older versions left behind.
+
 ## [0.20.0] - 2026-11-13
 
 ### Added

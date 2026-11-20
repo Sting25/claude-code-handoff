@@ -48,6 +48,22 @@
 #      carried-only doc is not archived when the incoming write carries the
 #      same Rules again.
 #
+# Changed by issue #235 (owner decision 2026-11-20): a stale doc whose NOTES
+# are curated is no longer refreshed at all. It stays the current doc and a
+# pointer line is added under its Notes heading (see
+# test_keep_curated_pointer_235.sh). Part 1 above now applies only to a doc
+# whose Notes are the placeholder (its curated content is Rules alone). What
+# that did to this file:
+#   - case 1 (stale curated Notes rotated into history) is retired. It
+#     asserted the superseded behaviour; the same fixture is case 1 of the
+#     #235 file, asserting the doc is kept.
+#   - cases 10, 18 and 19 build their carry chains from a Rules-only doc,
+#     the one shape the refresh still carries from.
+#   - cases 15L, 16 and 20 cover the on-disk shape the pre-#235 refresh left
+#     behind (curated Notes in history, a carried-only current doc). Installs
+#     upgraded from an older version still hold it; legacy_refresh builds it.
+#   - case 15 is the same A, B, C, D story under the current behaviour.
+#
 # This file does not re-test the #63 overwrite guard itself (a different
 # guard, over a different predicate): see test_write_handoff_overwrite_
 # guard.sh, whose case 7a is the regression pin for "concurrent curation
@@ -104,25 +120,12 @@ placeholder_body() { printf '# handoff\n\n## Notes from this session\n\n%s\n' "$
 
 echo "write_handoff.sh / handoff_session_start.sh: curated staleness (issue #125)"
 
-# --- 1: stale curated (doc t < this session's origin, different sid) -------
-#        refreshed: falls through to a normal write, old curated doc rotated
-#        into handoff_history/ rather than preserved forever. -------------
-repo="$(mk_repo_gitignored)"
-plant_doc "$repo" "$(writer_marker sidB 100)" yes MARKERSTALE1
-plant_origin "$repo" sidA 5000     # sidA's origin (5000) is AFTER the doc's write (100)
-before_hist="$(hist_count "$repo")"
-rc=0
-out="$( cd "$repo" && bash "$WH" --if-curated --session-id sidA 2>/dev/null )"; rc=$?
-check "1: stale refresh -> exit 0" 0 "$rc"
-check "1: stale refresh -> stdout is the path" yes "$(has "$out" "handoff_current.md")"
-check "1: stale refresh -> current no longer carries the stale curated marker" no \
-  "$(has "$(cat "$repo/.claude/handoff_current.md")" "MARKERSTALE1")"
-check "1: stale refresh -> current is a fresh placeholder" yes \
-  "$(has "$(cat "$repo/.claude/handoff_current.md")" "$SENTINEL")"
-check "1: stale refresh -> old curated doc archived to history" yes \
-  "$(grep -rq 'MARKERSTALE1' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
-check "1: stale refresh -> history grew by one" $((before_hist + 1)) "$(hist_count "$repo")"
-rm -rf "$repo"
+# --- 1: retired by issue #235 ----------------------------------------------
+#        It asserted that a stale doc with curated Notes is rotated into
+#        handoff_history/ and replaced by a placeholder. That is the loss
+#        #235 removes. Same fixture, new expectation: case 1 of
+#        test_keep_curated_pointer_235.sh. The refresh path itself stays
+#        covered here by cases 9, 10 and 17 (Rules-only docs).
 
 # --- 1b (issue #128): a CRLF doc that IS an unedited placeholder is still --
 #         recognized as one. handoff_is_unedited_placeholder()'s byte-exact
@@ -454,7 +457,9 @@ rm -rf "$repo"
 #        fallback, silently ending their binding status. When (and only
 #        when) the stale doc's provenance verifies (untracked + valid HMAC,
 #        the same gate the SessionStart loader uses), its Rules fences are
-#        carried into the fresh, freshly-signed doc. Notes are NOT carried.
+#        carried into the fresh, freshly-signed doc. The fixtures are
+#        Rules-only docs (placeholder Notes): since #235 a doc with curated
+#        Notes is kept instead of refreshed, so there is nothing to carry.
 if ! command -v openssl >/dev/null 2>&1; then
   skip "10: openssl not installed, cannot build the signed-handoff controls for rule carry-forward"
   finish
@@ -479,12 +484,15 @@ in_binding_tier() {  # <ss_output> <needle> -> yes|no
 }
 sub_line() { sed "$2" "$1" > "$1.tmp" && mv "$1.tmp" "$1"; }
 # Build a real signed, curated doc as session sidB (write, curate the Rules
-# fence and the Notes, restamp), then give sidA an origin AFTER that write.
-mk_signed_stale() {  # <repo> <fence_text> <notes_text>
+# fence and, when <notes_text> is given, the Notes, restamp), then give sidA
+# an origin AFTER that write. Without <notes_text> the Notes stay the
+# placeholder: the Rules-only shape, the only one the stale refresh still
+# replaces (#235).
+mk_signed_stale() {  # <repo> <fence_text> [notes_text]
   local d="$1" doc="$1/.claude/handoff_current.md" t
   ( cd "$d" && env HANDOFF_SECRET_FILE="$d/.secret" bash "$WH" --session-id sidB >/dev/null 2>&1 )
   sub_line "$doc" "s/<!-- HANDOFF_RULES_PLACEHOLDER.*-->/- $2/"
-  sub_line "$doc" "s/^<!-- HANDOFF_PLACEHOLDER: .*-->\$/$3/"
+  if [[ -n "${3:-}" ]]; then sub_line "$doc" "s/^<!-- HANDOFF_PLACEHOLDER: .*-->\$/$3/"; fi
   ( cd "$d" && env HANDOFF_SECRET_FILE="$d/.secret" bash "$WH" --restamp >/dev/null 2>&1 )
   t="$(sed -nE 's/^<!-- HANDOFF_WRITER: sid=sidB t=([0-9]+) -->$/\1/p' "$doc" | tail -n 1)"
   plant_origin "$d" sidA "$(( ${t:-0} + 1000 ))"
@@ -495,7 +503,7 @@ run_stale() {  # <repo>
 
 # 10a: signed + untracked -> fence carried and still binding.
 repo="$(mk_repo_gitignored)"
-mk_signed_stale "$repo" "Do NOT touch prod. CARRYFENCE" "NOTESNOTCARRIED"
+mk_signed_stale "$repo" "Do NOT touch prod. CARRYFENCE"
 pre="$(run_ss_in "$repo")"
 check "10a: fixture -> fence binding before the refresh" yes "$(in_binding_tier "$pre" CARRYFENCE)"
 rc=0; run_stale "$repo" >/dev/null || rc=$?
@@ -503,9 +511,9 @@ cur="$(cat "$repo/.claude/handoff_current.md")"
 check "10a: stale refresh -> exit 0" 0 "$rc"
 check "10a: stale refresh -> new doc authored by sidA" yes "$(has "$cur" "sid=sidA")"
 check "10a: stale refresh -> fence carried into the new doc" yes "$(has "$cur" CARRYFENCE)"
-check "10a: stale refresh -> Notes NOT carried" no "$(has "$cur" NOTESNOTCARRIED)"
-check "10a: stale refresh -> old doc archived with its Notes" yes \
-  "$(grep -rq 'NOTESNOTCARRIED' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
+check "10a: stale refresh -> Notes are a fresh placeholder" yes "$(has "$cur" "$SENTINEL")"
+check "10a: stale refresh -> sidB's original archived" yes \
+  "$(grep -rq '^<!-- HANDOFF_WRITER: sid=sidB ' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
 out="$(run_ss_in "$repo")"
 check "10a: new doc verifies (binding header shown)" yes "$(has "$out" "$BOUND_HDR")"
 check "10a: fence shown AFTER the Standing rules header" yes "$(in_binding_tier "$out" CARRYFENCE)"
@@ -530,7 +538,7 @@ rm -rf "$repo"
 # 10b: signed, then TAMPERED (fence edited without restamp) -> MAC fails,
 #      nothing carried: an unverified doc can never escalate into a signed one.
 repo="$(mk_repo_gitignored)"
-mk_signed_stale "$repo" "Do NOT touch prod. ORIGFENCE" "notes10b"
+mk_signed_stale "$repo" "Do NOT touch prod. ORIGFENCE"
 sub_line "$repo/.claude/handoff_current.md" 's/ORIGFENCE/TAMPEREDFENCE/'
 rc=0; run_stale "$repo" >/dev/null || rc=$?
 check "10b: tampered stale -> exit 0" 0 "$rc"
@@ -555,7 +563,7 @@ rm -rf "$repo"
 
 # 10d: validly signed but TRACKED in git (clone-delivered shape) -> not carried.
 repo="$(mk_repo)"
-mk_signed_stale "$repo" "Do NOT touch prod. TRACKEDFENCE" "notes10d"
+mk_signed_stale "$repo" "Do NOT touch prod. TRACKEDFENCE"
 git -C "$repo" add -f .claude/handoff_current.md && git -C "$repo" commit -qm "track handoff"
 run_stale "$repo" >/dev/null
 check "10d: tracked stale -> fence NOT carried" no \
@@ -563,10 +571,11 @@ check "10d: tracked stale -> fence NOT carried" no \
 rm -rf "$repo"
 
 # --- 15: end to end, A curates, B and C end without curating, D starts ---
-#         Real write_handoff.sh --if-curated refreshes and real SessionStart.
-#         B's refresh writes placeholder Notes + A's carried fences; C's
-#         refresh used to archive that carried doc, and D's fallback then
-#         loaded it (no prose) instead of A's Notes. ----------------------
+#         Real write_handoff.sh --if-curated runs and real SessionStart.
+#         Since #235 B and C leave A's doc in place with one pointer line
+#         each, so D loads A's Notes and fences straight from the current
+#         doc. A's doc reaches history only when a real /handoff write
+#         replaces it. -----------------------------------------------------
 # Next session <sid> starts after the current doc was written (origin later
 # than its HANDOFF_WRITER stamp), then ends without curating.
 uncurated_session() {  # <repo> <sid> [extra env...]
@@ -575,34 +584,91 @@ uncurated_session() {  # <repo> <sid> [extra env...]
   plant_origin "$d" "$sid" "$(( ${t:-0} + 1000 ))"
   ( cd "$d" && env HANDOFF_SECRET_FILE="$d/.secret" "$@" bash "$WH" --if-curated --session-id "$sid" >/dev/null 2>&1 )
 }
+# Rebuild the on-disk state the pre-#235 stale refresh left behind: the
+# curated doc (Notes and fences) archived in handoff_history/, and a current
+# doc by <sid> holding placeholder Notes plus the carried fences. Upgraded
+# installs still hold this shape, so the fallback, prune and carry logic
+# around it must keep working. Call it right after
+# `mk_signed_stale <repo> <fence> <notes_text>`. How: save the full doc, put
+# the Notes placeholder back and re-sign (Rules-only), let <sid> refresh it
+# for real, then swap the archived Rules-only copy for the saved full doc.
+legacy_refresh() {  # <repo> <notes_text> <sid> [extra env...]
+  local d="$1" notes="$2" sid="$3" doc="$1/.claude/handoff_current.md" full snap
+  shift 3
+  full="$(mktemp)"
+  cp "$doc" "$full"
+  sub_line "$doc" "s|^$notes\$|$SENTINEL|"
+  ( cd "$d" && env HANDOFF_SECRET_FILE="$d/.secret" bash "$WH" --restamp >/dev/null 2>&1 )
+  uncurated_session "$d" "$sid" "$@"
+  snap="$(find "$d/.claude/handoff_history" -maxdepth 1 -name 'handoff_*.md' -type f 2>/dev/null | head -n 1)"
+  if [[ -n "$snap" ]]; then cp "$full" "$snap"; fi
+  rm -f "$full"
+}
+ptr_count() { LC_ALL=C grep -c 'HANDOFF_LATER_SESSION' "$1/.claude/handoff_current.md" 2>/dev/null || true; }
+
 repo="$(mk_repo_gitignored)"
 mk_signed_stale "$repo" "Do NOT migrate. FENCEA15" "NOTESA15 curated by session A"
 uncurated_session "$repo" sidA   # mk_signed_stale curated as sidB (scenario A); sidA plays B
-check "15: B refresh -> A archived with its Notes" yes \
-  "$(grep -rlq 'NOTESA15' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
-check "15: B refresh -> fence carried into current" yes "$(has "$(cat "$repo/.claude/handoff_current.md")" FENCEA15)"
-a_file="$(basename "$(grep -rl 'NOTESA15' "$repo/.claude/handoff_history" | head -n 1)")"
 uncurated_session "$repo" sidC
-check "15: C refresh -> fence still carried" yes "$(has "$(cat "$repo/.claude/handoff_current.md")" FENCEA15)"
-check "15: C refresh -> carried-only copy not archived (history is just A)" 1 "$(hist_count "$repo")"
+cur="$(cat "$repo/.claude/handoff_current.md")"
+check "15: B and C end -> A's Notes still in the current doc" yes "$(has "$cur" NOTESA15)"
+check "15: B and C end -> A's fence still in the current doc" yes "$(has "$cur" FENCEA15)"
+check "15: B and C end -> one pointer line each" 2 "$(ptr_count "$repo")"
+check "15: B and C end -> nothing rotated into history" 0 "$(hist_count "$repo")"
 out="$(run_ss_in "$repo")"
 check "15: D start -> A's Notes loaded" yes "$(has "$out" "NOTESA15")"
-check "15: D start -> fallback names A's archived file" yes "$(has "$out" "From \`$a_file\`")"
+check "15: D start -> from the current doc, not the history fallback" no "$(has "$out" "$FALLBACK_HDR")"
 check "15: D start -> A's fence binding" yes "$(in_binding_tier "$out" FENCEA15)"
+# A real /handoff write (not --if-curated) by a later session is what moves
+# A's doc into history.
+tA15="$(sed -nE 's/^<!-- HANDOFF_WRITER: sid=sidB t=([0-9]+) -->$/\1/p' "$repo/.claude/handoff_current.md" | tail -n 1)"
+plant_origin "$repo" sidD "$(( ${tA15:-0} + 2000 ))"
+rc=0
+( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --session-id sidD >/dev/null 2>&1 ) || rc=$?
+check "15: D's /handoff write -> exit 0" 0 "$rc"
+check "15: D's /handoff write -> A's doc archived with its Notes" yes \
+  "$(grep -rlq 'NOTESA15' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
+check "15: D's /handoff write -> history holds exactly A" 1 "$(hist_count "$repo")"
+rm -rf "$repo"
+
+# --- 15L: the same story starting from the pre-#235 on-disk shape ----------
+#         A's Notes are already in history and the current doc is B's
+#         carried-only copy. C's refresh used to archive that carried doc,
+#         and D's fallback then loaded it (no prose) instead of A's Notes.
+repo="$(mk_repo_gitignored)"
+mk_signed_stale "$repo" "Do NOT migrate. FENCEL15" "NOTESL15 curated by session A"
+legacy_refresh "$repo" "NOTESL15 curated by session A" sidA
+cur="$(cat "$repo/.claude/handoff_current.md")"
+check "15L: fixture -> A archived with its Notes" yes \
+  "$(grep -rlq 'NOTESL15' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
+check "15L: fixture -> current doc is B's, Notes placeholder" yes \
+  "$([[ "$(has "$cur" "HANDOFF_WRITER: sid=sidA")" == yes && "$(has "$cur" "$SENTINEL")" == yes ]] && echo yes || echo no)"
+check "15L: fixture -> fence carried into current" yes "$(has "$cur" FENCEL15)"
+a_file="$(basename "$(grep -rl 'NOTESL15' "$repo/.claude/handoff_history" | head -n 1)")"
+uncurated_session "$repo" sidC
+check "15L: C refresh -> fence still carried" yes "$(has "$(cat "$repo/.claude/handoff_current.md")" FENCEL15)"
+check "15L: C refresh -> carried-only copy not archived (history is just A)" 1 "$(hist_count "$repo")"
+out="$(run_ss_in "$repo")"
+check "15L: D start -> A's Notes loaded" yes "$(has "$out" "NOTESL15")"
+check "15L: D start -> fallback names A's archived file" yes "$(has "$out" "From \`$a_file\`")"
+check "15L: D start -> A's fence binding" yes "$(in_binding_tier "$out" FENCEL15)"
 # A write that does NOT carry (a /handoff or manual run) must still archive the
 # carried-only doc: nothing else would then hold a current copy of its fences.
 ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --session-id sidD >/dev/null 2>&1 )
-check "15: non-carrying write -> carried-only doc archived, not deleted" 2 "$(hist_count "$repo")"
-check "15: non-carrying write -> archived copy holds the fence" yes \
-  "$(grep -l 'HANDOFF_RULES_CARRIED' "$repo/.claude/handoff_history"/*.md 2>/dev/null | xargs grep -l FENCEA15 >/dev/null 2>&1 && echo yes || echo no)"
+check "15L: non-carrying write -> carried-only doc archived, not deleted" 2 "$(hist_count "$repo")"
+check "15L: non-carrying write -> archived copy holds the fence" yes \
+  "$(grep -l 'HANDOFF_RULES_CARRIED' "$repo/.claude/handoff_history"/*.md 2>/dev/null | xargs grep -l FENCEL15 >/dev/null 2>&1 && echo yes || echo no)"
 rm -rf "$repo"
 
 # --- 16: A curates, then 7 uncurated sessions with HANDOFF_HISTORY_KEEP=5 -
 #         A's Notes snapshot must still be on disk and load as the fallback
 #         (it used to be pruned once the carried copies filled the window).
+#         Pre-#235 shape: the first of the 7 is the legacy refresh that put
+#         A's Notes into history.
 repo="$(mk_repo_gitignored)"
 mk_signed_stale "$repo" "Do NOT migrate. FENCEA16" "NOTESA16 curated by session A"
-for s in 1 2 3 4 5 6 7; do uncurated_session "$repo" "sidU$s" HANDOFF_HISTORY_KEEP=5; done
+legacy_refresh "$repo" "NOTESA16 curated by session A" sidU1 HANDOFF_HISTORY_KEEP=5
+for s in 2 3 4 5 6 7; do uncurated_session "$repo" "sidU$s" HANDOFF_HISTORY_KEEP=5; done
 check "16: after 7 uncurated sessions -> A's Notes snapshot still on disk" yes \
   "$(grep -rlq 'NOTESA16' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
 out="$(run_ss_in "$repo")"
@@ -628,7 +694,9 @@ rm -rf "$repo"
 #         where a session edits the fences by hand (Edit + --restamp,
 #         without removing the existing HANDOFF_RULES_CARRIED comment) ----
 #         instead of carrying them forward through --if-curated. -----------
-#         A curates fences (sidA132, real write+edit+restamp). B refreshes
+#         A curates fences only, Notes left as the placeholder (with curated
+#         Notes the doc would be kept, not refreshed: #235) (sidA132, real
+#         write+edit+restamp). B refreshes
 #         and carries (--if-curated as sidB132): current now says "carried
 #         forward from ... sid=sidA132 ..." and holds A's fence text. C then
 #         hand-edits the fence body in place (leaving the existing
@@ -649,10 +717,9 @@ if ! command -v openssl >/dev/null 2>&1; then
 else
   repo="$(mk_repo_gitignored)"
   doc18="$repo/.claude/handoff_current.md"
-  # A: real write, curate the Rules fence and the Notes, restamp.
+  # A: real write, curate the Rules fence, restamp.
   ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --session-id sidA132 >/dev/null 2>&1 )
   sub_line "$doc18" 's/<!-- HANDOFF_RULES_PLACEHOLDER.*-->/- Do NOT deploy Friday. FENCE_A132/'
-  sub_line "$doc18" 's/^<!-- HANDOFF_PLACEHOLDER: .*-->$/NOTES_A132 curated by A/'
   ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --restamp >/dev/null 2>&1 )
 
   # B: uncurated session, --if-curated stale refresh carries A's fence.
@@ -689,7 +756,8 @@ else
 fi
 
 # --- 19 (issue #136): the carried-from label claims an archive only when --
-#         one exists. A curates; B, C, D, E end without curating; F then
+#         one exists. A curates fences only (Rules-only doc, see #235 note
+#         in the header); B, C, D, E end without curating; F then
 #         hand-edits the carried fence and restamps; G carries it. Each
 #         label names its immediate source (#132), but only A is a real
 #         curated doc that rotation archives: every later source is a
@@ -720,7 +788,6 @@ else
   doc19="$repo/.claude/handoff_current.md"
   ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --session-id sidA19 >/dev/null 2>&1 )
   sub_line "$doc19" 's/<!-- HANDOFF_RULES_PLACEHOLDER.*-->/- Do NOT rotate keys. FENCE19/'
-  sub_line "$doc19" 's/^<!-- HANDOFF_PLACEHOLDER: .*-->$/NOTES19 curated by A/'
   ( cd "$repo" && env HANDOFF_SECRET_FILE="$repo/.secret" bash "$WH" --restamp >/dev/null 2>&1 )
 
   uncurated_session "$repo" sidB19
@@ -766,9 +833,9 @@ else
 fi
 
 # --- 20 (issue #136): the history fallback shows an archived doc's fences --
-#         as reference text without its BIND marker lines. A curates, B ends
-#         without curating, so B's start loads A's snapshot through the
-#         fallback. Then again with that snapshot converted to CRLF (#128).
+#         as reference text without its BIND marker lines. Pre-#235 shape:
+#         A curated, B ended without curating and the old refresh archived
+#         A, so B's start loads A's snapshot through the fallback. Then again with that snapshot converted to CRLF (#128).
 # The fallback section of a SessionStart output, up to the recover banner.
 fallback_section() {  # <ss_output>
   case "$1" in *"$FALLBACK_HDR"*) ;; *) return 0 ;; esac
@@ -782,7 +849,7 @@ if ! command -v openssl >/dev/null 2>&1; then
 else
   repo="$(mk_repo_gitignored)"
   mk_signed_stale "$repo" "Do NOT merge. FENCE20" "NOTES20 curated by A"
-  uncurated_session "$repo" sidB20
+  legacy_refresh "$repo" "NOTES20 curated by A" sidB20
   a20="$(grep -rl NOTES20 "$repo/.claude/handoff_history" | head -n 1)"
   check "20: fixture -> A's archived snapshot has BIND marker lines" yes \
     "$([[ "$(marker_lines <"$a20")" -gt 0 ]] && echo yes || echo no)"

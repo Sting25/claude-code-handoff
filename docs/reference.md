@@ -81,19 +81,30 @@ Three slash commands plus one automatic safety net, doing different jobs:
   `--if-curated`, so if you already ran `/handoff` this session (it
   replaced the placeholder block with curated Notes), the safety-net
   write is a no-op: your curated content stays put rather than being
-  rotated into history. That preservation only holds while the
-  curation is current: if the curated doc's `HANDOFF_WRITER` marker
-  names an earlier session whose write predates this session's own
-  start, this session never curated it, so `--if-curated` falls
-  through to a normal write instead, archiving the stale curated doc
-  into `.claude/handoff_history/` (not deleting it) rather than
-  preserving it forever (issue #125). A doc counts as curated here when
-  its Notes OR its `## Rules` fences were curated, and either kind is
-  archived, never deleted. Two limits keep that refresh from ever
-  losing content: with `HANDOFF_HISTORY_KEEP=0` (archiving disabled)
-  the stale curated doc is preserved as before, and when the stale
-  doc's provenance verifies, its `## Rules` fences are carried forward
-  into the fresh doc so they keep binding (see
+  rotated into history. A later session that ends without `/handoff`
+  does not displace curated Notes either (issue #235). When the doc's
+  `HANDOFF_WRITER` marker names an earlier session whose write predates
+  this session's own start, this session never curated it. If its
+  Notes are curated, the doc stays where it is and the safety net adds
+  one line under the Notes heading, starting
+  `> **Later session, no /handoff** (HANDOFF_LATER_SESSION sid=... t=...)`,
+  that names the later session and its raw turn dump under
+  `.claude/handoff_backups/` when one exists. The next session
+  therefore loads the curated Notes and can see that later work
+  happened without a write-up. Each session adds at most one line,
+  however often its hooks fire. The `HANDOFF_WRITER` marker is left
+  alone, so the author can still run `/handoff` again. A signed doc is
+  re-signed after the insert only if its signature verified first; a
+  doc whose signature does not verify is left byte for byte as it was.
+  The rest of the kept doc, including its git state, still describes
+  the moment it was curated. Only a stale doc whose Notes are still the
+  placeholder and whose `## Rules` fences were curated is refreshed
+  (issue #125): `--if-curated` falls through to a normal write, and
+  that doc is archived into `.claude/handoff_history/`, never deleted.
+  Two limits keep that refresh from ever losing content: with
+  `HANDOFF_HISTORY_KEEP=0` (archiving disabled) the doc is preserved
+  as before, and when its provenance verifies, its `## Rules` fences
+  are carried forward into the fresh doc so they keep binding (see
   [Trusted rules](#trusted-rules-when-the-fences-actually-bind)). A `/resume` session-switch (which fires
   `SessionEnd` with reason `resume`) is treated as a pause, not an
   ending, and skips the safety-net write; tune via
@@ -417,7 +428,8 @@ safety net (`--if-curated`) never overwrites a curated handoff when
 `HANDOFF_HISTORY_KEEP=0`, even one a later session would otherwise
 refresh as stale (issue #125). With nowhere to archive it, the stale
 curated doc is kept as is; only an explicit `/handoff` or manual run
-replaces it.
+replaces it. In this mode a doc with curated Notes is also left without
+the "Later session" pointer line (issue #235).
 
 If you want unlimited retention, set a large `N` — there is no value
 that means "never prune." If you want the tool to stop writing history
@@ -600,7 +612,10 @@ just get the normal full load). Both re-checks verify provenance again
 on every fire.
 
 **Fences survive a session that didn't curate.** When a later session
-ends without `/handoff`, the safety net refreshes the stale curated doc
+ends without `/handoff` and the current doc has curated Notes, the doc
+is kept as it is (issue #235), fences included, so they keep binding
+with nothing to carry. When the doc's Notes are still the placeholder
+and only its fences were curated, the safety net refreshes it
 (issue #125) and archives it into history, where it would load only as
 reference data through the history fallback. So that refresh carries
 the old doc's `## Rules` fences into the new doc's `## Rules` block,
@@ -614,9 +629,11 @@ archive claim.
 It does this only when the old doc passes the same provenance check the
 loader uses (untracked, balanced markers, valid HMAC); an unsigned,
 tampered, planted, or tracked doc carries nothing, so an unverified
-doc's fences can never end up in a signed doc's binding tier. The Notes
-are not carried: they stay in history and load through the fallback as
-data. A doc whose only curated content is carried fences (its Notes are
+doc's fences can never end up in a signed doc's binding tier. Notes
+are never carried. A project last written by a version from before
+issue #235 can still hold the older layout, curated Notes archived in
+history under a current doc with carried fences; those Notes load
+through the fallback as data. A doc whose only curated content is carried fences (its Notes are
 still the placeholder) is not archived again when the next refresh
 carries the same fences forward, so a string of non-curating sessions
 does not fill history with copies. That holds even when a session edited
@@ -1323,7 +1340,7 @@ installer wrote: session A curates, B to J never curate, K only starts. The
 variants cover Notes and Rules, Notes only, a linked worktree session, a
 history pruned to one snapshot, and a 2000-byte SessionStart budget. Each
 expected outcome (Notes and fences reaching every later session, history
-counts, the stale-refresh archive labels, the worktree salvage) is a named
+counts, one pointer line per later session in A's kept doc, the worktree salvage) is a named
 check; the driver exits 1 when any check fails, 2 on a usage or setup error,
 and 0 only when every check held. `<outdir>/results.md` holds the table and
 every check; per-call payloads, output and exit codes sit beside it. The
