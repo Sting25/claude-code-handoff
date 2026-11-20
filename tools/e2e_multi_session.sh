@@ -22,8 +22,10 @@
 # What it proves. Before a release, a fresh multi-session run on the release
 # tree: session A curates (Notes, and Rules fences where the variant says),
 # sessions B..J never curate, K only starts. The expected outcomes recorded in
-# #203 (the 2026-11-10 run on b7b0a4e) are asserted after every variant, and
-# the driver exits non-zero, naming each failed check, when any does not hold.
+# #203 (the 2026-11-10 run on b7b0a4e) are asserted after every variant, as
+# changed by #235: a doc with curated Notes is no longer refreshed by B..J, it
+# stays current and gets one pointer line per later session. The driver
+# exits non-zero, naming each failed check, when any does not hold.
 #
 # How it is wired. The real installer runs jailed:
 #   HOME=<jail> CLAUDE_HOME=<jail>/.claude bash <tree>/install.sh --scope project --project <proj>
@@ -605,17 +607,18 @@ scenario_worktree_f() {
 }
 
 main_checks() {  # <rules 0|1> <ss budget> <worktree 0|1>
-  local rules="$1" budget="$2" s fb a_hist a_name n t
+  local rules="$1" budget="$2" s fb a_hist n t
   common_checks 12
   check "Stop hook left a raw dump with every turn and a .ctx sidecar, A..J" "A:yes B:yes C:yes D:yes E:yes F:yes G:yes H:yes I:yes J:yes" "$(list_over STOP A B C D E F G H I J)"
   check "E's .ctx sidecar before PostCompact / after" "yes/no" "${CTX_pre_E:-?}/${CTX_post_E:-?}"
-  # B loads A's curated doc; C..K load an uncurated refresh and must be told
-  # to run /handoff-recover (F in a worktree is checked in worktree_checks).
+  # A's Notes are curated, so B..J never displace its doc (#235): every later
+  # session loads A's doc itself and none is told to run /handoff-recover
+  # (F in a worktree is checked in worktree_checks).
   check "recover banner absent at B" no "$(yn banner "$(ss_out B)")"
   if [ "$3" = 1 ]; then
-    check "recover banner present at C..K (not F)" 8/8 "$(count_over banner - C D E G H I J K)"
+    check "recover banner absent at C..K (not F)" 0/8 "$(count_over banner - C D E G H I J K)"
   else
-    check "recover banner present at C..K" 9/9 "$(count_over banner - C D E F G H I J K)"
+    check "recover banner absent at C..K" 0/9 "$(count_over banner - C D E F G H I J K)"
   fi
   if [ "$budget" = 9000 ]; then
     check "A's Notes present in SessionStart B..K" 10/10 "$(count_over has_notes A B C D E F G H I J K)"
@@ -625,20 +628,28 @@ main_checks() {  # <rules 0|1> <ss budget> <worktree 0|1>
   if [ "$rules" = 1 ]; then
     check "A's fence bound in SessionStart B..K" 10/10 "$(count_over fence_bound A B C D E F G H I J K)"
     check "A's fence bound in E's post-compaction SessionStart" yes "$(yn fence_bound "${SS_E_compact:-}" A)"
-    check "B's doc carries the fence with the 'archived in handoff_history/' label" yes \
-      "$(yn grep -q 'whose snapshot is archived in handoff_history/' "$VD/snap/B/handoff_current.md")"
   else
     check "fence lines anywhere in SessionStart B..K (no fence written)" 0/10 "$(count_over fence_anywhere A B C D E F G H I J K)"
   fi
   check "archive claim accurate after each B..J end" 9/9 "$(n=0; for s in B C D E F G H I J; do eval "[ \"\$ARCH_$s\" = yes ]" && n=$((n + 1)); done; echo "$n/9")"
-  check "history count after each B..J end" "B:1 C:1 D:1 E:1 F:1 G:1 H:1 I:1 J:1" "$(list_over HIST B C D E F G H I J)"
+  check "history count after each B..J end" "B:0 C:0 D:0 E:0 F:0 G:0 H:0 I:0 J:0" "$(list_over HIST B C D E F G H I J)"
   a_hist="$(hist_by_sid A)"
-  check "A's snapshot in history after J" yes "$(yn test -n "$a_hist")"
-  check "B's doc not archived after C's end (carried-only, deleted)" no "$(yn test -n "$(cd "$VD/snap/C/history" 2>/dev/null && LC_ALL=C grep -l "^<!-- HANDOFF_WRITER: sid=$(sid_of B) " handoff_*.md 2>/dev/null)")"
-  a_name="${a_hist##*/}"
+  check "A's doc not archived after J (it is still the current doc)" no "$(yn test -n "$a_hist")"
+  check "A still the current doc's writer at K" yes "$(yn grep -q "^<!-- HANDOFF_WRITER: sid=$(sid_of A) " "$VD/snap/K/handoff_current.md")"
+  # One pointer line per later session that ended on the main checkout. E
+  # fires PreCompact and SessionEnd and still gets one. A worktree session's
+  # end leaves the main doc unchanged (worktree_checks), so F adds none there.
   n=0; t=0
-  for s in C D E G H I J K; do t=$((t + 1)); fb="$(fallback_name "$(ss_out "$s")")"; [ -n "$a_name" ] && [ "$fb" = "$a_name" ] && n=$((n + 1)); done
-  check "C..K (not F) load the fallback from A's snapshot" "$t/$t" "$n/$t"
+  for s in B C D E F G H I J; do
+    if [ "$s" = F ] && [ "$3" = 1 ]; then continue; fi
+    t=$((t + 1))
+    [ "$(LC_ALL=C grep -c "HANDOFF_LATER_SESSION sid=$(sid_of "$s") " "$VD/snap/K/handoff_current.md" 2>/dev/null)" = 1 ] && n=$((n + 1))
+  done
+  check "exactly one pointer line in A's doc for each later session" "$t/$t" "$n/$t"
+  check "pointer lines in A's doc at K, total" "$t" "$(LC_ALL=C grep -c 'HANDOFF_LATER_SESSION sid=' "$VD/snap/K/handoff_current.md" 2>/dev/null)"
+  n=0; t=0
+  for s in C D E G H I J K; do t=$((t + 1)); fb="$(fallback_name "$(ss_out "$s")")"; [ -n "$fb" ] && n=$((n + 1)); done
+  check "C..K (not F) that load a history fallback" "0/$t" "$n/$t"
   if [ "$budget" = 9000 ]; then
     check "largest SessionStart output under the 9000 B budget" yes "$(yn test "$R_max" -le 9000)"
     check "trimmed sections" 0 "$R_trim"

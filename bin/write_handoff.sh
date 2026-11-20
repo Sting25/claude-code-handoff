@@ -1273,6 +1273,114 @@ worktree_salvage() {
   fi
   return 0
 }
+# Keep curated Notes, add a pointer (issue #235, owner decision 2026-11-20).
+#
+# Why: the #125 stale refresh below used to rotate a curated doc into
+# handoff_history/ whenever a session born after it ended without /handoff,
+# leaving a placeholder as the current doc. Desktop sub-sessions and /btw
+# forks are exactly such sessions and carry no marker that tells them apart
+# from an ordinary new session (#239), so curated Notes kept being displaced
+# by sessions that had nothing to say. Curated Notes are now never replaced
+# by a placeholder: the doc stays, and ONE line under the Notes heading names
+# the later session and its raw dump, which is what #125 needed (later work
+# must not be invisible) without the loss.
+#
+# Deliberately unchanged by the insert:
+#   - HANDOFF_WRITER: the doc is still its author's. Restamping it to this
+#     session would make the #63 overwrite guard refuse the author's next
+#     /handoff (#236).
+#   - everything outside the Notes body: the line lands in the Notes edit
+#     zone, which the skeleton stamp blanks, so the stamp is re-emitted equal.
+#
+# Every failure leaves the document byte-identical (fail toward preserve):
+# a symlink, no Notes heading, a lost lock race, or a signature that is
+# present but does not verify (re-signing that would launder tampered bytes
+# into the binding tier; inserting without re-signing would break a
+# signature this run merely could not check).
+# Returns 0 when the doc carries this session's pointer afterwards.
+HANDOFF_LATER_TOKEN="HANDOFF_LATER_SESSION"
+keep_curated_add_pointer() {
+  local sid="$writer_session_id" signed=0 had_skel=0 ptr dump_rel in_lines out_lines skel mac
+  [[ "$sid" =~ ^[A-Za-z0-9_-]+$ ]] || return 1
+  [[ -f "$handoff_path" && ! -L "$handoff_path" ]] || return 1
+  # Idempotent per session: PreCompact and SessionEnd both land here.
+  if LC_ALL=C grep -qF "$HANDOFF_LATER_TOKEN sid=$sid " "$handoff_path" 2>/dev/null; then
+    return 0
+  fi
+  write_lock_dir="$handoff_dir/.handoff_write.lock"
+  if try_mkdir_lock "$write_lock_dir"; then
+    write_lock_held=1
+  else
+    for _ in 1 2 3 4 5; do
+      sleep 0.2 2>/dev/null || sleep 1
+      if try_mkdir_lock "$write_lock_dir"; then write_lock_held=1; break; fi
+    done
+  fi
+  if (( ! write_lock_held )); then
+    echo "write_handoff.sh: write lock $write_lock_dir still held after ~1s; leaving $handoff_relpath as it is, without a pointer to session $sid." >&2
+    return 1
+  fi
+  _kcap_done() {  # <rc>
+    if [[ -n "${restamp_tmp:-}" ]]; then rm -f "$restamp_tmp" 2>/dev/null || true; restamp_tmp=""; fi
+    if [[ -n "${restamp_src:-}" ]]; then rm -f "$restamp_src" 2>/dev/null || true; restamp_src=""; fi
+    if (( write_lock_held )); then release_mkdir_lock "$write_lock_dir"; write_lock_held=0; fi
+    return "$1"
+  }
+  if LC_ALL=C grep -qE '^<!-- HANDOFF_HMAC: ' "$handoff_path" 2>/dev/null; then
+    if can_sign && type handoff_mac_verify >/dev/null 2>&1 \
+       && type handoff_skel_compute >/dev/null 2>&1 \
+       && handoff_mac_verify "$handoff_path"; then
+      signed=1
+    else
+      echo "write_handoff.sh: $handoff_relpath carries a signature this run could not verify; leaving it as it is, without a pointer to session $sid." >&2
+      _kcap_done 1; return 1
+    fi
+    if LC_ALL=C grep -qE '^<!-- HANDOFF_SKEL_HMAC: [0-9a-f]{64} -->[[:space:]]*$' "$handoff_path" 2>/dev/null; then
+      had_skel=1
+    fi
+  fi
+  dump_rel="${handoff_relpath%/*}/handoff_backups/handoff_raw_${sid}.md"
+  ptr="> **Later session, no /handoff** ($HANDOFF_LATER_TOKEN sid=$sid t=$(date +%s)): a session that started after these Notes were curated ended or compacted without running /handoff, so its work is not described below."
+  if [[ -f "$backup_dir/handoff_raw_${sid}.md" ]]; then
+    ptr="$ptr Its raw turn dump: \`$dump_rel\`."
+  else
+    ptr="$ptr No raw turn dump was found for it."
+  fi
+  restamp_src="$(mktemp "$handoff_dir/.handoff_pre.XXXXXX")" || { _kcap_done 1; return 1; }
+  restamp_tmp="$(mktemp "$handoff_dir/.handoff_current.XXXXXX")" || { _kcap_done 1; return 1; }
+  if (( signed )); then
+    LC_ALL=C grep -Ev '^<!-- HANDOFF_(HMAC|SKEL_HMAC): [0-9a-f]{64} -->[[:space:]]*$' \
+      "$handoff_path" > "$restamp_src" || true
+  else
+    cat "$handoff_path" > "$restamp_src" || { _kcap_done 1; return 1; }
+  fi
+  # ENVIRON, not -v: awk -v would process backslash escapes in the text.
+  if ! HANDOFF_PTR_LINE="$ptr" LC_ALL=C awk -v notes_h="$HANDOFF_NOTES_HEADING" '
+        { print }
+        !done && $0 == notes_h { print ""; print ENVIRON["HANDOFF_PTR_LINE"]; done = 1 }
+      ' "$restamp_src" > "$restamp_tmp" 2>/dev/null; then
+    _kcap_done 1; return 1
+  fi
+  # Exactly two lines longer, or the insert did not happen as intended (no
+  # Notes heading, or an awk that died mid-stream): publish nothing.
+  in_lines="$(LC_ALL=C wc -l < "$restamp_src" | tr -d ' ')"
+  out_lines="$(LC_ALL=C wc -l < "$restamp_tmp" | tr -d ' ')"
+  if [[ "$out_lines" != "$(( in_lines + 2 ))" ]]; then
+    _kcap_done 1; return 1
+  fi
+  if (( signed )); then
+    if (( had_skel )); then
+      skel="$(handoff_skel_compute "$restamp_tmp" ensure)" || { _kcap_done 1; return 1; }
+      printf '%s%s -->\n' "$HANDOFF_SKEL_PREFIX" "$skel" >> "$restamp_tmp"
+    fi
+    mac="$(handoff_mac_compute "$restamp_tmp" ensure)" || { _kcap_done 1; return 1; }
+    printf '%s%s -->\n' "$HANDOFF_MAC_PREFIX" "$mac" >> "$restamp_tmp"
+  fi
+  chmod 600 "$restamp_tmp" 2>/dev/null || true
+  mv -f "$restamp_tmp" "$handoff_path" || { _kcap_done 1; return 1; }
+  restamp_tmp=""
+  _kcap_done 0
+}
 if (( IF_CURATED )); then
   # Reason-aware skip (safety net only — never on curated /handoff or manual
   # runs, which don't pass --if-curated). A reason in the skip list means
@@ -1335,6 +1443,16 @@ if (( IF_CURATED )); then
       if (( ! stale_curated )); then
         # Still current (or staleness couldn't be established): preserve it
         # rather than clobber with a fresh mechanical snapshot.
+        worktree_salvage
+        echo "$handoff_path"
+        exit 0
+      fi
+      # Curated NOTES are never displaced by a placeholder (#235): keep the
+      # doc, add a pointer to this session, and stop. Only a doc whose Notes
+      # are the placeholder (its curated content is Rules alone) continues to
+      # the refresh below, where there are no Notes to lose.
+      if ! handoff_is_unedited_placeholder "$handoff_path"; then
+        keep_curated_add_pointer || true
         worktree_salvage
         echo "$handoff_path"
         exit 0
