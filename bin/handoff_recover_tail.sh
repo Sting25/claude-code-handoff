@@ -237,7 +237,12 @@ printf -- '---\n'
 sed -n "$((cursor + 1)),${curr}p" "$transcript" \
 | while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" ]] && continue
-    entry_type="$(jq -r '.type // empty' <<<"$line" 2>/dev/null || true)"
+    # #237: skip records copied from a fork's parent (they carry the parent's
+    # sessionId); a record with no sessionId counts as this session's. Same
+    # rule and reason as handoff_turn_append.sh; keep the two in sync.
+    entry_type="$(jq -r --arg sid "$session_id" \
+      'if (.sessionId // $sid) == $sid then (.type // empty) else empty end' \
+      <<<"$line" 2>/dev/null || true)"
     case "$entry_type" in
       user)
         content_kind="$(jq -r '.message.content | type' <<<"$line" 2>/dev/null || echo null)"
