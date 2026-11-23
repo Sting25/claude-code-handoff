@@ -693,7 +693,18 @@ refresh_lock   # entering the append loop; its own periodic touch takes over
       fi
       [[ -z "$line" ]] && continue
 
-      entry_type="$(jq -r '.type // empty' <<<"$line" 2>/dev/null || true)"
+      # #237: a forked session (desktop /btw side chat, fork-context
+      # sub-session) starts from a transcript seeded with the PARENT's records,
+      # which keep the parent's sessionId. Folding them in made the fork's dump
+      # open with the parent's conversation, attributed to the fork. A record
+      # carrying another session's id is therefore skipped (it yields an empty
+      # type, which no case below matches); the parent's own dump already has
+      # it. A record with no sessionId counts as this session's, the same rule
+      # handoff_ctx_check.sh applies. The cursor still advances past skipped
+      # lines. Keep in sync with handoff_recover_tail.sh.
+      entry_type="$(jq -r --arg sid "$session_id" \
+        'if (.sessionId // $sid) == $sid then (.type // empty) else empty end' \
+        <<<"$line" 2>/dev/null || true)"
 
       case "$entry_type" in
         user)
