@@ -198,6 +198,11 @@ check "no planted Rules heading line"     0   "$(LC_ALL=C grep -c '^## Rules (fe
 check "provenance verifies"               ok  "$(prov "$wr")"
 # Guard: a different session whose recorded start (epoch 500) predates the
 # doc's write stamp is the stale one, so its curated write must be refused.
+# The doc gets curated Notes first: since #236 the guard does not fire for an
+# uncurated placeholder, and what this case checks is WHICH author the guard
+# reads off the doc, so the guard has to fire.
+sed 's/^<!-- HANDOFF_PLACEHOLDER: .*-->$/curated notes by GOOD/' "$doc" > "$doc.tmp" && mv "$doc.tmp" "$doc"
+check "fixture: Notes are curated" 1 "$(LC_ALL=C grep -c '^curated notes by GOOD$' "$doc" || true)"
 must mkdir -p "$wr/.claude/handoff_backups"
 printf '500\n' > "$wr/.claude/handoff_backups/.session_started_OTHER"
 ( cd "$wr" && env -u CLAUDE_PROJECT_DIR HANDOFF_SECRET_FILE="$SECRET" \

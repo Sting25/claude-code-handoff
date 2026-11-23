@@ -744,6 +744,25 @@ picks up after A ends) would otherwise trip it. The origin-time
 comparison is what tells a genuinely stale, resumed session apart from
 a normal succession.
 
+The guard protects curated content, so it does not fire when the later
+document has none of its own (#236):
+
+- **Placeholder Notes and no curated Rules.** This is what the
+  `SessionEnd`/`PreCompact` safety net leaves when a session ends
+  without `/handoff`. A desktop sub-session or `/btw` side chat opened
+  from a long-running session is such a later session, and its
+  placeholder used to lock the parent out of its own `/handoff`. The
+  write now proceeds, the placeholder is replaced (it is never
+  archived), and one stderr line names the session that wrote it.
+- **Placeholder Notes plus carried-forward Rules**, while
+  `HANDOFF_HISTORY_KEEP` is above 0. The document is archived to
+  history first, so the carried fences stay on disk, and one stderr
+  line says so. With `HANDOFF_HISTORY_KEEP=0` nothing would be
+  archived, so the guard still fires.
+
+It fires as before for a later document with curated Notes, or with
+Rules that were curated in that document itself.
+
 Session identity is resolved with precedence: the `--session-id` flag,
 then `.session_id` from the hook payload, then `CLAUDE_CODE_SESSION_ID`
 — first value matching `[A-Za-z0-9_-]+` wins. No id anywhere makes the
