@@ -111,17 +111,20 @@ check "5: --takeover -> fresher doc archived to history" yes \
   "$(grep -rq 'MARKER5' "$repo/.claude/handoff_history" 2>/dev/null && echo yes || echo no)"
 rm -rf "$repo"
 
-# --- 5b: --takeover over a PLACEHOLDER fresher doc -> discarded, not
-#         archived (rotate_existing_handoff deletes an unedited placeholder
-#         rather than archiving it — the stderr note must say so, not claim
-#         an archive path that will never exist) -------------------------
+# --- 5b: --takeover over a PLACEHOLDER fresher doc. Since #236 the guard
+#         does not fire for an uncurated placeholder at all, so --takeover
+#         is a no-op here: no guard block, and the placeholder is deleted by
+#         rotate_existing_handoff, never archived. (This case used to assert
+#         the takeover path's "will be DISCARDED" note; that branch is gone
+#         with the firing. The no-flag path is covered in
+#         test_guard_passes_placeholder_236.sh.) ----------------------------
 repo="$(mk_repo_gitignored)"
 plant_doc "$repo" "$(writer_marker sidB 3000)" no
 plant_origin "$repo" sidA 500
 rc=0
 err="$( cd "$repo" && bash "$WH" --session-id sidA --takeover 2>&1 >/dev/null )"; rc=$?
 check "5b: --takeover over placeholder -> exit 0" 0 "$rc"
-check "5b: --takeover over placeholder -> 'discarded' note" yes "$(has "$err" "will be DISCARDED, not archived")"
+check "5b: --takeover over placeholder -> guard does not fire" no "$(has "$err" "CROSS-SESSION OVERWRITE GUARD")"
 check "5b: --takeover over placeholder -> no bogus archive-path claim" no "$(has "$err" "will be archived")"
 check "5b: --takeover over placeholder -> nothing actually archived" 0 "$(hist_count "$repo")"
 rm -rf "$repo"

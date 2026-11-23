@@ -59,7 +59,10 @@
 # (never --restamp, never an --if-curated safety net) when the current
 # handoff was authored by a DIFFERENT session AND its write-time stamp is
 # LATER than this session's own recorded start (handoff_session_start.sh) —
-# i.e. this session is the stale one. HANDOFF_OVERWRITE_GUARD=block (default)
+# i.e. this session is the stale one. It does not fire when that later doc
+# holds no curated content of its own (#236): placeholder Notes with no
+# curated Rules, or placeholder Notes plus carried-forward Rules while
+# history is kept. HANDOFF_OVERWRITE_GUARD=block (default)
 # refuses with exit 3 unless --takeover; =warn prints the same notice and
 # proceeds; =off disables it.
 #
@@ -1542,7 +1545,28 @@ if (( ! IF_CURATED )) && [[ "$overwrite_guard_mode" != off && -n "$writer_sessio
     handoff_origin_epoch_for_sid "$writer_session_id" "$backup_dir"
   fi
   if [[ -n "$origin_epoch" ]] && (( doc_write_epoch > origin_epoch )); then
-    overwrite_guard_fired=1
+    # The guard exists to protect a later session's CURATED handoff (#63). A
+    # later session that ended without /handoff leaves only a safety-net
+    # placeholder, and a desktop sub-session or /btw fork opened from a
+    # long-running session is exactly such a later session: its placeholder
+    # locked the parent, which holds the real context, out of its own
+    # /handoff (#236). So the guard does not fire when this write loses no
+    # curated content:
+    #   - placeholder Notes and no curated Rules: rotate_existing_handoff
+    #     deletes that doc on any write anyway;
+    #   - placeholder Notes plus Rules a stale refresh CARRIED in, when
+    #     history is kept: this write carries nothing, so rotation archives
+    #     the doc and the fences stay on disk. With HANDOFF_HISTORY_KEEP=0
+    #     nothing would be archived, so the guard still fires there.
+    # Curated Notes, or Rules curated in that doc itself, fire as before.
+    if handoff_is_unedited_placeholder "$handoff_path" \
+       && ! handoff_rules_curated "$handoff_path"; then
+      echo "write_handoff.sh: overwrite guard: $handoff_relpath was written by a later session ($doc_author_id) but holds only an uncurated placeholder; replacing it." >&2
+    elif [[ "$HISTORY_KEEP" -gt 0 ]] && handoff_is_carried_only "$handoff_path"; then
+      echo "write_handoff.sh: overwrite guard: $handoff_relpath was written by a later session ($doc_author_id) but holds only placeholder Notes and carried-forward Rules; archiving it under $history_relpath and replacing it." >&2
+    else
+      overwrite_guard_fired=1
+    fi
   fi
 fi
 if (( overwrite_guard_fired )); then
@@ -1563,12 +1587,10 @@ if (( overwrite_guard_fired )); then
     echo "  HANDOFF_OVERWRITE_GUARD=warn: proceeding anyway." >&2
   elif (( TAKEOVER )); then
     echo "  --takeover: proceeding anyway." >&2
-    # rotate_existing_handoff DELETES an outgoing unedited placeholder rather
-    # than archiving it (it carries no curated prose to preserve) — the
-    # "will be archived" wording below must not claim otherwise for that case.
-    if handoff_is_unedited_placeholder "$handoff_path" && ! handoff_rules_curated "$handoff_path"; then
-      echo "  the fresher $handoff_relpath is an uncurated placeholder (no curated prose) and will be DISCARDED, not archived." >&2
-    elif [[ "$HISTORY_KEEP" -gt 0 ]]; then
+    # An uncurated placeholder never reaches this point: the guard does not
+    # fire for one (#236), so every doc here has curated content that
+    # rotate_existing_handoff archives when history is kept.
+    if [[ "$HISTORY_KEEP" -gt 0 ]]; then
       to_mtime="$(stat -c %Y "$handoff_path" 2>/dev/null || stat -f %m "$handoff_path" 2>/dev/null || true)"
       to_stamp=""
       if [[ "$to_mtime" =~ ^[0-9]+$ ]]; then
